@@ -19,6 +19,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -106,13 +107,25 @@ def fetch_positions(user: str, limit: int = 500, offset: int = 0) -> List[Dict[s
 
 
 def trade_key(evt: Dict[str, Any]) -> str:
+    def normalize_decimal(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            d = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return str(value)
+        normalized = format(d.normalize(), "f")
+        if "." in normalized:
+            normalized = normalized.rstrip("0").rstrip(".")
+        return normalized
+
     # Dedup key: combine tx hash + core fields to be safe.
     tx = str(evt.get("transactionHash", ""))
     asset = str(evt.get("asset", ""))
     side = str(evt.get("side", ""))
-    ts = str(evt.get("timestamp", ""))
-    size = str(evt.get("size", ""))
-    price = str(evt.get("price", ""))
+    ts = str(int(evt.get("timestamp", 0) or 0))
+    size = normalize_decimal(evt.get("size", ""))
+    price = normalize_decimal(evt.get("price", ""))
     outcome_index = str(evt.get("outcomeIndex", ""))
     condition_id = str(evt.get("conditionId", ""))
     return f"{tx}|{asset}|{side}|{ts}|{condition_id}|{outcome_index}|{size}|{price}"
@@ -126,7 +139,7 @@ def position_key(condition_id: str, outcome_index: int) -> str:
 class State:
     last_ts: int = 0
     seen_keys: List[str] = field(default_factory=list)
-    pos_sizes: Dict[str, float] = field(default_factory=dict)
+    pos_sizes: Dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     def load(path: Path) -> "State":
@@ -136,7 +149,7 @@ class State:
         return State(
             last_ts=int(data.get("last_ts", 0) or 0),
             seen_keys=list(data.get("seen_keys", [])),
-            pos_sizes={k: float(v) for k, v in dict(data.get("pos_sizes", {})).items()},
+            pos_sizes={k: str(v) for k, v in dict(data.get("pos_sizes", {})).items()},
         )
 
     def save(self, path: Path) -> None:
@@ -190,7 +203,7 @@ def seed_state(state: State) -> None:
         for p in positions:
             cid = str(p.get("conditionId", ""))
             oi = int(p.get("outcomeIndex", -1))
-            state.pos_sizes[position_key(cid, oi)] = float(p.get("size", 0.0) or 0.0)
+            state.pos_sizes[position_key(cid, oi)] = str(p.get("size", 0.0) or 0.0)
     except Exception:
         pass
 
@@ -239,41 +252,59 @@ def run_once() -> None:
             pk = position_key(condition_id, outcome_index)
 
             side = str(evt.get("side", "")).upper().strip()
-            size_tokens = float(evt.get("size", 0.0) or 0.0)
+            try:
+                size_tokens = Decimal(str(evt.get("size", 0.0) or 0.0))
+            except (InvalidOperation, ValueError):
+                size_tokens = Decimal(0)
 
-            before = float(state.pos_sizes.get(pk, 0.0) or 0.0)
+            try:
+                before = Decimal(state.pos_sizes.get(pk, "0"))
+            except (InvalidOperation, ValueError):
+                before = Decimal(0)
             after = before
             label = None
 
             if side == "BUY":
                 after = before + size_tokens
-                if before == 0.0 and after > 0.0:
+                if before == 0 and after > 0:
                     label = "OPEN"
             elif side == "SELL":
-                after = max(before - size_tokens, 0.0)
-                if before > 0.0 and after == 0.0:
+                after = max(before - size_tokens, Decimal(0))
+                if before > 0 and after == 0:
                     label = "CLOSE"
 
-            state.pos_sizes[pk] = after
+            state.pos_sizes[pk] = format(after, "f")
 
             if label:
                 title = str(evt.get("title", "(unknown market)")).strip()
                 outcome = str(evt.get("outcome", "")).strip()
 
                 usdc = evt.get("usdcSize", None)
-                price = float(evt.get("price", 0.0) or 0.0)
-                usdc_amt = float(usdc) if usdc is not None else (size_tokens * price)
+                try:
+                    price = Decimal(str(evt.get("price", 0.0) or 0.0))
+                except (InvalidOperation, ValueError):
+                    price = Decimal(0)
+                if usdc is not None:
+                    try:
+                        usdc_amt = float(Decimal(str(usdc)))
+                    except (InvalidOperation, ValueError):
+                        usdc_amt = float(size_tokens * price)
+                else:
+                    usdc_amt = float(size_tokens * price)
 
                 when = unix_to_dt(ts).strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "unknown time"
                 tx = str(evt.get("transactionHash", "")).strip()
                 tx_url = f"https://polygonscan.com/tx/{tx}" if tx else ""
 
+                shares_str = f"{size_tokens.quantize(Decimal('0.0001')):,}"
+                before_str = f"{before.quantize(Decimal('0.0001')):,}"
+                after_str = f"{after.quantize(Decimal('0.0001')):,}"
                 msg = (
                     f"**{label}** — {side} {outcome}\n"
                     f"{title}\n"
                     f"{when}\n"
-                    f"Amount: **${usdc_amt:,.2f}** | Shares: {size_tokens:,.4f}\n"
-                    f"Position: {before:,.4f} → {after:,.4f}\n"
+                    f"Amount: **${usdc_amt:,.2f}** | Shares: {shares_str}\n"
+                    f"Position: {before_str} → {after_str}\n"
                     f"{tx_url}"
                 )
                 post_discord(msg)
@@ -287,11 +318,11 @@ def run_once() -> None:
     if RESYNC_POSITIONS:
         try:
             positions = fetch_positions(TARGET_ADDRESS)
-            new_map: Dict[str, float] = {}
+            new_map: Dict[str, str] = {}
             for p in positions:
                 cid = str(p.get("conditionId", ""))
                 oi = int(p.get("outcomeIndex", -1))
-                new_map[position_key(cid, oi)] = float(p.get("size", 0.0) or 0.0)
+                new_map[position_key(cid, oi)] = str(p.get("size", 0.0) or 0.0)
             state.pos_sizes = new_map
         except Exception:
             pass
