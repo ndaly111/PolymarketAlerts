@@ -14,7 +14,7 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -48,4 +48,4 @@ jobs:
           TARGET_ADDRESS: "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
           STATE_FILE: ".state/polymarket_state.json"
           RESYNC_POSITIONS: "1"
-        run: python polymarket_watch_once.py
+        run: python -u polymarket_watch_once.py
