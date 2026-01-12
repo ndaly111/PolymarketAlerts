@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-01-12T12:00:00Z",
+  "games": [
+    {
+      "start_time": "2026-01-12T20:15:00Z",
+      "league": "NFL",
+      "team_a": "Houston Texans",
+      "team_b": "Dallas Cowboys",
+      "abbr_a": "HOU",
+      "abbr_b": "DAL",
+      "ml_a": -300,
+      "ml_b": 250
+    },
+    {
+      "start_time": "2026-09-05T00:30:00Z",
+      "league": "NCAAF",
+      "team_a": "#3 Ohio State (10-2)",
+      "team_b": "Notre Dame",
+      "abbr_a": "OSU",
+      "abbr_b": "ND",
+      "ml_a": -210,
+      "ml_b": 180
+    }
+  ]
+}

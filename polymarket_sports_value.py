@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+"""
+Polymarket sports moneyline value scanner.
+
+- Pulls active SPORTS moneyline markets from the Polymarket Gamma API.
+- Converts Polymarket implied probabilities -> American moneyline odds.
+- Loads sportsbook moneylines from JSON (local file or URL).
+- Matches games and ranks the biggest mispricings under configured filters.
+- Posts ONE Discord message (top-N) via webhook.
+
+This script does NOT place trades.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import os
+import re
+from zoneinfo import ZoneInfo
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+
+# Discord
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+DISCORD_MENTION = os.getenv("DISCORD_MENTION", "").strip()
+
+# Sportsbook odds input
+SPORTSBOOK_ODDS_URL = os.getenv("SPORTSBOOK_ODDS_URL", "").strip()
+SPORTSBOOK_ODDS_FILE = Path(os.getenv("SPORTSBOOK_ODDS_FILE", "data/sportsbook_odds.json"))
+
+# Output
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "reports"))
+
+# Filters / ranking
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not str(value).strip():
+        return default
+    return int(value)
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not str(value).strip():
+        return default
+    return float(value)
+
+
+TOP_N = env_int("TOP_N", 20)
+MIN_EDGE = env_float("MIN_EDGE", 0.03)  # prob gap threshold (e.g., 0.03 = 3%)
+GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets" tag
+SPORTSBOOK_MAX_UNDERDOG = env_int("SPORTSBOOK_MAX_UNDERDOG", 200)
+POLYMARKET_MAX_FAVORITE = env_int("POLYMARKET_MAX_FAVORITE", -300)
+TIME_WINDOW_HOURS = env_int("TIME_WINDOW_HOURS", 36)
+INCLUDE_DEBUG_SUMMARY = env_int("INCLUDE_DEBUG_SUMMARY", 1)  # 1=yes, 0=no
+DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
+
+# Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
+MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
+
+REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 25)
+
+def make_session() -> requests.Session:
+    s = requests.Session()
+    retries = Retry(
+        total=6,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update({"Accept": "application/json", "User-Agent": "polymarket-sports-value/1.0"})
+    return s
+
+
+SESSION = make_session()
+
+
+def http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    r = SESSION.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} GET {url}: {r.text[:300]}")
+    return r.json()
+
+
+def gamma_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    return http_get_json(f"{GAMMA_API_BASE}{path}", params=params)
+
+
+def parse_json_list(value: Any) -> List[Any]:
+    """
+    Gamma returns some list fields as JSON-encoded strings.
+    Examples: outcomes, outcomePrices, clobTokenIds, etc.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        v = value.strip()
+        if not v:
+            return []
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            # fallback: treat as comma-separated
+            v = v.strip("[]")
+            return [x.strip().strip('"').strip("'") for x in v.split(",") if x.strip()]
+    return []
+
+
+def iso_to_dt(s: Any) -> Optional[datetime]:
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        # handle trailing "Z"
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+ET_TZ = ZoneInfo("America/New_York")
+
+
+def fmt_start_time(dt: Optional[datetime]) -> str:
+    """
+    Return an Eastern Time string (EST/EDT) that’s easy to read in Discord/logs.
+    Example: 2026-01-12 03:15 PM EST
+    """
+    if not dt:
+        return ""
+    try:
+        local = dt.astimezone(ET_TZ)
+        return local.strftime("%Y-%m-%d %I:%M %p %Z")
+    except Exception:
+        # fallback: show UTC ISO if something weird happens
+        return dt.isoformat().replace("+00:00", "Z")
+
+
+def normalize_league(league: str) -> str:
+    """
+    Make sportsbook league strings consistent for display + matching context.
+    This is intentionally simple: it improves stability across different feeds
+    without requiring team alias maintenance.
+    """
+    s = (league or "").strip().lower()
+    if not s:
+        return ""
+    # common sportsbook identifiers
+    if "nfl" in s:
+        return "NFL"
+    if "ncaaf" in s or ("college" in s and "football" in s):
+        return "NCAAF"
+    if "ncaab" in s or ("college" in s and ("basketball" in s or "hoops" in s)):
+        return "NCAAB"
+    if "nba" in s:
+        return "NBA"
+    if "nhl" in s:
+        return "NHL"
+    if "mlb" in s:
+        return "MLB"
+    return (league or "").strip().upper()
+
+
+def clean_team_text(name: str) -> str:
+    text = (name or "").strip()
+    if not text:
+        return ""
+
+    text = text.replace("&", "and")
+    text = re.sub(r"^\s*(#\d+|\(\d+\)|No\.\s*\d+)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(\d+\s*-\s*\d+[^)]*\)", "", text)
+    text = re.sub(r"\b(university|college|univ|the)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def canon(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+GENERIC_OUTCOMES = {"yes", "no", "home", "away", "draw", "tie"}
+
+
+def team_tokens(name: str) -> set[str]:
+    """
+    Lightweight tokenization for matching ONLY.
+    Display always uses Polymarket's raw team strings.
+    """
+    cleaned = clean_team_text(name).lower()
+    if not cleaned:
+        return set()
+    toks = [t for t in re.split(r"\s+", cleaned) if t]
+    toks = [re.sub(r"[^a-z0-9]+", "", t) for t in toks]
+    toks = [t for t in toks if t]
+    return set(toks)
+
+
+def overlap_coeff(a: set[str], b: set[str]) -> float:
+    """
+    Intersection / min(|A|, |B|). Works well for cases like:
+      {"texans"} vs {"houston","texans"} => 1.0
+      {"ohio","state"} vs {"ohio","state","buckeyes"} => 1.0
+    """
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    denom = min(len(a), len(b))
+    return inter / denom if denom else 0.0
+
+
+MATCH_MIN_OVERLAP = env_float("MATCH_MIN_OVERLAP", 0.80)
+
+
+def moneyline_to_prob(ml: int) -> float:
+    """
+    Convert American odds to implied probability (WITH vig).
+    """
+    if ml < 0:
+        return (-ml) / ((-ml) + 100.0)
+    return 100.0 / (ml + 100.0)
+
+
+def prob_to_moneyline(p: float) -> Optional[int]:
+    """
+    Convert probability to American odds.
+    """
+    if p <= 0 or p >= 1:
+        return None
+    if p >= 0.5:
+        ml = -100.0 * p / (1.0 - p)
+    else:
+        ml = 100.0 * (1.0 - p) / p
+    return int(round(ml))
+
+
+@dataclass(frozen=True)
+class PolyMoneylineMarket:
+    slug: str
+    url: str
+    start_time: Optional[datetime]
+    team1: str
+    team2: str
+    prob1: float
+    prob2: float
+    ml1: Optional[int]
+    ml2: Optional[int]
+
+
+@dataclass(frozen=True)
+class SportsbookGame:
+    start_time: Optional[datetime]
+    team_a: str
+    team_b: str
+    ml_a: int
+    ml_b: int
+    league: str = ""
+    abbr_a: str = ""
+    abbr_b: str = ""
+
+
+def get_moneyline_types() -> List[str]:
+    """
+    Determine which Gamma sports_market_types correspond to moneyline markets.
+    If MONEYLINE_TYPES env is set, use that (comma-separated).
+    Otherwise, call /sports/market-types and keep anything containing MONEY+LINE.
+    """
+    if MONEYLINE_TYPES:
+        return [t.strip() for t in MONEYLINE_TYPES.split(",") if t.strip()]
+
+    try:
+        types = gamma_get("/sports/market-types")
+        found: List[str] = []
+        if isinstance(types, list):
+            for item in types:
+                if isinstance(item, str):
+                    name = item
+                elif isinstance(item, dict):
+                    name = str(
+                        item.get("name")
+                        or item.get("type")
+                        or item.get("sportsMarketType")
+                        or item.get("label")
+                        or ""
+                    )
+                else:
+                    name = str(item)
+
+                up = name.upper()
+                if "MONEY" in up and "LINE" in up:
+                    found.append(name)
+
+        # fallback if the endpoint returns something unexpected
+        return found or ["MONEYLINE"]
+    except Exception:
+        return ["MONEYLINE"]
+
+
+def fetch_polymarket_moneylines() -> List[PolyMoneylineMarket]:
+    """
+    Fetch all active, unclosed sports moneyline markets.
+    Uses Gamma GET /markets with filters:
+      - active=true
+      - closed=false
+      - tag_id=GAME_BETS_TAG_ID
+      - sports_market_types=[moneyline types]
+    """
+    ml_types = get_moneyline_types()
+
+    markets: List[PolyMoneylineMarket] = []
+    limit = 500
+    offset = 0
+
+    while True:
+        params: Dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "active": True,
+            "closed": False,
+            "tag_id": GAME_BETS_TAG_ID,
+            # requests encodes lists as repeated query params
+            "sports_market_types": ml_types,
+        }
+
+        batch = gamma_get("/markets", params=params)
+        if not isinstance(batch, list) or not batch:
+            break
+
+        for m in batch:
+            # Parse outcomes + prices
+            outcomes = parse_json_list(m.get("outcomes"))
+            prices = parse_json_list(m.get("outcomePrices"))
+
+            if len(outcomes) != 2 or len(prices) != 2:
+                continue
+
+            o1, o2 = str(outcomes[0]), str(outcomes[1])
+            # Skip generic outcomes (not readable as teams)
+            if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
+                continue
+
+            try:
+                p1 = float(prices[0])
+                p2 = float(prices[1])
+            except Exception:
+                continue
+
+            if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
+                continue
+
+            slug = str(m.get("slug") or "").strip()
+            url = f"https://polymarket.com/market/{slug}" if slug else ""
+
+            start_time = iso_to_dt(
+                m.get("eventStartTime")
+                or m.get("gameStartTime")
+                or m.get("startDateIso")
+                or m.get("startDate")
+            )
+
+            markets.append(
+                PolyMoneylineMarket(
+                    slug=slug,
+                    url=url,
+                    start_time=start_time,
+                    team1=o1,
+                    team2=o2,
+                    prob1=p1,
+                    prob2=p2,
+                    ml1=prob_to_moneyline(p1),
+                    ml2=prob_to_moneyline(p2),
+                )
+            )
+
+        if len(batch) < limit:
+            break
+        offset += limit
+
+    return markets
+
+
+def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # CSV snapshot
+    csv_path = OUTPUT_DIR / "polymarket_moneylines.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(
+            [
+                "start_time_utc",
+                "team1",
+                "team2",
+                "prob1",
+                "prob2",
+                "ml1",
+                "ml2",
+                "url",
+                "slug",
+            ]
+        )
+        for m in sorted(
+            markets,
+            key=lambda x: (x.start_time or datetime.max.replace(tzinfo=timezone.utc), x.slug),
+        ):
+            w.writerow(
+                [
+                    (m.start_time.isoformat().replace("+00:00", "Z") if m.start_time else ""),
+                    m.team1,
+                    m.team2,
+                    f"{m.prob1:.6f}",
+                    f"{m.prob2:.6f}",
+                    m.ml1 if m.ml1 is not None else "",
+                    m.ml2 if m.ml2 is not None else "",
+                    m.url,
+                    m.slug,
+                ]
+            )
+
+    # JSON snapshot
+    json_path = OUTPUT_DIR / "polymarket_moneylines.json"
+    json_path.write_text(
+        json.dumps(
+            [
+                {
+                    "start_time_utc": (m.start_time.isoformat().replace("+00:00", "Z") if m.start_time else None),
+                    "team1": m.team1,
+                    "team2": m.team2,
+                    "prob1": m.prob1,
+                    "prob2": m.prob2,
+                    "ml1": m.ml1,
+                    "ml2": m.ml2,
+                    "url": m.url,
+                    "slug": m.slug,
+                }
+                for m in markets
+            ],
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def load_sportsbook_games() -> List[SportsbookGame]:
+    """
+    Expected JSON formats (either is fine):
+
+    1) {"games": [ ... ]}
+    2) [ ... ]  # list of game objects
+
+    Each game object can be:
+      {
+        "start_time": "2026-01-12T20:15:00Z",
+        "team_a": "Houston Texans",
+        "team_b": "Dallas Cowboys",
+        "ml_a": -300,
+        "ml_b": +250
+      }
+
+    OR (common alt field names):
+      {
+        "commence_time": "...",
+        "home_team": "...",
+        "away_team": "...",
+        "home_ml": -300,
+        "away_ml": 250
+      }
+    """
+    if SPORTSBOOK_ODDS_URL:
+        raw = http_get_json(SPORTSBOOK_ODDS_URL)
+    else:
+        if not SPORTSBOOK_ODDS_FILE.exists():
+            raise RuntimeError(
+                f"Sportsbook odds file not found: {SPORTSBOOK_ODDS_FILE}. "
+                f"Either commit it, or set SPORTSBOOK_ODDS_URL."
+            )
+        raw = json.loads(SPORTSBOOK_ODDS_FILE.read_text(encoding="utf-8"))
+
+    games_blob = raw.get("games") if isinstance(raw, dict) else raw
+    if not isinstance(games_blob, list):
+        raise RuntimeError("Sportsbook odds JSON must be a list or {\"games\": [...]}")
+
+    out: List[SportsbookGame] = []
+
+    for g in games_blob:
+        if not isinstance(g, dict):
+            continue
+
+        start = iso_to_dt(g.get("start_time") or g.get("commence_time") or g.get("startTime"))
+
+        # team names
+        a = str(g.get("team_a") or g.get("home_team") or g.get("homeTeam") or "").strip()
+        b = str(g.get("team_b") or g.get("away_team") or g.get("awayTeam") or "").strip()
+
+        league = normalize_league(str(g.get("league") or g.get("sport") or g.get("competition") or "").strip())
+        abbr_a = str(g.get("abbr_a") or g.get("team_a_abbr") or g.get("home_abbr") or "").strip()
+        abbr_b = str(g.get("abbr_b") or g.get("team_b_abbr") or g.get("away_abbr") or "").strip()
+
+        # moneylines
+        ml_a = g.get("ml_a")
+        ml_b = g.get("ml_b")
+
+        # alt names
+        if ml_a is None:
+            ml_a = g.get("home_ml") or g.get("homeMoneyline")
+        if ml_b is None:
+            ml_b = g.get("away_ml") or g.get("awayMoneyline")
+
+        # ensure ints
+        try:
+            ml_a = int(ml_a)
+            ml_b = int(ml_b)
+        except Exception:
+            continue
+
+        if not a or not b:
+            continue
+
+        out.append(
+            SportsbookGame(
+                start_time=start,
+                team_a=a,
+                team_b=b,
+                ml_a=ml_a,
+                ml_b=ml_b,
+                league=league,
+                abbr_a=abbr_a,
+                abbr_b=abbr_b,
+            )
+        )
+
+    return out
+
+
+def match_sportsbook_game(
+    poly: PolyMoneylineMarket, books: List[SportsbookGame]
+) -> Optional[Tuple[int, SportsbookGame]]:
+    """
+    Match by lightweight token overlap + time proximity.
+    No aliases/uniforming; this is only to align sportsbook odds with Polymarket outcomes.
+    """
+    for idx, sb in enumerate(books):
+        # If both have times, require proximity (avoids accidental collisions)
+        if poly.start_time and sb.start_time:
+            delta = abs((poly.start_time - sb.start_time).total_seconds())
+            if delta > TIME_WINDOW_HOURS * 3600:
+                continue
+
+        p1 = team_tokens(poly.team1)
+        p2 = team_tokens(poly.team2)
+        a = team_tokens(sb.team_a) | team_tokens(sb.abbr_a)
+        b = team_tokens(sb.team_b) | team_tokens(sb.abbr_b)
+
+        # direct mapping score and swapped mapping score
+        direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
+        swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
+
+        if max(direct, swapped) < (2 * MATCH_MIN_OVERLAP):
+            continue
+
+        return idx, sb
+
+    return None
+
+
+def post_discord(text: str) -> None:
+    if not DISCORD_WEBHOOK_URL:
+        raise RuntimeError("DISCORD_WEBHOOK_URL not set (workflow should map secrets.DISCORD_SPORTS_ALERT).")
+
+    content = f"{DISCORD_MENTION}\n{text}" if DISCORD_MENTION else text
+
+    # Keep it to one alert; if we overflow, hard-trim (still one message).
+    if len(content) > 1900:
+        content = content[:1890] + "\n…(trimmed)"
+
+    payload = {"content": content, "allowed_mentions": {"parse": ["users", "roles", "everyone"]}}
+    r = SESSION.post(DISCORD_WEBHOOK_URL, json=payload, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Discord webhook HTTP {r.status_code}: {r.text[:200]}")
+
+
+def compute_value_rankings(
+    polys: List[PolyMoneylineMarket], books: List[SportsbookGame]
+) -> Tuple[List[Dict[str, Any]], List[PolyMoneylineMarket], List[SportsbookGame], List[str]]:
+    """
+    For each matched game:
+      - compute de-vig fair probs from sportsbook moneylines
+      - evaluate both sides with filtering
+      - compute edge = p_fair - p_poly
+      - keep if edge >= MIN_EDGE and value_rel criteria
+    """
+    rows: List[Dict[str, Any]] = []
+    skipped_reasons: List[str] = []
+    matched_books: set[int] = set()
+    unmatched_polys: List[PolyMoneylineMarket] = []
+
+    for pm in polys:
+        matched = match_sportsbook_game(pm, books)
+        if not matched:
+            unmatched_polys.append(pm)
+            continue
+        sb_index, sb = matched
+        matched_books.add(sb_index)
+
+        # implied probs (with vig)
+        p_a_raw = moneyline_to_prob(sb.ml_a)
+        p_b_raw = moneyline_to_prob(sb.ml_b)
+
+        denom = p_a_raw + p_b_raw
+        if denom <= 0:
+            continue
+
+        # de-vig fair probs
+        p_a = p_a_raw / denom
+        p_b = p_b_raw / denom
+
+        sb_league = normalize_league(sb.league or "")
+        # Determine which sportsbook side maps to which Polymarket outcome using the same token overlap approach.
+        p1 = team_tokens(pm.team1)
+        p2 = team_tokens(pm.team2)
+        a = team_tokens(sb.team_a) | team_tokens(sb.abbr_a)
+        b = team_tokens(sb.team_b) | team_tokens(sb.abbr_b)
+        direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
+        swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
+        if max(direct, swapped) < (2 * MATCH_MIN_OVERLAP):
+            skipped_reasons.append(f"Low match confidence: {sb.team_a} vs {sb.team_b} <-> {pm.team1} vs {pm.team2}")
+            continue
+
+        # Map sportsbook odds/probs to Polymarket outcomes (team1/team2) for legible output.
+        if direct >= swapped:
+            sb_ml_1, sb_p_1 = sb.ml_a, p_a
+            sb_ml_2, sb_p_2 = sb.ml_b, p_b
+        else:
+            sb_ml_1, sb_p_1 = sb.ml_b, p_b
+            sb_ml_2, sb_p_2 = sb.ml_a, p_a
+
+        start = pm.start_time or sb.start_time
+        start_s = fmt_start_time(start)
+        # Always show Polymarket's team strings exactly (what you asked for).
+        matchup = f"{pm.team1} vs {pm.team2}"
+
+        candidates = [
+            {
+                "team": pm.team1,
+                "sportsbook_ml": sb_ml_1,
+                "sportsbook_fair_prob": sb_p_1,
+                "polymarket_prob": pm.prob1,
+                "polymarket_ml": pm.ml1,
+            },
+            {
+                "team": pm.team2,
+                "sportsbook_ml": sb_ml_2,
+                "sportsbook_fair_prob": sb_p_2,
+                "polymarket_prob": pm.prob2,
+                "polymarket_ml": pm.ml2,
+            },
+        ]
+
+        for candidate in candidates:
+            sportsbook_ml = candidate["sportsbook_ml"]
+            # "less than +200" means exclude +200 exactly (and beyond)
+            if sportsbook_ml >= SPORTSBOOK_MAX_UNDERDOG:
+                continue
+
+            polymarket_ml = candidate["polymarket_ml"]
+            # "greater than -300" means exclude -300 exactly (and more negative)
+            if polymarket_ml is None or polymarket_ml <= POLYMARKET_MAX_FAVORITE:
+                continue
+
+            sportsbook_fair_prob = candidate["sportsbook_fair_prob"]
+            if sportsbook_fair_prob <= 0:
+                continue
+
+            polymarket_prob = candidate["polymarket_prob"]
+            edge_abs = sportsbook_fair_prob - polymarket_prob
+            if edge_abs < MIN_EDGE:
+                continue
+
+            value_rel = edge_abs / sportsbook_fair_prob
+
+            rows.append(
+                {
+                    "league": sb_league,
+                    "matchup": matchup,
+                    "recommended_side": candidate["team"],
+                    "start_time_et": start_s,
+                    "sportsbook_ml": sportsbook_ml,
+                    "polymarket_ml": polymarket_ml,
+                    "sportsbook_fair_prob": sportsbook_fair_prob,
+                    "polymarket_prob": polymarket_prob,
+                    "edge_abs": edge_abs,
+                    "value_rel": value_rel,
+                    "polymarket_url": pm.url,
+                }
+            )
+
+    unmatched_books = [sb for idx, sb in enumerate(books) if idx not in matched_books]
+    # stable-ish: value first, then absolute edge
+    rows.sort(key=lambda r: (r["value_rel"], r["edge_abs"]), reverse=True)
+    return rows, unmatched_polys, unmatched_books, skipped_reasons
+
+
+def write_value_reports(rows: List[Dict[str, Any]]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Full ranking CSV
+    csv_path = OUTPUT_DIR / "value_rankings.csv"
+    cols = [
+        "league",
+        "matchup",
+        "recommended_side",
+        "start_time_et",
+        "sportsbook_ml",
+        "polymarket_ml",
+        "sportsbook_fair_prob",
+        "polymarket_prob",
+        "edge_abs",
+        "value_rel",
+        "polymarket_url",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+    # Top-N text file (human readable)
+    top = rows[:TOP_N]
+    txt_path = OUTPUT_DIR / "value_topN.txt"
+    lines: List[str] = []
+    lines.append(f"Top {TOP_N} Polymarket value")
+    lines.append(
+        "Filters: "
+        f"sportsbook_ml < {SPORTSBOOK_MAX_UNDERDOG}, "
+        f"polymarket_ml > {POLYMARKET_MAX_FAVORITE}, "
+        f"min edge >= {MIN_EDGE:.1%}"
+    )
+    lines.append("")
+    for i, r in enumerate(top, 1):
+        pm_ml_s = str(r["polymarket_ml"]) if r["polymarket_ml"] is not None else "n/a"
+        league_prefix = f"{r['league']} - " if r.get("league") else ""
+        lines.append(
+            f"{i:>2}. {league_prefix}{r['matchup']} @ {r['start_time_et']}\n"
+            f"    Side: {r['recommended_side']} | "
+            f"SB: {r['sportsbook_ml']}  |  PM: {pm_ml_s}  |  "
+            f"value: {r['value_rel']:+.1%}  |  edge: {r['edge_abs']:+.1%}  |  {r['polymarket_url']}"
+        )
+    txt_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def format_discord_message(rows: List[Dict[str, Any]], polymarket_count: int, sportsbook_count: int) -> str:
+    top = rows[:TOP_N]
+
+    header = (
+        f"**Polymarket vs Sportsbooks — Top {TOP_N} value edges**\n"
+        f"Polymarket moneylines scanned: {polymarket_count} | Sportsbook games loaded: {sportsbook_count}\n"
+        f"Filters: sportsbook_ml < {SPORTSBOOK_MAX_UNDERDOG}, "
+        f"polymarket_ml > {POLYMARKET_MAX_FAVORITE}, min edge ≥ {MIN_EDGE:.1%}\n"
+    )
+
+    if not top:
+        return header + "\nNo qualifying edges found today."
+
+    lines: List[str] = [header]
+    for i, r in enumerate(top, 1):
+        pm_ml_s = str(r["polymarket_ml"]) if r["polymarket_ml"] is not None else "n/a"
+        start = r["start_time_et"] or "unknown"
+        league_prefix = f"{r['league']} - " if r.get("league") else ""
+        lines.append(
+            f"{i}. **{league_prefix}{r['matchup']}**\n"
+            f"- Start: {start}\n"
+            f"- Side: {r['recommended_side']}\n"
+            f"- Sportsbooks ML: {r['sportsbook_ml']}\n"
+            f"- Polymarket ML: {pm_ml_s}\n"
+            f"- Value: {r['value_rel']:+.1%} | Edge: {r['edge_abs']:+.1%}\n"
+            f"{r['polymarket_url']}"
+        )
+
+    # Optional lightweight debug footer (helps you confirm matching volume without digging into artifacts)
+    if INCLUDE_DEBUG_SUMMARY:
+        lines.append("")
+        lines.append(f"_Debug: scored {len(rows)} edges (top {TOP_N}); see artifact reports/ for full CSVs._")
+
+    return "\n".join(lines)
+
+
+def write_unmatched_reports(
+    unmatched_polys: List[PolyMoneylineMarket], unmatched_books: List[SportsbookGame]
+) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    poly_path = OUTPUT_DIR / "unmatched_polymarket.csv"
+    with poly_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["start_time_et", "team1", "team2", "url", "slug"])
+        for pm in unmatched_polys:
+            start_s = fmt_start_time(pm.start_time)
+            w.writerow([start_s, pm.team1, pm.team2, pm.url, pm.slug])
+
+    book_path = OUTPUT_DIR / "unmatched_sportsbook.csv"
+    with book_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["league", "start_time_et", "team_a", "team_b", "abbr_a", "abbr_b"])
+        for sb in unmatched_books:
+            start_s = fmt_start_time(sb.start_time)
+            w.writerow([sb.league, start_s, sb.team_a, sb.team_b, sb.abbr_a, sb.abbr_b])
+
+
+def main() -> None:
+    polys = fetch_polymarket_moneylines()
+    write_polymarket_snapshot(polys)
+
+    books = load_sportsbook_games()
+    rows, unmatched_polys, unmatched_books, _skips = compute_value_rankings(polys, books)
+    write_value_reports(rows)
+    write_unmatched_reports(unmatched_polys, unmatched_books)
+
+    msg = format_discord_message(rows, polymarket_count=len(polys), sportsbook_count=len(books))
+    post_discord(msg)
+
+
+if __name__ == "__main__":
+    main()
