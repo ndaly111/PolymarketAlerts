@@ -7,8 +7,8 @@ Runs every 15 minutes via GitHub Actions and posts Discord alerts when the monit
 ## Setup
 
 1) In GitHub repo: Settings → Secrets and variables → Actions → New repository secret
-   - Name: DISCORD_WEBHOOK_URL
-   - Value: (paste your Discord webhook URL)
+   - For the open/close watcher: `DISCORD_WEBHOOK_URL`
+   - For the sports value scan: `DISCORD_SPORTS_ALERT` (mapped to `DISCORD_WEBHOOK_URL` in the workflow)
 
 2) Go to Actions tab and enable workflows if prompted.
 
@@ -19,3 +19,17 @@ Runs every 15 minutes via GitHub Actions and posts Discord alerts when the monit
 ## iPhone Push
 
 Install the Discord iOS app and enable notifications for the channel/server.
+
+## Polymarket Sports Value Scan
+
+The `polymarket_sports_value.py` script pulls active Polymarket sports moneyline markets, compares them to sportsbook moneylines, and posts a single Discord message with the top value gaps. It also writes snapshots under `reports/` for auditing.
+
+**Inputs**
+- Provide sportsbook odds either via `SPORTSBOOK_ODDS_URL` (recommended) or a local `data/sportsbook_odds.json` file.
+- A sample format lives at `data/sportsbook_odds.sample.json`.
+- Team names in output are shown exactly as Polymarket provides them (no aliasing/uniforming).
+- Matching is lightweight (token overlap + time window). If a game can’t be matched, it still appears in `reports/unmatched_polymarket.csv` with teams + start time + URL.
+- Filters: `sportsbook_ml < +200` and `polymarket_ml > -300` (plus a minimum edge threshold).
+
+**Workflow**
+The `Polymarket Sports Value Scan` GitHub Action runs daily and can be triggered manually. It reads the Discord webhook from the `DISCORD_SPORTS_ALERT` secret and uploads the `reports/` directory as an artifact.
