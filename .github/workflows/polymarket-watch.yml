@@ -1,0 +1,49 @@
+name: Polymarket OPEN/CLOSE Alerts (@0x8dxd)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"  # every 15 minutes
+  workflow_dispatch: {}
+
+concurrency:
+  group: polymarket-watcher
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ensure state dir exists
+        run: mkdir -p .state
+
+      - name: Restore watcher state cache
+        uses: actions/cache@v4
+        with:
+          path: .state/polymarket_state.json
+          key: polymarket-state-${{ github.run_id }}
+          restore-keys: |
+            polymarket-state-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run watcher once
+        env:
+          # IMPORTANT: use the secret, not a URL in code
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Optional:
+          # DISCORD_MENTION: ${{ secrets.DISCORD_MENTION }}
+          TARGET_ADDRESS: "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
+          STATE_FILE: ".state/polymarket_state.json"
+          RESYNC_POSITIONS: "1"
+        run: python polymarket_watch_once.py
