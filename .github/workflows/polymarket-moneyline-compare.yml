@@ -6,9 +6,18 @@ on:
   workflow_dispatch:
     inputs:
       sport:
-        description: "Sportsbook sport key (e.g., americanfootball_nfl)"
+        description: "Sport key OR 'all' (scans major leagues)."
         required: false
-        default: "americanfootball_nfl"
+        default: "all"
+        type: choice
+        options:
+          - all
+          - americanfootball_nfl
+          - basketball_nba
+          - baseball_mlb
+          - icehockey_nhl
+          - americanfootball_ncaaf
+          - basketball_ncaab
       top_n:
         description: "Number of results to post"
         required: false
@@ -47,13 +56,13 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
-          SPORT="${{ github.event.inputs.sport || 'americanfootball_nfl' }}"
+          SPORT="${{ github.event.inputs.sport || 'all' }}"
           TOP="${{ github.event.inputs.top_n || '25' }}"
           MIN_EDGE="${{ github.event.inputs.min_edge_bps || '0' }}"
           DRY="${{ github.event.inputs.dry_run || 'false' }}"
 
           if [ "$DRY" = "true" ]; then
-            python polymarket_moneyline_compare.py --sport "$SPORT" --top "$TOP" --min-edge-bps "$MIN_EDGE" --dry-run
+            SPORT_KEYS="$SPORT" python polymarket_moneyline_compare.py --top "$TOP" --min-edge-bps "$MIN_EDGE" --dry-run
           else
-            python polymarket_moneyline_compare.py --sport "$SPORT" --top "$TOP" --min-edge-bps "$MIN_EDGE"
+            SPORT_KEYS="$SPORT" python polymarket_moneyline_compare.py --top "$TOP" --min-edge-bps "$MIN_EDGE"
           fi
