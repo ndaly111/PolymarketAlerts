@@ -4,6 +4,12 @@ Runs every 15 minutes via GitHub Actions and posts Discord alerts when the monit
 - OPENS a position (BUY when prior size was 0)
 - CLOSES a position (SELL that brings size to 0)
 
+## Workflows overview
+
+- Polymarket OPEN/CLOSE Alerts: runs every 15 minutes.
+- Polymarket Sports Value Scan: daily canonical scanner.
+- (LEGACY) Moneyline Compare: manual-only reference workflow.
+
 ## Setup
 
 1) In GitHub repo: Settings → Secrets and variables → Actions → New repository secret
@@ -23,6 +29,10 @@ Install the Discord iOS app and enable notifications for the channel/server.
 ## Polymarket Sports Value Scan
 
 The `polymarket_sports_value.py` script pulls active Polymarket sports moneyline markets, compares them to sportsbook moneylines, and posts a single Discord message with the top value gaps. It also writes snapshots under `reports/` for auditing.
+
+**Canonical workflow**
+- Use the `Polymarket Sports Value Scan` workflow for the daily scanner.
+- The legacy `Moneyline Compare` workflow exists for manual/reference use only and should not be scheduled.
 
 **Inputs**
 - Uses Polymarket Gamma API for markets and The Odds API (H2H / moneyline) for multi-book sportsbook pricing.
@@ -45,4 +55,5 @@ The `Polymarket Sports Value Scan` GitHub Action runs daily and can be triggered
 - `MIN_BOOKS` (int, default 3): minimum sportsbooks required to compute consensus
 - `ODDS_REGIONS` (string, default `us`)
 - `POLY_FALLBACK` (0/1, default 1): retry Polymarket fetch with looser filters if empty
+- `REQUIRE_OUTSIDE_RANGE` (0/1, default 1): require Polymarket moneyline to be outside sportsbook range
 - `GAME_BETS_TAG_ID` (int, default 100639): Polymarket tag filter (can be overridden)
