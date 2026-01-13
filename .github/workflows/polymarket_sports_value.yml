@@ -3,8 +3,9 @@ name: Polymarket Sports Value Scan
 on:
   workflow_dispatch:
   schedule:
-    # Runs daily at 13:15 UTC (~8:15am ET in winter)
-    - cron: "15 13 * * *"
+    # 6:00 AM America/New_York
+    # NOTE: GitHub Actions cron is UTC. In EST (winter), 6:00 AM ET = 11:00 UTC.
+    - cron: "0 11 * * *"
 
 jobs:
   scan:
@@ -29,12 +30,18 @@ jobs:
 
       - name: Run scanner
         env:
-          # IMPORTANT: this uses your repo secret name exactly:
+          THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT }}
 
           # Optional: set these as Repository Variables (Settings -> Secrets and variables -> Actions -> Variables)
           DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
-          SPORTSBOOK_ODDS_URL: ${{ vars.SPORTSBOOK_ODDS_URL }}
+          TOP_N: ${{ vars.TOP_N }}
+          DISCORD_TOP_N: ${{ vars.DISCORD_TOP_N }}
+          MIN_EDGE: ${{ vars.MIN_EDGE }}
+          TIME_WINDOW_HOURS: ${{ vars.TIME_WINDOW_HOURS }}
+          DRY_RUN: ${{ vars.DRY_RUN }}
+          INCLUDE_DEBUG_SUMMARY: ${{ vars.INCLUDE_DEBUG_SUMMARY }}
+          ODDS_SPORT_KEYS: ${{ vars.ODDS_SPORT_KEYS }}
         run: python polymarket_sports_value.py
 
       - name: Upload reports artifact

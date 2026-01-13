@@ -4,7 +4,7 @@ Polymarket sports moneyline value scanner.
 
 - Pulls active SPORTS moneyline markets from the Polymarket Gamma API.
 - Converts Polymarket implied probabilities -> American moneyline odds.
-- Loads sportsbook moneylines from JSON (local file or URL).
+- Loads sportsbook moneylines from The Odds API (moneyline consensus + range).
 - Matches games and ranks the biggest mispricings under configured filters.
 - Posts ONE Discord message (top-N) via webhook.
 
@@ -27,15 +27,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from oddsapi_moneyline import build_moneyline_board
+
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 # Discord
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 DISCORD_MENTION = os.getenv("DISCORD_MENTION", "").strip()
-
-# Sportsbook odds input
-SPORTSBOOK_ODDS_URL = os.getenv("SPORTSBOOK_ODDS_URL", "").strip()
-SPORTSBOOK_ODDS_FILE = Path(os.getenv("SPORTSBOOK_ODDS_FILE", "data/sportsbook_odds.json"))
 
 # Output
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "reports"))
@@ -56,6 +54,7 @@ def env_float(name: str, default: float) -> float:
 
 
 TOP_N = env_int("TOP_N", 20)
+DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
 MIN_EDGE = env_float("MIN_EDGE", 0.03)  # prob gap threshold (e.g., 0.03 = 3%)
 GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets" tag
 SPORTSBOOK_MAX_UNDERDOG = env_int("SPORTSBOOK_MAX_UNDERDOG", 200)
@@ -63,9 +62,13 @@ POLYMARKET_MAX_FAVORITE = env_int("POLYMARKET_MAX_FAVORITE", -300)
 TIME_WINDOW_HOURS = env_int("TIME_WINDOW_HOURS", 36)
 INCLUDE_DEBUG_SUMMARY = env_int("INCLUDE_DEBUG_SUMMARY", 1)  # 1=yes, 0=no
 DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
+DRY_RUN = env_int("DRY_RUN", 0)
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
+
+# Odds API sport keys override (comma-separated). If empty, use defaults.
+ODDS_SPORT_KEYS = [s.strip() for s in os.getenv("ODDS_SPORT_KEYS", "").split(",") if s.strip()]
 
 REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 25)
 
@@ -174,6 +177,16 @@ def normalize_league(league: str) -> str:
     return (league or "").strip().upper()
 
 
+SPORT_KEY_TO_LEAGUE = {
+    "americanfootball_nfl": "NFL",
+    "basketball_nba": "NBA",
+    "baseball_mlb": "MLB",
+    "icehockey_nhl": "NHL",
+    "americanfootball_ncaaf": "NCAAF",
+    "basketball_ncaab": "NCAAB",
+}
+
+
 def clean_team_text(name: str) -> str:
     text = (name or "").strip()
     if not text:
@@ -246,6 +259,23 @@ def prob_to_moneyline(p: float) -> Optional[int]:
     return int(round(ml))
 
 
+def is_outside_range(poly_odds: int, range_data: Dict[str, Any]) -> bool:
+    """
+    Determine if Polymarket moneyline is outside the sportsbook range.
+    Must be done in probability space (American odds are non-linear).
+    """
+    try:
+        min_p = float(range_data["min_prob"])
+        max_p = float(range_data["max_prob"])
+    except Exception:
+        return False
+
+    poly_p = moneyline_to_prob(poly_odds)
+    lo = min(min_p, max_p)
+    hi = max(min_p, max_p)
+    return poly_p < lo or poly_p > hi
+
+
 @dataclass(frozen=True)
 class PolyMoneylineMarket:
     slug: str
@@ -262,13 +292,18 @@ class PolyMoneylineMarket:
 @dataclass(frozen=True)
 class SportsbookGame:
     start_time: Optional[datetime]
-    team_a: str
-    team_b: str
-    ml_a: int
-    ml_b: int
-    league: str = ""
-    abbr_a: str = ""
-    abbr_b: str = ""
+    home_team: str
+    away_team: str
+    home_fair_prob: float
+    away_fair_prob: float
+    home_fair_ml: int
+    away_fair_ml: int
+    home_range: Dict[str, Any]
+    away_range: Dict[str, Any]
+    books_used: int
+    league: str
+    sport_key: str
+    per_book: List[Dict[str, Any]]
 
 
 def get_moneyline_types() -> List[str]:
@@ -455,90 +490,46 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
 
 
 def load_sportsbook_games() -> List[SportsbookGame]:
-    """
-    Expected JSON formats (either is fine):
-
-    1) {"games": [ ... ]}
-    2) [ ... ]  # list of game objects
-
-    Each game object can be:
-      {
-        "start_time": "2026-01-12T20:15:00Z",
-        "team_a": "Houston Texans",
-        "team_b": "Dallas Cowboys",
-        "ml_a": -300,
-        "ml_b": +250
-      }
-
-    OR (common alt field names):
-      {
-        "commence_time": "...",
-        "home_team": "...",
-        "away_team": "...",
-        "home_ml": -300,
-        "away_ml": 250
-      }
-    """
-    if SPORTSBOOK_ODDS_URL:
-        raw = http_get_json(SPORTSBOOK_ODDS_URL)
-    else:
-        if not SPORTSBOOK_ODDS_FILE.exists():
-            raise RuntimeError(
-                f"Sportsbook odds file not found: {SPORTSBOOK_ODDS_FILE}. "
-                f"Either commit it, or set SPORTSBOOK_ODDS_URL."
-            )
-        raw = json.loads(SPORTSBOOK_ODDS_FILE.read_text(encoding="utf-8"))
-
-    games_blob = raw.get("games") if isinstance(raw, dict) else raw
-    if not isinstance(games_blob, list):
-        raise RuntimeError("Sportsbook odds JSON must be a list or {\"games\": [...]}")
+    board = build_moneyline_board(sport_keys=ODDS_SPORT_KEYS or None, regions="us")
 
     out: List[SportsbookGame] = []
-
-    for g in games_blob:
-        if not isinstance(g, dict):
+    for event in board:
+        consensus = event.get("consensus") or {}
+        start = iso_to_dt(event.get("commence_time"))
+        home = str(event.get("home_team") or "").strip()
+        away = str(event.get("away_team") or "").strip()
+        if not home or not away:
             continue
 
-        start = iso_to_dt(g.get("start_time") or g.get("commence_time") or g.get("startTime"))
-
-        # team names
-        a = str(g.get("team_a") or g.get("home_team") or g.get("homeTeam") or "").strip()
-        b = str(g.get("team_b") or g.get("away_team") or g.get("awayTeam") or "").strip()
-
-        league = normalize_league(str(g.get("league") or g.get("sport") or g.get("competition") or "").strip())
-        abbr_a = str(g.get("abbr_a") or g.get("team_a_abbr") or g.get("home_abbr") or "").strip()
-        abbr_b = str(g.get("abbr_b") or g.get("team_b_abbr") or g.get("away_abbr") or "").strip()
-
-        # moneylines
-        ml_a = g.get("ml_a")
-        ml_b = g.get("ml_b")
-
-        # alt names
-        if ml_a is None:
-            ml_a = g.get("home_ml") or g.get("homeMoneyline")
-        if ml_b is None:
-            ml_b = g.get("away_ml") or g.get("awayMoneyline")
-
-        # ensure ints
         try:
-            ml_a = int(ml_a)
-            ml_b = int(ml_b)
+            home_prob_fair = float(consensus["home_prob_fair"])
+            away_prob_fair = float(consensus["away_prob_fair"])
+            home_fair_ml = int(consensus["home_fair_american"])
+            away_fair_ml = int(consensus["away_fair_american"])
         except Exception:
             continue
 
-        if not a or not b:
-            continue
+        home_range = consensus.get("home_range") or {}
+        away_range = consensus.get("away_range") or {}
+        books_used = int(consensus.get("books_used") or 0)
+        sport_key = str(event.get("sport_key") or "")
+        league = SPORT_KEY_TO_LEAGUE.get(sport_key, normalize_league(sport_key))
 
         out.append(
             SportsbookGame(
                 start_time=start,
-                team_a=a,
-                team_b=b,
-                ml_a=ml_a,
-                ml_b=ml_b,
+                home_team=home,
+                away_team=away,
+                home_fair_prob=home_prob_fair,
+                away_fair_prob=away_prob_fair,
+                home_fair_ml=home_fair_ml,
+                away_fair_ml=away_fair_ml,
+                home_range=home_range,
+                away_range=away_range,
+                books_used=books_used,
                 league=league,
-                abbr_a=abbr_a,
-                abbr_b=abbr_b,
+                sport_key=sport_key,
+                per_book=event.get("per_book", []),
             )
         )
 
@@ -561,8 +552,8 @@ def match_sportsbook_game(
 
         p1 = team_tokens(poly.team1)
         p2 = team_tokens(poly.team2)
-        a = team_tokens(sb.team_a) | team_tokens(sb.abbr_a)
-        b = team_tokens(sb.team_b) | team_tokens(sb.abbr_b)
+        a = team_tokens(sb.home_team)
+        b = team_tokens(sb.away_team)
 
         # direct mapping score and swapped mapping score
         direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
@@ -581,6 +572,10 @@ def post_discord(text: str) -> None:
         raise RuntimeError("DISCORD_WEBHOOK_URL not set (workflow should map secrets.DISCORD_SPORTS_ALERT).")
 
     content = f"{DISCORD_MENTION}\n{text}" if DISCORD_MENTION else text
+
+    if DRY_RUN:
+        print(content)
+        return
 
     # Keep it to one alert; if we overflow, hard-trim (still one message).
     if len(content) > 1900:
@@ -615,37 +610,29 @@ def compute_value_rankings(
         sb_index, sb = matched
         matched_books.add(sb_index)
 
-        # implied probs (with vig)
-        p_a_raw = moneyline_to_prob(sb.ml_a)
-        p_b_raw = moneyline_to_prob(sb.ml_b)
-
-        denom = p_a_raw + p_b_raw
-        if denom <= 0:
-            continue
-
-        # de-vig fair probs
-        p_a = p_a_raw / denom
-        p_b = p_b_raw / denom
-
         sb_league = normalize_league(sb.league or "")
         # Determine which sportsbook side maps to which Polymarket outcome using the same token overlap approach.
         p1 = team_tokens(pm.team1)
         p2 = team_tokens(pm.team2)
-        a = team_tokens(sb.team_a) | team_tokens(sb.abbr_a)
-        b = team_tokens(sb.team_b) | team_tokens(sb.abbr_b)
+        a = team_tokens(sb.home_team)
+        b = team_tokens(sb.away_team)
         direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
         swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
         if max(direct, swapped) < (2 * MATCH_MIN_OVERLAP):
-            skipped_reasons.append(f"Low match confidence: {sb.team_a} vs {sb.team_b} <-> {pm.team1} vs {pm.team2}")
+            skipped_reasons.append(
+                f"Low match confidence: {sb.home_team} vs {sb.away_team} <-> {pm.team1} vs {pm.team2}"
+            )
             continue
 
         # Map sportsbook odds/probs to Polymarket outcomes (team1/team2) for legible output.
         if direct >= swapped:
-            sb_ml_1, sb_p_1 = sb.ml_a, p_a
-            sb_ml_2, sb_p_2 = sb.ml_b, p_b
+            sb_ml_1, sb_p_1 = sb.home_fair_ml, sb.home_fair_prob
+            sb_ml_2, sb_p_2 = sb.away_fair_ml, sb.away_fair_prob
+            range_1, range_2 = sb.home_range, sb.away_range
         else:
-            sb_ml_1, sb_p_1 = sb.ml_b, p_b
-            sb_ml_2, sb_p_2 = sb.ml_a, p_a
+            sb_ml_1, sb_p_1 = sb.away_fair_ml, sb.away_fair_prob
+            sb_ml_2, sb_p_2 = sb.home_fair_ml, sb.home_fair_prob
+            range_1, range_2 = sb.away_range, sb.home_range
 
         start = pm.start_time or sb.start_time
         start_s = fmt_start_time(start)
@@ -659,6 +646,8 @@ def compute_value_rankings(
                 "sportsbook_fair_prob": sb_p_1,
                 "polymarket_prob": pm.prob1,
                 "polymarket_ml": pm.ml1,
+                "range": range_1,
+                "range_side": "home" if direct >= swapped else "away",
             },
             {
                 "team": pm.team2,
@@ -666,6 +655,8 @@ def compute_value_rankings(
                 "sportsbook_fair_prob": sb_p_2,
                 "polymarket_prob": pm.prob2,
                 "polymarket_ml": pm.ml2,
+                "range": range_2,
+                "range_side": "away" if direct >= swapped else "home",
             },
         ]
 
@@ -680,6 +671,11 @@ def compute_value_rankings(
             if polymarket_ml is None or polymarket_ml <= POLYMARKET_MAX_FAVORITE:
                 continue
 
+            range_data = candidate["range"]
+            outside_range = is_outside_range(polymarket_ml, range_data)
+            if not outside_range:
+                continue
+
             sportsbook_fair_prob = candidate["sportsbook_fair_prob"]
             if sportsbook_fair_prob <= 0:
                 continue
@@ -691,11 +687,15 @@ def compute_value_rankings(
 
             value_rel = edge_abs / sportsbook_fair_prob
 
+            hr = sb.home_range or {}
+            ar = sb.away_range or {}
+
             rows.append(
                 {
                     "league": sb_league,
                     "matchup": matchup,
                     "recommended_side": candidate["team"],
+                    "range_side": candidate["range_side"],
                     "start_time_et": start_s,
                     "sportsbook_ml": sportsbook_ml,
                     "polymarket_ml": polymarket_ml,
@@ -704,6 +704,29 @@ def compute_value_rankings(
                     "edge_abs": edge_abs,
                     "value_rel": value_rel,
                     "polymarket_url": pm.url,
+                    "home_team": sb.home_team,
+                    "away_team": sb.away_team,
+                    "home_fair_ml": sb.home_fair_ml,
+                    "away_fair_ml": sb.away_fair_ml,
+                    "home_prob_fair": sb.home_fair_prob,
+                    "away_prob_fair": sb.away_fair_prob,
+                    "home_min_prob": hr.get("min_prob"),
+                    "home_max_prob": hr.get("max_prob"),
+                    "home_min_odds": hr.get("min_odds"),
+                    "home_max_odds": hr.get("max_odds"),
+                    "home_min_book": hr.get("min_book"),
+                    "home_max_book": hr.get("max_book"),
+                    "away_min_prob": ar.get("min_prob"),
+                    "away_max_prob": ar.get("max_prob"),
+                    "away_min_odds": ar.get("min_odds"),
+                    "away_max_odds": ar.get("max_odds"),
+                    "away_min_book": ar.get("min_book"),
+                    "away_max_book": ar.get("max_book"),
+                    "books_used": sb.books_used,
+                    "polymarket_home_ml": pm.ml1,
+                    "polymarket_away_ml": pm.ml2,
+                    "home_outside": is_outside_range(pm.ml1, sb.home_range) if pm.ml1 is not None else False,
+                    "away_outside": is_outside_range(pm.ml2, sb.away_range) if pm.ml2 is not None else False,
                 }
             )
 
@@ -722,9 +745,29 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "league",
         "matchup",
         "recommended_side",
+        "range_side",
         "start_time_et",
         "sportsbook_ml",
         "polymarket_ml",
+        "home_fair_ml",
+        "away_fair_ml",
+        "home_prob_fair",
+        "away_prob_fair",
+        "home_min_prob",
+        "home_max_prob",
+        "home_min_odds",
+        "home_max_odds",
+        "home_min_book",
+        "home_max_book",
+        "away_min_prob",
+        "away_max_prob",
+        "away_min_odds",
+        "away_max_odds",
+        "away_min_book",
+        "away_max_book",
+        "books_used",
+        "home_outside",
+        "away_outside",
         "sportsbook_fair_prob",
         "polymarket_prob",
         "edge_abs",
@@ -746,7 +789,8 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "Filters: "
         f"sportsbook_ml < {SPORTSBOOK_MAX_UNDERDOG}, "
         f"polymarket_ml > {POLYMARKET_MAX_FAVORITE}, "
-        f"min edge >= {MIN_EDGE:.1%}"
+        f"min edge >= {MIN_EDGE:.1%}, "
+        "outside sportsbook range only"
     )
     lines.append("")
     for i, r in enumerate(top, 1):
@@ -755,21 +799,16 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         lines.append(
             f"{i:>2}. {league_prefix}{r['matchup']} @ {r['start_time_et']}\n"
             f"    Side: {r['recommended_side']} | "
-            f"SB: {r['sportsbook_ml']}  |  PM: {pm_ml_s}  |  "
+            f"Consensus: {r['sportsbook_ml']}  |  PM: {pm_ml_s}  |  "
             f"value: {r['value_rel']:+.1%}  |  edge: {r['edge_abs']:+.1%}  |  {r['polymarket_url']}"
         )
     txt_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def format_discord_message(rows: List[Dict[str, Any]], polymarket_count: int, sportsbook_count: int) -> str:
-    top = rows[:TOP_N]
+    top = rows[: min(TOP_N, DISCORD_TOP_N)]
 
-    header = (
-        f"**Polymarket vs Sportsbooks — Top {TOP_N} value edges**\n"
-        f"Polymarket moneylines scanned: {polymarket_count} | Sportsbook games loaded: {sportsbook_count}\n"
-        f"Filters: sportsbook_ml < {SPORTSBOOK_MAX_UNDERDOG}, "
-        f"polymarket_ml > {POLYMARKET_MAX_FAVORITE}, min edge ≥ {MIN_EDGE:.1%}\n"
-    )
+    header = f"**Polymarket vs Sportsbooks — Top {len(top)} (edge ≥ {MIN_EDGE:.1%}, outside SB range)**\n"
 
     if not top:
         return header + "\nNo qualifying edges found today."
@@ -777,22 +816,37 @@ def format_discord_message(rows: List[Dict[str, Any]], polymarket_count: int, sp
     lines: List[str] = [header]
     for i, r in enumerate(top, 1):
         pm_ml_s = str(r["polymarket_ml"]) if r["polymarket_ml"] is not None else "n/a"
-        start = r["start_time_et"] or "unknown"
         league_prefix = f"{r['league']} - " if r.get("league") else ""
+        if r.get("range_side") == "home":
+            min_odds = r.get("home_min_odds")
+            max_odds = r.get("home_max_odds")
+            min_book = r.get("home_min_book")
+            max_book = r.get("home_max_book")
+        else:
+            min_odds = r.get("away_min_odds")
+            max_odds = r.get("away_max_odds")
+            min_book = r.get("away_min_book")
+            max_book = r.get("away_max_book")
+
+        def _fmt_range(odds: Optional[int], book: Optional[str]) -> str:
+            if odds is None:
+                return "?"
+            label = (book or "").strip().replace(" ", "")[:10]
+            return f"{int(odds)}({label})" if label else f"{int(odds)}"
+
+        sb_range = f"{_fmt_range(min_odds, min_book)}→{_fmt_range(max_odds, max_book)}"
         lines.append(
-            f"{i}. **{league_prefix}{r['matchup']}**\n"
-            f"- Start: {start}\n"
-            f"- Side: {r['recommended_side']}\n"
-            f"- Sportsbooks ML: {r['sportsbook_ml']}\n"
-            f"- Polymarket ML: {pm_ml_s}\n"
-            f"- Value: {r['value_rel']:+.1%} | Edge: {r['edge_abs']:+.1%}\n"
+            f"{i}) {league_prefix}{r['matchup']} — {r['recommended_side']} | "
+            f"PM {pm_ml_s} vs Fair {r['sportsbook_ml']} | "
+            f"Edge {r['edge_abs']:+.1%} | "
+            f"SB {sb_range} | "
             f"{r['polymarket_url']}"
         )
 
     # Optional lightweight debug footer (helps you confirm matching volume without digging into artifacts)
     if INCLUDE_DEBUG_SUMMARY:
         lines.append("")
-        lines.append(f"_Debug: scored {len(rows)} edges (top {TOP_N}); see artifact reports/ for full CSVs._")
+        lines.append(f"_Debug: scored {len(rows)} edges; see artifact reports/ for full CSVs._")
 
     return "\n".join(lines)
 
@@ -813,10 +867,10 @@ def write_unmatched_reports(
     book_path = OUTPUT_DIR / "unmatched_sportsbook.csv"
     with book_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["league", "start_time_et", "team_a", "team_b", "abbr_a", "abbr_b"])
+        w.writerow(["league", "start_time_et", "home_team", "away_team", "sport_key"])
         for sb in unmatched_books:
             start_s = fmt_start_time(sb.start_time)
-            w.writerow([sb.league, start_s, sb.team_a, sb.team_b, sb.abbr_a, sb.abbr_b])
+            w.writerow([sb.league, start_s, sb.home_team, sb.away_team, sb.sport_key])
 
 
 def main() -> None:
