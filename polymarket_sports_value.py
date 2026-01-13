@@ -990,7 +990,7 @@ def format_discord_message(
             f"**Polymarket vs Sportsbooks — DEBUG (top {len(top_dbg)} by edge, unfiltered)**\n"
             f"_Normal filters still apply to the non-debug ranking (min edge {MIN_EDGE:.1%}, "
             f"outside_range={bool(REQUIRE_OUTSIDE_RANGE)}, "
-            f"SB<+{SPORTSBOOK_MAX_UNDERDOG}, PM>-{abs(POLYMARKET_MAX_FAVORITE)})._"
+            f"SB<+{SPORTSBOOK_MAX_UNDERDOG}, PM>{POLYMARKET_MAX_FAVORITE})._"
         )
 
         lines: List[str] = [header]
@@ -1035,8 +1035,8 @@ def format_discord_message(
             tag_s = f" ({', '.join(fail_tags)})" if fail_tags else ""
 
             lines.append(
-                f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')}\n"
-                f"    {row['recommended_side']} | PM {pm_ml_s} ({pmp:.1%}) vs Fair {sb_ml} ({sbp:.1%}) | "
+                f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')} — "
+                f"{row['recommended_side']} | PM {pm_ml_s} ({pmp:.1%}) vs Fair {sb_ml} ({sbp:.1%}) | "
                 f"Edge {edge:+.1%} | books={books_used}{tag_s}"
             )
 

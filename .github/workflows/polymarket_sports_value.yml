@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       debug_mode:
-        description: "Debug mode (writes full candidate CSV + extra Discord diagnostics)"
+        description: "Debug mode (posts top candidates to Discord even if they fail filters)"
         required: false
         default: false
         type: boolean
