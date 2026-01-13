@@ -633,6 +633,11 @@ def main() -> int:
     book_events: List[BookEvent] = []
     for sport_key in sport_keys:
         book_events.extend(fetch_sportsbook_events(sport_key))
+    if not book_events:
+        print(
+            "WARN: No sportsbook events returned; verify API key, sport keys, and upstream availability.",
+            file=sys.stderr,
+        )
 
     raw_markets = fetch_polymarket_markets(active_only=True, limit=200)
     candidates = build_polymarket_candidates(raw_markets)
