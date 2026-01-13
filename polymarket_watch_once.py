@@ -77,6 +77,7 @@ def unix_to_dt(ts: int) -> datetime:
 
 def get_json(path: str, params: Dict[str, Any]) -> Any:
     url = f"{DATA_API_BASE}{path}"
+    print(f"[fetch] GET {url} params={params}")
     r = SESSION.get(url, params=params, timeout=25)
     if r.status_code >= 400:
         raise RuntimeError(f"HTTP {r.status_code} from Data API {path}: {r.text[:300]}")
@@ -185,6 +186,9 @@ def seed_state(state: State) -> None:
     First run: record recent trades so we don't spam history, and snapshot positions.
     No alerts on seed run.
     """
+    print(
+        f"[seed] No prior state found. Seeding from recent activity (limit={SEED_LIMIT}) and snapshotting positions."
+    )
     recent = fetch_activity(
         TARGET_ADDRESS,
         start=None,
@@ -199,12 +203,14 @@ def seed_state(state: State) -> None:
     # Snapshot current positions so OPEN/CLOSE begins from a sane baseline.
     try:
         positions = fetch_positions(TARGET_ADDRESS)
+        print(f"[seed] Snapshot positions: {len(positions)} entries.")
         state.pos_sizes = {}
         for p in positions:
             cid = str(p.get("conditionId", ""))
             oi = int(p.get("outcomeIndex", -1))
             state.pos_sizes[position_key(cid, oi)] = str(p.get("size", 0.0) or 0.0)
     except Exception:
+        print("[seed] Position snapshot failed; continuing with empty baseline.")
         pass
 
     state.save(STATE_FILE)
@@ -213,6 +219,9 @@ def seed_state(state: State) -> None:
 
 def run_once() -> None:
     state = State.load(STATE_FILE)
+    print(
+        f"[run] Starting watch for {TARGET_ADDRESS}. State file: {STATE_FILE} (last_ts={state.last_ts})."
+    )
 
     # Seed and exit on first run
     if state.last_ts == 0:
@@ -225,6 +234,8 @@ def run_once() -> None:
     limit = 500
     offset = 0
 
+    total_processed = 0
+    total_alerts = 0
     while True:
         batch = fetch_activity(
             TARGET_ADDRESS,
@@ -232,6 +243,9 @@ def run_once() -> None:
             limit=limit,
             offset=offset,
             sort_direction="ASC",
+        )
+        print(
+            f"[run] Activity batch offset={offset} limit={limit} received={len(batch)} items."
         )
         if not batch:
             break
@@ -246,6 +260,7 @@ def run_once() -> None:
 
             seen.add(k)
             state.seen_keys.append(k)
+            total_processed += 1
 
             condition_id = str(evt.get("conditionId", "")).strip()
             outcome_index = int(evt.get("outcomeIndex", -1))
@@ -307,7 +322,11 @@ def run_once() -> None:
                     f"Position: {before_str} → {after_str}\n"
                     f"{tx_url}"
                 )
+                print(
+                    f"[alert] {label} {side} outcome={outcome} shares={shares_str} amount=${usdc_amt:,.2f}."
+                )
                 post_discord(msg)
+                total_alerts += 1
 
         if len(batch) < limit:
             break
@@ -318,6 +337,7 @@ def run_once() -> None:
     if RESYNC_POSITIONS:
         try:
             positions = fetch_positions(TARGET_ADDRESS)
+            print(f"[resync] Positions resynced: {len(positions)} entries.")
             new_map: Dict[str, str] = {}
             for p in positions:
                 cid = str(p.get("conditionId", ""))
@@ -325,9 +345,13 @@ def run_once() -> None:
                 new_map[position_key(cid, oi)] = str(p.get("size", 0.0) or 0.0)
             state.pos_sizes = new_map
         except Exception:
+            print("[resync] Position resync failed; keeping computed sizes.")
             pass
 
     state.save(STATE_FILE)
+    print(
+        f"[run] Completed. New last_ts={state.last_ts}. Trades processed={total_processed}. Alerts sent={total_alerts}."
+    )
 
 
 if __name__ == "__main__":
