@@ -44,9 +44,20 @@ SPORT_KEYS = {
     "basketball_nba": "NBA",
     "baseball_mlb": "MLB",
     "icehockey_nhl": "NHL",
+    "americanfootball_ncaaf": "NCAAF",
+    "basketball_ncaab": "NCAAB",
     "soccer_epl": "EPL",
     "soccer_uefa_champs_league": "UCL",
 }
+
+DEFAULT_SPORT_KEYS = [
+    "americanfootball_nfl",
+    "basketball_nba",
+    "baseball_mlb",
+    "icehockey_nhl",
+    "americanfootball_ncaaf",
+    "basketball_ncaab",
+]
 
 TEAM_STRIP_TOKENS = [
     "fc",
@@ -251,6 +262,17 @@ def parse_json_list(value: Optional[object]) -> List[object]:
         except Exception:
             return []
     return []
+
+
+def parse_sport_keys(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return DEFAULT_SPORT_KEYS
+    cleaned = raw.strip().lower()
+    if not cleaned:
+        return DEFAULT_SPORT_KEYS
+    if cleaned in ("all", "*"):
+        return DEFAULT_SPORT_KEYS
+    return [item.strip() for item in cleaned.split(",") if item.strip()]
 
 
 # -----------------------------
@@ -582,7 +604,7 @@ def format_results_for_discord(results: List[MatchResult], top_n: int) -> List[s
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sport", default="americanfootball_nfl", help="Sportsbook sport key")
+    parser.add_argument("--sport", default=None, help="Sportsbook sport key or comma list")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_N, help="How many results to post")
     parser.add_argument(
         "--min-edge-bps",
@@ -596,13 +618,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    raw_sports = args.sport or os.getenv("SPORT_KEYS")
+    sport_keys = parse_sport_keys(raw_sports)
 
     discord_webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     if not discord_webhook and not args.dry_run:
         print("ERROR: Missing DISCORD_WEBHOOK_URL secret/env var.", file=sys.stderr)
         return 2
 
-    book_events = fetch_sportsbook_events(args.sport)
+    book_events: List[BookEvent] = []
+    for sport_key in sport_keys:
+        book_events.extend(fetch_sportsbook_events(sport_key))
 
     raw_markets = fetch_polymarket_markets(active_only=True, limit=200)
     candidates = build_polymarket_candidates(raw_markets)
