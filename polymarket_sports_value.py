@@ -63,6 +63,7 @@ TIME_WINDOW_HOURS = env_int("TIME_WINDOW_HOURS", 36)
 INCLUDE_DEBUG_SUMMARY = env_int("INCLUDE_DEBUG_SUMMARY", 1)  # 1=yes, 0=no
 DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
 DRY_RUN = env_int("DRY_RUN", 0)
+REQUIRE_OUTSIDE_RANGE = env_int("REQUIRE_OUTSIDE_RANGE", 1)
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -75,6 +76,18 @@ ODDS_REGIONS = (os.getenv("ODDS_REGIONS", "us") or "us").strip() or "us"
 POLY_FALLBACK = env_int("POLY_FALLBACK", 1)  # 1=yes (retry with looser filters), 0=no
 
 REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 25)
+
+EXCLUDED_MARKET_KEYWORDS = {
+    "spread",
+    "total",
+    "over",
+    "under",
+    "o/u",
+    "handicap",
+    "puck line",
+    "run line",
+}
+SIGNED_NUMBER_RE = re.compile(r"[+-]\d+(\.\d+)?")
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -381,6 +394,17 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
         if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
             continue
 
+        slug = str(m.get("slug") or "").strip()
+        title = str(m.get("title") or "").strip()
+        question = str(m.get("question") or "").strip()
+        text = " ".join([slug, title, question, o1, o2]).lower()
+        if any(keyword in text for keyword in EXCLUDED_MARKET_KEYWORDS):
+            debug["parse_excluded_non_moneyline"] += 1
+            continue
+        if SIGNED_NUMBER_RE.search(text):
+            debug["parse_excluded_non_moneyline"] += 1
+            continue
+
         try:
             p1 = float(prices[0])
             p2 = float(prices[1])
@@ -392,7 +416,6 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
             debug["parse_prices_failed"] += 1
             continue
 
-        slug = str(m.get("slug") or "").strip()
         url = f"https://polymarket.com/market/{slug}" if slug else ""
 
         start_time = iso_to_dt(
@@ -434,6 +457,7 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         "parsed_markets": 0,
         "parse_outcomes_failed": 0,
         "parse_prices_failed": 0,
+        "parse_excluded_non_moneyline": 0,
     }
 
     def _pull_raw(params_base: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -621,12 +645,18 @@ def match_sportsbook_game(
     Match by lightweight token overlap + time proximity.
     No aliases/uniforming; this is only to align sportsbook odds with Polymarket outcomes.
     """
+    best_match: Optional[Tuple[int, SportsbookGame]] = None
+    best_score = 0.0
+    best_delta = float("inf")
+
     for idx, sb in enumerate(books):
         # If both have times, require proximity (avoids accidental collisions)
         if poly.start_time and sb.start_time:
             delta = abs((poly.start_time - sb.start_time).total_seconds())
             if delta > TIME_WINDOW_HOURS * 3600:
                 continue
+        else:
+            delta = float("inf")
 
         p1 = team_tokens(poly.team1)
         p2 = team_tokens(poly.team2)
@@ -637,12 +667,16 @@ def match_sportsbook_game(
         direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
         swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
 
-        if max(direct, swapped) < (2 * MATCH_MIN_OVERLAP):
+        score = max(direct, swapped)
+        if score < (2 * MATCH_MIN_OVERLAP):
             continue
 
-        return idx, sb
+        if score > best_score or (score == best_score and delta < best_delta):
+            best_match = (idx, sb)
+            best_score = score
+            best_delta = delta
 
-    return None
+    return best_match
 
 
 def post_discord(text: str) -> None:
@@ -751,7 +785,7 @@ def compute_value_rankings(
 
             range_data = candidate["range"]
             outside_range = is_outside_range(polymarket_ml, range_data)
-            if not outside_range:
+            if REQUIRE_OUTSIDE_RANGE and not outside_range:
                 continue
 
             sportsbook_fair_prob = candidate["sportsbook_fair_prob"]

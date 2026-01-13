@@ -55,4 +55,5 @@ The `Polymarket Sports Value Scan` GitHub Action runs daily and can be triggered
 - `MIN_BOOKS` (int, default 3): minimum sportsbooks required to compute consensus
 - `ODDS_REGIONS` (string, default `us`)
 - `POLY_FALLBACK` (0/1, default 1): retry Polymarket fetch with looser filters if empty
+- `REQUIRE_OUTSIDE_RANGE` (0/1, default 1): require Polymarket moneyline to be outside sportsbook range
 - `GAME_BETS_TAG_ID` (int, default 100639): Polymarket tag filter (can be overridden)
