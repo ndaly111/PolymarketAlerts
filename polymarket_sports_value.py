@@ -69,6 +69,10 @@ MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
 
 # Odds API sport keys override (comma-separated). If empty, use defaults.
 ODDS_SPORT_KEYS = [s.strip() for s in os.getenv("ODDS_SPORT_KEYS", "").split(",") if s.strip()]
+ODDS_REGIONS = (os.getenv("ODDS_REGIONS", "us") or "us").strip() or "us"
+
+# Polymarket fetch behavior
+POLY_FALLBACK = env_int("POLY_FALLBACK", 1)  # 1=yes (retry with looser filters), 0=no
 
 REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 25)
 
@@ -317,112 +321,177 @@ def get_moneyline_types() -> List[str]:
 
     try:
         types = gamma_get("/sports/market-types")
-        found: List[str] = []
+        items: List[Any] = []
         if isinstance(types, list):
-            for item in types:
-                if isinstance(item, str):
-                    name = item
-                elif isinstance(item, dict):
-                    name = str(
-                        item.get("name")
-                        or item.get("type")
-                        or item.get("sportsMarketType")
-                        or item.get("label")
-                        or ""
-                    )
-                else:
-                    name = str(item)
+            items = types
+        elif isinstance(types, dict):
+            for key in ("marketTypes", "market_types", "types", "data", "results"):
+                value = types.get(key)
+                if isinstance(value, list):
+                    items = value
+                    break
 
-                up = name.upper()
-                if "MONEY" in up and "LINE" in up:
-                    found.append(name)
+        found: List[str] = []
+        for item in items:
+            if isinstance(item, str):
+                name = item
+            elif isinstance(item, dict):
+                name = str(
+                    item.get("name")
+                    or item.get("type")
+                    or item.get("sportsMarketType")
+                    or item.get("label")
+                    or ""
+                )
+            else:
+                name = str(item)
 
-        # fallback if the endpoint returns something unexpected
-        return found or ["MONEYLINE"]
+            up = name.upper()
+            if "MONEY" in up and "LINE" in up:
+                found.append(name)
+
+        seen = set()
+        output: List[str] = []
+        for name in found:
+            if name in seen:
+                continue
+            output.append(name)
+            seen.add(name)
+
+        return output or ["MONEYLINE"]
     except Exception:
         return ["MONEYLINE"]
 
 
-def fetch_polymarket_moneylines() -> List[PolyMoneylineMarket]:
+def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str, Any]) -> List[PolyMoneylineMarket]:
+    markets: List[PolyMoneylineMarket] = []
+    for m in raw_markets:
+        outcomes = parse_json_list(m.get("outcomes"))
+        prices = parse_json_list(m.get("outcomePrices"))
+
+        if len(outcomes) != 2:
+            debug["parse_outcomes_failed"] += 1
+            continue
+
+        if len(prices) != 2:
+            debug["parse_prices_failed"] += 1
+            continue
+
+        o1, o2 = str(outcomes[0]), str(outcomes[1])
+        if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
+            continue
+
+        try:
+            p1 = float(prices[0])
+            p2 = float(prices[1])
+        except Exception:
+            debug["parse_prices_failed"] += 1
+            continue
+
+        if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
+            debug["parse_prices_failed"] += 1
+            continue
+
+        slug = str(m.get("slug") or "").strip()
+        url = f"https://polymarket.com/market/{slug}" if slug else ""
+
+        start_time = iso_to_dt(
+            m.get("eventStartTime")
+            or m.get("gameStartTime")
+            or m.get("startDateIso")
+            or m.get("startDate")
+        )
+
+        markets.append(
+            PolyMoneylineMarket(
+                slug=slug,
+                url=url,
+                start_time=start_time,
+                team1=o1,
+                team2=o2,
+                prob1=p1,
+                prob2=p2,
+                ml1=prob_to_moneyline(p1),
+                ml2=prob_to_moneyline(p2),
+            )
+        )
+
+    return markets
+
+
+def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket], Dict[str, Any]]:
     """
-    Fetch all active, unclosed sports moneyline markets.
-    Uses Gamma GET /markets with filters:
-      - active=true
-      - closed=false
-      - tag_id=GAME_BETS_TAG_ID
-      - sports_market_types=[moneyline types]
+    Fetch active, unclosed sports moneyline markets with fallback filters if enabled.
     """
     ml_types = get_moneyline_types()
+    debug: Dict[str, Any] = {
+        "tag_id": GAME_BETS_TAG_ID,
+        "market_types": ml_types,
+        "closed": False,
+        "selected_attempt": None,
+        "attempts": [],
+        "raw_markets": 0,
+        "parsed_markets": 0,
+        "parse_outcomes_failed": 0,
+        "parse_prices_failed": 0,
+    }
 
-    markets: List[PolyMoneylineMarket] = []
-    limit = 500
-    offset = 0
+    def _pull_raw(params_base: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw: List[Dict[str, Any]] = []
+        offset = 0
+        limit = 500
+        while True:
+            params = dict(params_base)
+            params["limit"] = limit
+            params["offset"] = offset
+            batch = gamma_get("/markets", params=params)
+            if not isinstance(batch, list) or not batch:
+                break
+            raw.extend(batch)
+            if len(batch) < limit:
+                break
+            offset += limit
+        return raw
 
-    while True:
-        params: Dict[str, Any] = {
-            "limit": limit,
-            "offset": offset,
-            "active": True,
-            "closed": False,
-            "tag_id": GAME_BETS_TAG_ID,
-            # requests encodes lists as repeated query params
-            "sports_market_types": ml_types,
-        }
+    attempts: List[Tuple[str, Dict[str, Any]]] = [
+        (
+            "tag+types",
+            {
+                "active": True,
+                "closed": False,
+                "tag_id": GAME_BETS_TAG_ID,
+                "sports_market_types": ml_types,
+            },
+        ),
+        ("tag_only", {"active": True, "closed": False, "tag_id": GAME_BETS_TAG_ID}),
+        ("no_tag", {"active": True, "closed": False}),
+    ]
 
-        batch = gamma_get("/markets", params=params)
-        if not isinstance(batch, list) or not batch:
+    raw_markets: List[Dict[str, Any]] = []
+    for name, params in attempts:
+        if raw_markets:
             break
-
-        for m in batch:
-            # Parse outcomes + prices
-            outcomes = parse_json_list(m.get("outcomes"))
-            prices = parse_json_list(m.get("outcomePrices"))
-
-            if len(outcomes) != 2 or len(prices) != 2:
-                continue
-
-            o1, o2 = str(outcomes[0]), str(outcomes[1])
-            # Skip generic outcomes (not readable as teams)
-            if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
-                continue
-
-            try:
-                p1 = float(prices[0])
-                p2 = float(prices[1])
-            except Exception:
-                continue
-
-            if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
-                continue
-
-            slug = str(m.get("slug") or "").strip()
-            url = f"https://polymarket.com/market/{slug}" if slug else ""
-
-            start_time = iso_to_dt(
-                m.get("eventStartTime")
-                or m.get("gameStartTime")
-                or m.get("startDateIso")
-                or m.get("startDate")
+        if name != "tag+types" and not POLY_FALLBACK:
+            continue
+        try:
+            batch = _pull_raw(params)
+            debug["attempts"].append({"name": name, "params": params, "count": len(batch)})
+            if batch:
+                raw_markets = batch
+                debug["selected_attempt"] = name
+        except Exception as exc:
+            debug["attempts"].append(
+                {"name": name, "params": params, "count": 0, "error": str(exc)}
             )
 
-            markets.append(
-                PolyMoneylineMarket(
-                    slug=slug,
-                    url=url,
-                    start_time=start_time,
-                    team1=o1,
-                    team2=o2,
-                    prob1=p1,
-                    prob2=p2,
-                    ml1=prob_to_moneyline(p1),
-                    ml2=prob_to_moneyline(p2),
-                )
-            )
+    debug["raw_markets"] = len(raw_markets)
+    markets = _parse_polymarket_markets(raw_markets, debug)
+    debug["parsed_markets"] = len(markets)
+    return markets, debug
 
-        if len(batch) < limit:
-            break
-        offset += limit
 
+def fetch_polymarket_moneylines() -> List[PolyMoneylineMarket]:
+    markets, _debug = fetch_polymarket_moneylines_with_debug()
     return markets
 
 
@@ -490,7 +559,16 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
 
 
 def load_sportsbook_games() -> List[SportsbookGame]:
-    board = build_moneyline_board(sport_keys=ODDS_SPORT_KEYS or None, regions="us")
+    games, _debug = load_sportsbook_games_with_debug()
+    return games
+
+
+def load_sportsbook_games_with_debug() -> Tuple[List[SportsbookGame], Dict[str, Any]]:
+    board, odds_debug = build_moneyline_board(
+        sport_keys=ODDS_SPORT_KEYS or None,
+        regions=ODDS_REGIONS,
+        return_debug=True,
+    )
 
     out: List[SportsbookGame] = []
     for event in board:
@@ -533,7 +611,7 @@ def load_sportsbook_games() -> List[SportsbookGame]:
             )
         )
 
-    return out
+    return out, odds_debug
 
 
 def match_sportsbook_game(
@@ -873,12 +951,46 @@ def write_unmatched_reports(
             w.writerow([sb.league, start_s, sb.home_team, sb.away_team, sb.sport_key])
 
 
+def write_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT_DIR / "diagnostics.json"
+    path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+
+
 def main() -> None:
-    polys = fetch_polymarket_moneylines()
+    diagnostics: Dict[str, Any] = {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "min_edge": MIN_EDGE,
+            "top_n": TOP_N,
+            "discord_top_n": DISCORD_TOP_N,
+            "time_window_hours": TIME_WINDOW_HOURS,
+            "odds_sport_keys": ODDS_SPORT_KEYS or None,
+            "odds_regions": ODDS_REGIONS,
+            "min_books": env_int("MIN_BOOKS", 3),
+            "poly_tag_id": GAME_BETS_TAG_ID,
+            "poly_fallback": POLY_FALLBACK,
+        },
+    }
+    write_diagnostics(diagnostics)
+
+    polys, poly_debug = fetch_polymarket_moneylines_with_debug()
+    diagnostics["polymarket"] = poly_debug
+    write_diagnostics(diagnostics)
     write_polymarket_snapshot(polys)
 
-    books = load_sportsbook_games()
+    books, odds_debug = load_sportsbook_games_with_debug()
+    diagnostics["odds_api"] = odds_debug
+    write_diagnostics(diagnostics)
     rows, unmatched_polys, unmatched_books, _skips = compute_value_rankings(polys, books)
+    diagnostics["results"] = {
+        "polymarket_count": len(polys),
+        "sportsbook_count": len(books),
+        "unmatched_polymarket": len(unmatched_polys),
+        "unmatched_sportsbook": len(unmatched_books),
+        "qualifying_edges": len(rows),
+    }
+    write_diagnostics(diagnostics)
     write_value_reports(rows)
     write_unmatched_reports(unmatched_polys, unmatched_books)
 
