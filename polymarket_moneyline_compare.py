@@ -37,6 +37,7 @@ USER_AGENT = "polymarket-moneyline-compare/1.0 (+github actions)"
 
 DEFAULT_TOP_N = int(os.getenv("COMPARE_TOP_N_DEFAULT", "25"))
 DEFAULT_MIN_EDGE_BPS = int(os.getenv("COMPARE_MIN_EDGE_BPS", "0"))
+MAX_EDGE_BPS = int(os.getenv("MAX_EDGE_BPS", "2500"))
 GAME_BETS_TAG_ID = int(os.getenv("GAME_BETS_TAG_ID", "100639"))
 
 SPORT_KEYS = {
@@ -118,6 +119,7 @@ class MatchResult:
     book_prob: float
     edge_bps: int
     polymarket_url: Optional[str]
+    flags: Tuple[str, ...] = ()
 
 
 # -----------------------------
@@ -501,7 +503,18 @@ def compute_match_results(
     book_events: List[BookEvent],
     min_edge_bps: int,
 ) -> List[MatchResult]:
+    """
+    Return the best MatchResult per matched event (one recommended side).
+
+    Edge definition (basis points):
+        edge_bps = 10,000 * (book_fair_prob - polymarket_prob)
+
+    We only keep results where book_fair_prob > polymarket_prob (positive edge).
+    """
     results: List[MatchResult] = []
+
+    if not polys or not book_events:
+        return results
 
     for market in polys:
         event = match_polymarket_to_books(market, book_events)
@@ -510,61 +523,90 @@ def compute_match_results(
 
         direct_score, swapped_score = mapping_scores(market, event)
         if direct_score >= swapped_score:
-            poly_prob_team = market.prob_a
-            team = event.home
-            opponent = event.away
-            book_line = event.best_home
-            poly_team = market.team_a
-            poly_opponent = market.team_b
+            poly_for_home = (market.team_a, market.prob_a)
+            poly_for_away = (market.team_b, market.prob_b)
         else:
-            poly_prob_team = market.prob_b
-            team = event.away
-            opponent = event.home
-            book_line = event.best_away
-            poly_team = market.team_b
-            poly_opponent = market.team_a
+            poly_for_home = (market.team_b, market.prob_b)
+            poly_for_away = (market.team_a, market.prob_a)
 
-        if not book_line:
-            continue
+        book_prob_home: Optional[float] = None
+        book_prob_away: Optional[float] = None
 
-        book_prob_raw = implied_prob_from_american(book_line.odds_american)
-
-        if event.best_home and event.best_away:
+        if event.best_home and event.best_away and (event.best_home.book == event.best_away.book):
             prob_home = implied_prob_from_american(event.best_home.odds_american)
             prob_away = implied_prob_from_american(event.best_away.odds_american)
             denom = prob_home + prob_away
             if denom > 0:
-                book_prob = prob_home / denom if team == event.home else prob_away / denom
+                book_prob_home = prob_home / denom
+                book_prob_away = prob_away / denom
+        elif event.best_home:
+            book_prob_home = implied_prob_from_american(event.best_home.odds_american)
+        elif event.best_away:
+            book_prob_away = implied_prob_from_american(event.best_away.odds_american)
+
+        def _name_match_ok(a: str, b: str) -> bool:
+            return token_overlap_score(a, b) >= 0.55
+
+        best_for_event: Optional[MatchResult] = None
+
+        for side in ("home", "away"):
+            if side == "home":
+                team = event.home
+                opponent = event.away
+                book_line = event.best_home
+                book_prob = book_prob_home
+                poly_team, poly_prob = poly_for_home
+                poly_opponent, _ = poly_for_away
             else:
-                book_prob = book_prob_raw
-        else:
-            book_prob = book_prob_raw
+                team = event.away
+                opponent = event.home
+                book_line = event.best_away
+                book_prob = book_prob_away
+                poly_team, poly_prob = poly_for_away
+                poly_opponent, _ = poly_for_home
 
-        edge = book_prob - poly_prob_team
-        edge_bps = int(round(edge * 10000))
+            if not book_line or book_prob is None:
+                continue
 
-        if edge_bps < min_edge_bps:
-            continue
+            if not _name_match_ok(team, poly_team):
+                continue
 
-        results.append(
-            MatchResult(
+            edge_bps = int(round((book_prob - poly_prob) * 10000))
+            if edge_bps < min_edge_bps:
+                continue
+            if book_prob <= poly_prob:
+                continue
+
+            flags: Tuple[str, ...] = ()
+            if edge_bps >= MAX_EDGE_BPS:
+                flags = ("CHECK_MATCH",)
+
+            candidate = MatchResult(
                 league=event.league,
                 start_time=event.start_time,
                 team=team,
                 opponent=opponent,
                 poly_team=poly_team,
                 poly_opponent=poly_opponent,
-                poly_prob=poly_prob_team,
-                poly_american=american_from_prob(poly_prob_team),
+                poly_prob=poly_prob,
+                poly_american=american_from_prob(poly_prob),
                 book=book_line.book,
                 book_american=book_line.odds_american,
                 book_prob=book_prob,
                 edge_bps=edge_bps,
                 polymarket_url=market.url,
+                flags=flags,
             )
-        )
+            def _rank(result: MatchResult) -> Tuple[int, int]:
+                return (1 if result.flags else 0, -result.edge_bps)
 
-    results.sort(key=lambda result: result.edge_bps, reverse=True)
+            if best_for_event is None or _rank(candidate) < _rank(best_for_event):
+                best_for_event = candidate
+
+        if best_for_event is not None:
+            results.append(best_for_event)
+
+    results.sort(key=lambda result: (1 if result.flags else 0, -result.edge_bps))
     return results
 
 
@@ -590,11 +632,19 @@ def format_results_for_discord(results: List[MatchResult], top_n: int) -> List[s
 
         url_part = f" — {result.polymarket_url}" if result.polymarket_url else ""
 
-        lines.append(f"**{idx}. {result.league} — {result.poly_team} vs {result.poly_opponent}** ({start_local})")
+        lines.append(f"**{idx}. {result.league} — {result.team} vs {result.opponent}** ({start_local})")
+        side_line = f"- **Bet side (Polymarket outcome): {result.poly_team}**"
+        if normalize_team(result.team) != normalize_team(result.poly_team):
+            side_line += f" _(book name: {result.team})_"
+        lines.append(side_line)
+        flag_text = ""
+        if result.flags:
+            flag_text = " ⚠️ " + " ".join(result.flags)
+
         lines.append(
             f"- Poly: {poly_pct:.1f}% ({result.poly_american:+d})"
             f" | Book ({result.book}): {book_pct:.1f}% ({result.book_american:+d})"
-            f" | **Edge (book - poly):** {sign}{edge_pct:.2f}%{url_part}"
+            f" | **Edge (book - poly):** {sign}{edge_pct:.2f}%{flag_text}{url_part}"
         )
         lines.append("")
 
