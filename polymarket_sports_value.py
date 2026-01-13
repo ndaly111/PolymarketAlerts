@@ -64,6 +64,7 @@ INCLUDE_DEBUG_SUMMARY = env_int("INCLUDE_DEBUG_SUMMARY", 1)  # 1=yes, 0=no
 DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
 DRY_RUN = env_int("DRY_RUN", 0)
 REQUIRE_OUTSIDE_RANGE = env_int("REQUIRE_OUTSIDE_RANGE", 1)
+DEBUG_MODE = env_int("DEBUG_MODE", 0)  # 1 = write full debug candidate CSV + extra Discord info
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -701,7 +702,14 @@ def post_discord(text: str) -> None:
 
 def compute_value_rankings(
     polys: List[PolyMoneylineMarket], books: List[SportsbookGame]
-) -> Tuple[List[Dict[str, Any]], List[PolyMoneylineMarket], List[SportsbookGame], List[str]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[PolyMoneylineMarket],
+    List[SportsbookGame],
+    List[str],
+    Optional[List[Dict[str, Any]]],
+    Optional[Dict[str, int]],
+]:
     """
     For each matched game:
       - compute de-vig fair probs from sportsbook moneylines
@@ -710,6 +718,17 @@ def compute_value_rankings(
       - keep if edge >= MIN_EDGE and value_rel criteria
     """
     rows: List[Dict[str, Any]] = []
+    debug_rows_all: List[Dict[str, Any]] = []
+    debug_counts: Dict[str, int] = {
+        "matched_games": 0,
+        "candidates_total": 0,
+        "cut_sportsbook_underdog": 0,
+        "cut_polymarket_favorite": 0,
+        "cut_inside_range": 0,
+        "cut_edge": 0,
+        "cut_bad_prob": 0,
+        "kept": 0,
+    }
     skipped_reasons: List[str] = []
     matched_books: set[int] = set()
     unmatched_polys: List[PolyMoneylineMarket] = []
@@ -721,6 +740,7 @@ def compute_value_rankings(
             continue
         sb_index, sb = matched
         matched_books.add(sb_index)
+        debug_counts["matched_games"] += 1
 
         sb_league = normalize_league(sb.league or "")
         # Determine which sportsbook side maps to which Polymarket outcome using the same token overlap approach.
@@ -773,28 +793,61 @@ def compute_value_rankings(
         ]
 
         for candidate in candidates:
+            debug_counts["candidates_total"] += 1
             sportsbook_ml = candidate["sportsbook_ml"]
-            # "less than +200" means exclude +200 exactly (and beyond)
-            if sportsbook_ml >= SPORTSBOOK_MAX_UNDERDOG:
-                continue
-
             polymarket_ml = candidate["polymarket_ml"]
-            # "greater than -300" means exclude -300 exactly (and more negative)
-            if polymarket_ml is None or polymarket_ml <= POLYMARKET_MAX_FAVORITE:
-                continue
-
             range_data = candidate["range"]
-            outside_range = is_outside_range(polymarket_ml, range_data)
-            if REQUIRE_OUTSIDE_RANGE and not outside_range:
-                continue
-
             sportsbook_fair_prob = candidate["sportsbook_fair_prob"]
-            if sportsbook_fair_prob <= 0:
-                continue
-
             polymarket_prob = candidate["polymarket_prob"]
             edge_abs = sportsbook_fair_prob - polymarket_prob
-            if edge_abs < MIN_EDGE:
+            outside_range = False
+            if polymarket_ml is not None:
+                outside_range = is_outside_range(polymarket_ml, range_data)
+
+            pass_sportsbook = sportsbook_ml < SPORTSBOOK_MAX_UNDERDOG
+            pass_polymarket = (polymarket_ml is not None) and (polymarket_ml > POLYMARKET_MAX_FAVORITE)
+            pass_outside = (not REQUIRE_OUTSIDE_RANGE) or outside_range
+            pass_prob = sportsbook_fair_prob > 0
+            pass_edge = edge_abs >= MIN_EDGE
+
+            if DEBUG_MODE:
+                debug_rows_all.append(
+                    {
+                        "league": sb_league,
+                        "matchup": matchup,
+                        "recommended_side": candidate["team"],
+                        "range_side": candidate["range_side"],
+                        "start_time_et": start_s,
+                        "sportsbook_ml": sportsbook_ml,
+                        "polymarket_ml": polymarket_ml,
+                        "sportsbook_fair_prob": sportsbook_fair_prob,
+                        "polymarket_prob": polymarket_prob,
+                        "edge_abs": edge_abs,
+                        "outside_range": outside_range,
+                        "books_used": sb.books_used,
+                        "pass_sportsbook_ml": pass_sportsbook,
+                        "pass_polymarket_ml": pass_polymarket,
+                        "pass_outside_range": pass_outside,
+                        "pass_edge": pass_edge,
+                        "pass_prob": pass_prob,
+                        "polymarket_url": pm.url,
+                    }
+                )
+
+            if not pass_sportsbook:
+                debug_counts["cut_sportsbook_underdog"] += 1
+                continue
+            if not pass_polymarket:
+                debug_counts["cut_polymarket_favorite"] += 1
+                continue
+            if not pass_outside:
+                debug_counts["cut_inside_range"] += 1
+                continue
+            if not pass_prob:
+                debug_counts["cut_bad_prob"] += 1
+                continue
+            if not pass_edge:
+                debug_counts["cut_edge"] += 1
                 continue
 
             value_rel = edge_abs / sportsbook_fair_prob
@@ -841,11 +894,49 @@ def compute_value_rankings(
                     "away_outside": is_outside_range(pm.ml2, sb.away_range) if pm.ml2 is not None else False,
                 }
             )
+            debug_counts["kept"] += 1
 
     unmatched_books = [sb for idx, sb in enumerate(books) if idx not in matched_books]
     # stable-ish: value first, then absolute edge
     rows.sort(key=lambda r: (r["value_rel"], r["edge_abs"]), reverse=True)
-    return rows, unmatched_polys, unmatched_books, skipped_reasons
+    if DEBUG_MODE:
+        debug_rows_all.sort(key=lambda r: (r["edge_abs"], r["sportsbook_fair_prob"]), reverse=True)
+        return rows, unmatched_polys, unmatched_books, skipped_reasons, debug_rows_all, debug_counts
+    return rows, unmatched_polys, unmatched_books, skipped_reasons, None, None
+
+
+def write_debug_candidates(rows_all: List[Dict[str, Any]], debug_counts: Dict[str, int]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    csv_path = OUTPUT_DIR / "debug_candidates_all.csv"
+    cols = [
+        "league",
+        "matchup",
+        "recommended_side",
+        "range_side",
+        "start_time_et",
+        "sportsbook_ml",
+        "polymarket_ml",
+        "sportsbook_fair_prob",
+        "polymarket_prob",
+        "edge_abs",
+        "outside_range",
+        "books_used",
+        "pass_sportsbook_ml",
+        "pass_polymarket_ml",
+        "pass_outside_range",
+        "pass_edge",
+        "pass_prob",
+        "polymarket_url",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for r in rows_all:
+            w.writerow(r)
+
+    txt = OUTPUT_DIR / "debug_summary.txt"
+    lines = ["DEBUG MODE SUMMARY", json.dumps(debug_counts, indent=2, sort_keys=True)]
+    txt.write_text("\n".join(lines), encoding="utf-8")
 
 
 def write_value_reports(rows: List[Dict[str, Any]]) -> None:
@@ -917,13 +1008,50 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
     txt_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def format_discord_message(rows: List[Dict[str, Any]], polymarket_count: int, sportsbook_count: int) -> str:
+def format_discord_message(
+    rows: List[Dict[str, Any]],
+    polymarket_count: int,
+    sportsbook_count: int,
+    debug_rows_all: Optional[List[Dict[str, Any]]] = None,
+    debug_counts: Optional[Dict[str, int]] = None,
+) -> str:
     top = rows[: min(TOP_N, DISCORD_TOP_N)]
 
     header = f"**Polymarket vs Sportsbooks — Top {len(top)} (edge ≥ {MIN_EDGE:.1%}, outside SB range)**\n"
 
     if not top:
-        return header + "\nNo qualifying edges found today."
+        if not DEBUG_MODE:
+            return header + "\nNo qualifying edges found today."
+        lines = [header, "No qualifying edges found today."]
+        if debug_rows_all:
+            lines.append("")
+            lines.append(f"_Debug: top {min(DEBUG_SUMMARY_LINES, len(debug_rows_all))} by edge (all candidates)._")
+            for row in debug_rows_all[:DEBUG_SUMMARY_LINES]:
+                pm_ml_s = str(row["polymarket_ml"]) if row["polymarket_ml"] is not None else "n/a"
+                league_prefix = f"{row['league']} - " if row.get("league") else ""
+                lines.append(
+                    f"- {league_prefix}{row['matchup']} — {row['recommended_side']} | "
+                    f"PM {pm_ml_s} vs Fair {row['sportsbook_ml']} | "
+                    f"Edge {row['edge_abs']:+.1%}"
+                )
+        if debug_counts:
+            lines.append("")
+            lines.append(
+                "_Debug filter counts: "
+                f"candidates={debug_counts.get('candidates_total', 0)}, "
+                f"kept={debug_counts.get('kept', 0)}, "
+                f"cut_edge={debug_counts.get('cut_edge', 0)}, "
+                f"cut_inside_range={debug_counts.get('cut_inside_range', 0)}, "
+                f"cut_sportsbook_underdog={debug_counts.get('cut_sportsbook_underdog', 0)}, "
+                f"cut_polymarket_favorite={debug_counts.get('cut_polymarket_favorite', 0)}, "
+                f"cut_bad_prob={debug_counts.get('cut_bad_prob', 0)}"
+            )
+        lines.append("")
+        lines.append(
+            "_Debug mode is ON — check artifact `reports/debug_candidates_all.csv` to see all candidates and why "
+            "they failed filters._"
+        )
+        return "\n".join(lines)
 
     lines: List[str] = [header]
     for i, r in enumerate(top, 1):
@@ -1004,6 +1132,7 @@ def main() -> None:
             "min_books": env_int("MIN_BOOKS", 3),
             "poly_tag_id": GAME_BETS_TAG_ID,
             "poly_fallback": POLY_FALLBACK,
+            "debug_mode": DEBUG_MODE,
         },
     }
     write_diagnostics(diagnostics)
@@ -1016,7 +1145,7 @@ def main() -> None:
     books, odds_debug = load_sportsbook_games_with_debug()
     diagnostics["odds_api"] = odds_debug
     write_diagnostics(diagnostics)
-    rows, unmatched_polys, unmatched_books, _skips = compute_value_rankings(polys, books)
+    rows, unmatched_polys, unmatched_books, _skips, debug_rows_all, debug_counts = compute_value_rankings(polys, books)
     diagnostics["results"] = {
         "polymarket_count": len(polys),
         "sportsbook_count": len(books),
@@ -1027,8 +1156,16 @@ def main() -> None:
     write_diagnostics(diagnostics)
     write_value_reports(rows)
     write_unmatched_reports(unmatched_polys, unmatched_books)
+    if DEBUG_MODE and debug_rows_all is not None:
+        write_debug_candidates(debug_rows_all, debug_counts or {})
 
-    msg = format_discord_message(rows, polymarket_count=len(polys), sportsbook_count=len(books))
+    msg = format_discord_message(
+        rows,
+        polymarket_count=len(polys),
+        sportsbook_count=len(books),
+        debug_rows_all=debug_rows_all,
+        debug_counts=debug_counts,
+    )
     post_discord(msg)
 
 

@@ -2,6 +2,12 @@ name: Polymarket Sports Value Scan
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: "Debug mode (writes full candidate CSV + extra Discord diagnostics)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # 6:00 AM America/New_York (handles DST by running at both possible UTC hours
     # and gating at runtime).
@@ -61,6 +67,7 @@ jobs:
           MIN_BOOKS: ${{ vars.MIN_BOOKS }}
           ODDS_REGIONS: ${{ vars.ODDS_REGIONS }}
           POLY_FALLBACK: ${{ vars.POLY_FALLBACK }}
+          DEBUG_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.debug_mode) && '1' || '0' }}
         run: python polymarket_sports_value.py
 
       - name: Upload reports artifact
