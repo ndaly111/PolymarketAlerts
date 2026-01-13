@@ -53,8 +53,8 @@ jobs:
 
       - name: Run compare
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
+          THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
         run: |
           SPORT="${{ github.event.inputs.sport || 'all' }}"
           TOP="${{ github.event.inputs.top_n || '25' }}"

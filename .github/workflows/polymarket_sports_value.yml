@@ -3,9 +3,10 @@ name: Polymarket Sports Value Scan
 on:
   workflow_dispatch:
   schedule:
-    # 6:00 AM America/New_York
-    # NOTE: GitHub Actions cron is UTC. In EST (winter), 6:00 AM ET = 11:00 UTC.
-    - cron: "0 11 * * *"
+    # 6:00 AM America/New_York (handles DST by running at both possible UTC hours
+    # and gating at runtime).
+    - cron: "0 10 * * *"  # 6:00 AM EDT
+    - cron: "0 11 * * *"  # 6:00 AM EST
 
 jobs:
   scan:
@@ -28,10 +29,24 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Gate to 6:00 AM America/New_York (schedule only)
+        id: gate
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          NOW="$(TZ=America/New_York date +%H%M)"
+          if [ "$NOW" = "0600" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Not 6:00 AM America/New_York (it's $NOW). Skipping run."
+          fi
+
       - name: Run scanner
+        if: github.event_name != 'schedule' || steps.gate.outputs.run == 'true'
         env:
-          THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT }}
+          THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
 
           # Optional: set these as Repository Variables (Settings -> Secrets and variables -> Actions -> Variables)
           DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
@@ -42,6 +57,10 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN }}
           INCLUDE_DEBUG_SUMMARY: ${{ vars.INCLUDE_DEBUG_SUMMARY }}
           ODDS_SPORT_KEYS: ${{ vars.ODDS_SPORT_KEYS }}
+          GAME_BETS_TAG_ID: ${{ vars.GAME_BETS_TAG_ID }}
+          MIN_BOOKS: ${{ vars.MIN_BOOKS }}
+          ODDS_REGIONS: ${{ vars.ODDS_REGIONS }}
+          POLY_FALLBACK: ${{ vars.POLY_FALLBACK }}
         run: python polymarket_sports_value.py
 
       - name: Upload reports artifact

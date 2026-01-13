@@ -57,6 +57,19 @@ def _get_odds_api_key() -> str:
     return k
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except Exception:
+        return default
+
+
 def fetch_h2h_events(
     sport_key: str,
     regions: str = "us",
@@ -86,7 +99,10 @@ def fetch_h2h_events(
 
 # ---- Consensus + range extraction ----
 
-def _extract_book_prices_for_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _extract_book_prices_for_event(
+    event: Dict[str, Any],
+    min_books: int = 3,
+) -> Optional[Dict[str, Any]]:
     """
     For a single event, extract per-book American odds for home/away.
     Returns None if insufficient data.
@@ -134,8 +150,8 @@ def _extract_book_prices_for_event(event: Dict[str, Any]) -> Optional[Dict[str, 
             )
             break  # one h2h market per bookmaker is enough
 
-    if len(per_book) < 3:
-        # require at least 3 books for “consensus”
+    if len(per_book) < max(1, int(min_books)):
+        # require at least N books for “consensus”
         return None
 
     return {
@@ -201,7 +217,10 @@ def _range_for_side(per_book: List[Dict[str, Any]], side: str) -> Dict[str, Any]
     }
 
 
-def compute_no_vig_consensus(per_book: List[Dict[str, Any]]) -> Dict[str, Any]:
+def compute_no_vig_consensus(
+    per_book: List[Dict[str, Any]],
+    min_books: int = 3,
+) -> Dict[str, Any]:
     """
     Compute no-vig consensus probabilities (median across books after removing vig per book).
     Output includes:
@@ -228,7 +247,7 @@ def compute_no_vig_consensus(per_book: List[Dict[str, Any]]) -> Dict[str, Any]:
         home_ps.append(p_home_raw / s)
         away_ps.append(p_away_raw / s)
 
-    if len(home_ps) < 3:
+    if len(home_ps) < max(1, int(min_books)):
         raise RuntimeError("Not enough valid books to compute consensus.")
 
     p_home = float(median(home_ps))
@@ -248,7 +267,9 @@ def compute_no_vig_consensus(per_book: List[Dict[str, Any]]) -> Dict[str, Any]:
 def build_moneyline_board(
     sport_keys: Optional[List[str]] = None,
     regions: str = "us",
-) -> List[Dict[str, Any]]:
+    min_books: Optional[int] = None,
+    return_debug: bool = False,
+) -> Any:
     """
     Returns a list of events with:
       - teams, commence_time, sport_key
@@ -257,17 +278,35 @@ def build_moneyline_board(
       - per_book list
     """
     sport_keys = sport_keys or DEFAULT_SPORT_KEYS
+    min_books = int(min_books if min_books is not None else _env_int("MIN_BOOKS", 3))
     board: List[Dict[str, Any]] = []
+    debug: Dict[str, Any] = {
+        "sport_keys": sport_keys,
+        "regions": regions,
+        "min_books": min_books,
+        "raw_event_counts": {},
+        "kept_event_counts": {},
+        "errors": [],
+    }
 
     for sk in sport_keys:
-        events = fetch_h2h_events(sk, regions=regions)
+        try:
+            events = fetch_h2h_events(sk, regions=regions)
+            debug["raw_event_counts"][sk] = len(events)
+        except Exception as exc:
+            debug["errors"].append({"sport_key": sk, "stage": "fetch", "error": str(exc)})
+            continue
 
+        kept = 0
         for ev in events:
-            extracted = _extract_book_prices_for_event(ev)
+            extracted = _extract_book_prices_for_event(ev, min_books=min_books)
             if not extracted:
                 continue
 
-            consensus = compute_no_vig_consensus(extracted["per_book"])
+            try:
+                consensus = compute_no_vig_consensus(extracted["per_book"], min_books=min_books)
+            except Exception:
+                continue
             board.append(
                 {
                     "sport_key": sk,
@@ -282,5 +321,10 @@ def build_moneyline_board(
                     "away_team_norm": normalize_team_name(extracted["away_team"]),
                 }
             )
+            kept += 1
 
+        debug["kept_event_counts"][sk] = kept
+
+    if return_debug:
+        return board, debug
     return board
