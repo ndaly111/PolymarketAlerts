@@ -444,6 +444,34 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
     return markets
 
 
+def _gamma_param(v: Any) -> str:
+    """
+    Gamma query params are picky. Legacy script uses lowercase 'true'/'false' strings.
+    requests will serialize Python bools as 'True'/'False' (capitalized), which can yield 0 results.
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return ""
+    if isinstance(v, (int, float)):
+        # ints should be strings for query params
+        # floats are unlikely here but keep consistent
+        return str(v)
+    if isinstance(v, list):
+        # safest for query params: comma-separated
+        return ",".join(str(x) for x in v if str(x).strip())
+    return str(v)
+
+
+def _normalize_gamma_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in (params or {}).items():
+        s = _gamma_param(v)
+        if s != "":
+            out[k] = s
+    return out
+
+
 def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket], Dict[str, Any]]:
     """
     Fetch active, unclosed sports moneyline markets with fallback filters if enabled.
@@ -468,8 +496,9 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         limit = 500
         while True:
             params = dict(params_base)
-            params["limit"] = limit
-            params["offset"] = offset
+            params["limit"] = str(limit)
+            params["offset"] = str(offset)
+            params = _normalize_gamma_params(params)
             batch = gamma_get("/markets", params=params)
             if not isinstance(batch, list) or not batch:
                 break
@@ -483,14 +512,14 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         (
             "tag+types",
             {
-                "active": True,
-                "closed": False,
-                "tag_id": GAME_BETS_TAG_ID,
-                "sports_market_types": ml_types,
+                "active": "true",
+                "closed": "false",
+                "tag_id": str(GAME_BETS_TAG_ID),
+                "sports_market_types": ",".join(ml_types) if ml_types else "",
             },
         ),
-        ("tag_only", {"active": True, "closed": False, "tag_id": GAME_BETS_TAG_ID}),
-        ("no_tag", {"active": True, "closed": False}),
+        ("tag_only", {"active": "true", "closed": "false", "tag_id": str(GAME_BETS_TAG_ID)}),
+        ("no_tag", {"active": "true", "closed": "false"}),
     ]
 
     raw_markets: List[Dict[str, Any]] = []
@@ -979,6 +1008,7 @@ def format_discord_message(
     rows: List[Dict[str, Any]],
     polymarket_count: int,
     sportsbook_count: int,
+    poly_debug: Optional[Dict[str, Any]] = None,
     debug_rows_all: Optional[List[Dict[str, Any]]] = None,
     debug_counts: Optional[Dict[str, int]] = None,
 ) -> str:
@@ -994,6 +1024,13 @@ def format_discord_message(
         )
 
         lines: List[str] = [header]
+        if poly_debug:
+            attempts = poly_debug.get("attempts") or []
+            if attempts:
+                attempts_summary = ", ".join(
+                    f"{attempt.get('name', '?')}={attempt.get('count', 0)}" for attempt in attempts
+                )
+                lines.append(f"Poly attempts: {attempts_summary}")
         if not top_dbg:
             lines.append("\nNo candidates available to display (debug_rows_all empty).")
             lines.append(f"Polymarket markets: {polymarket_count}, Sportsbook events: {sportsbook_count}")
@@ -1157,6 +1194,7 @@ def main() -> None:
         rows,
         polymarket_count=len(polys),
         sportsbook_count=len(books),
+        poly_debug=poly_debug,
         debug_rows_all=debug_rows_all,
         debug_counts=debug_counts,
     )
