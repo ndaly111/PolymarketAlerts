@@ -374,7 +374,11 @@ def build_polymarket_candidates(markets: List[dict]) -> List[PolyMarket]:
 def fetch_sportsbook_events(sport_key: str) -> List[BookEvent]:
     api_key = os.getenv("THE_ODDS_API", "").strip()
     if not api_key:
-        raise RuntimeError("Missing THE_ODDS_API secret/env var.")
+        print(
+            "WARN: Missing THE_ODDS_API secret/env var; skipping sportsbook odds fetch.",
+            file=sys.stderr,
+        )
+        return []
 
     base = "https://api.the-odds-api.com/v4/sports"
     params = {
@@ -629,6 +633,11 @@ def main() -> int:
     book_events: List[BookEvent] = []
     for sport_key in sport_keys:
         book_events.extend(fetch_sportsbook_events(sport_key))
+    if not book_events:
+        print(
+            "WARN: No sportsbook events returned; verify API key, sport keys, and upstream availability.",
+            file=sys.stderr,
+        )
 
     raw_markets = fetch_polymarket_markets(active_only=True, limit=200)
     candidates = build_polymarket_candidates(raw_markets)
