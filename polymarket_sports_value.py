@@ -1156,6 +1156,10 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "start_time_et",
         "sportsbook_ml",
         "polymarket_ml",
+        "home_team",
+        "away_team",
+        "polymarket_home_ml",
+        "polymarket_away_ml",
         "home_fair_ml",
         "away_fair_ml",
         "home_prob_fair",
@@ -1181,8 +1185,14 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "value_rel",
         "polymarket_url",
     ]
+    # If row dicts gain new fields over time, include them automatically so the workflow
+    # doesn't crash with:
+    #   ValueError: dict contains fields not in fieldnames
+    extra_cols = sorted({k for r in rows for k in r.keys()} - set(cols))
+    cols = cols + extra_cols
+
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=cols)
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow(r)
