@@ -67,6 +67,9 @@ DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
 DRY_RUN = env_int("DRY_RUN", 0)
 REQUIRE_OUTSIDE_RANGE = env_int("REQUIRE_OUTSIDE_RANGE", 1)
 DEBUG_MODE = env_int("DEBUG_MODE", 0)  # 1 = print Discord debug preview
+DEBUG_POLY_SLUG = (os.getenv("DEBUG_POLY_SLUG", "") or "").strip()
+DEBUG_POLY_MAX = env_int("DEBUG_POLY_MAX", 10)  # max markets to dump when debug is on
+CLOB_BASE = "https://clob.polymarket.com"
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -127,6 +130,43 @@ def gamma_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     return http_get_json(f"{GAMMA_API_BASE}{path}", params=params)
 
 
+_CLOB_PRICE_CACHE: Dict[Tuple[str, str], Optional[float]] = {}
+
+
+def clob_get_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    url = f"{CLOB_BASE}{path}"
+    r = SESSION.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} GET {url}: {r.text[:300]}")
+    return r.json()
+
+
+def clob_get_price(token_id: str, side: str = "buy") -> Optional[float]:
+    token_id = str(token_id or "").strip()
+    if not token_id:
+        return None
+    key = (token_id, side)
+    if key in _CLOB_PRICE_CACHE:
+        return _CLOB_PRICE_CACHE[key]
+
+    try:
+        data = clob_get_json("/price", params={"token_id": token_id, "side": side})
+        price = data.get("price", None)
+        if price is None:
+            _CLOB_PRICE_CACHE[key] = None
+            return None
+        p = float(price)
+        if not (0.0 < p < 1.0):
+            _CLOB_PRICE_CACHE[key] = None
+            return None
+        _CLOB_PRICE_CACHE[key] = p
+        return p
+    except Exception as exc:
+        _CLOB_PRICE_CACHE[key] = None
+        _ = exc
+        return None
+
+
 def parse_json_list(value: Any) -> List[Any]:
     """
     Gamma returns some list fields as JSON-encoded strings.
@@ -147,6 +187,67 @@ def parse_json_list(value: Any) -> List[Any]:
             v = v.strip("[]")
             return [x.strip().strip('"').strip("'") for x in v.split(",") if x.strip()]
     return []
+
+
+def _market_debug_block(m: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+
+    market_id = str(m.get("id") or m.get("marketId") or "").strip()
+    slug = str(m.get("slug") or "").strip()
+    title = str(m.get("title") or "").strip().replace("\n", " ")
+    question = str(m.get("question") or "").strip().replace("\n", " ")
+    smt = (
+        m.get("sportsMarketType")
+        or m.get("sports_market_type")
+        or m.get("sports_market_types")
+        or ""
+    )
+
+    outcomes = parse_json_list(m.get("outcomes"))
+    prices = parse_json_list(m.get("outcomePrices"))
+    token_ids = parse_json_list(m.get("clobTokenIds"))
+
+    lines.append("----- MARKET DEBUG -----")
+    lines.append(f"id={market_id}")
+    lines.append(f"slug={slug}")
+    if smt:
+        lines.append(f"sportsMarketType={smt}")
+    if title:
+        lines.append(f"title={textwrap.shorten(title, width=160, placeholder='…')}")
+    if question and question != title:
+        lines.append(f"question={textwrap.shorten(question, width=160, placeholder='…')}")
+
+    lines.append(f"outcomes={outcomes}")
+    lines.append(f"outcomePrices(Gamma)={prices}")
+    lines.append(f"clobTokenIds={token_ids}")
+
+    if len(outcomes) == 2 and len(prices) == 2:
+        try:
+            g1 = float(prices[0])
+            g2 = float(prices[1])
+        except Exception:
+            g1 = None
+            g2 = None
+
+        if g1 and 0.0 < g1 < 1.0:
+            lines.append(f"gamma_ml1={prob_to_moneyline(g1)}")
+        if g2 and 0.0 < g2 < 1.0:
+            lines.append(f"gamma_ml2={prob_to_moneyline(g2)}")
+
+    if len(token_ids) == 2:
+        t1 = str(token_ids[0])
+        t2 = str(token_ids[1])
+        p1 = clob_get_price(t1, side="buy")
+        p2 = clob_get_price(t2, side="buy")
+        lines.append(f"clob_buy_price1={p1}")
+        lines.append(f"clob_buy_price2={p2}")
+        if p1 and 0.0 < p1 < 1.0:
+            lines.append(f"clob_ml1={prob_to_moneyline(p1)}")
+        if p2 and 0.0 < p2 < 1.0:
+            lines.append(f"clob_ml2={prob_to_moneyline(p2)}")
+
+    lines.append("------------------------")
+    return lines
 
 
 def iso_to_dt(s: Any) -> Optional[datetime]:
@@ -604,6 +705,21 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
             lines.append(f"- {textwrap.shorten(str(title), width=140, placeholder='…')}")
         lines.append("")
 
+    if DEBUG_MODE and DEBUG_POLY_SLUG:
+        lines.append(f"FOCUSED DEBUG (slug={DEBUG_POLY_SLUG})")
+        found = 0
+        for m in raw_markets:
+            slug = str(m.get("slug") or "").strip()
+            if slug != DEBUG_POLY_SLUG:
+                continue
+            lines.extend(_market_debug_block(m))
+            found += 1
+            if found >= DEBUG_POLY_MAX:
+                break
+        if found == 0:
+            lines.append("No raw markets matched DEBUG_POLY_SLUG.")
+        lines.append("")
+
     lines.append("SAMPLE RAW MARKETS (first 60)")
     sample = raw_markets[:60]
     for i, m in enumerate(sample, 1):
@@ -683,9 +799,20 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
             params["offset"] = str(offset)
             params = _normalize_gamma_params(params)
             batch = gamma_get("/markets", params=params)
+            # IMPORTANT: pagination must be based on the unfiltered batch, otherwise we can
+            # stop early before reaching the page where DEBUG_POLY_SLUG appears.
             if not isinstance(batch, list) or not batch:
                 break
-            raw.extend(batch)
+
+            if DEBUG_MODE and DEBUG_POLY_SLUG:
+                filtered = [
+                    x for x in batch if str(x.get("slug") or "").strip() == DEBUG_POLY_SLUG
+                ]
+            else:
+                filtered = batch
+
+            raw.extend(filtered)
+            # Use the unfiltered batch length to decide if we reached the end.
             if len(batch) < limit:
                 break
             offset += limit
