@@ -83,14 +83,21 @@ REQUEST_TIMEOUT = env_int("REQUEST_TIMEOUT", 25)
 EXCLUDED_MARKET_KEYWORDS = {
     "spread",
     "total",
-    "over",
-    "under",
     "o/u",
     "handicap",
     "puck line",
     "run line",
 }
-SIGNED_NUMBER_RE = re.compile(r"[+-]\d+(\.\d+)?")
+# Use word boundaries so we don't falsely match team names like "Rovers" or "Governors".
+EXCLUDED_MARKET_RE = re.compile(
+    r"\b(spread|handicap|puck line|run line)\b"
+    r"|\b(total|o/u|over/under)\b"
+    r"|\b(over|under)\s*\d",
+    flags=re.IGNORECASE,
+)
+# Detect signed point/goal totals like -3.5, +7, etc.
+# IMPORTANT: do not match dates in slugs like 2025-11-03 (the "-03" part).
+SIGNED_NUMBER_RE = re.compile(r"(?<!\d)[+-]\s*\d+(?:\.\d+)?(?!\d)")
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -379,6 +386,110 @@ def get_moneyline_types() -> List[str]:
         return ["MONEYLINE"]
 
 
+def _clean_matchup_text(text: str) -> str:
+    cleaned = text.replace("\n", " ").strip()
+    cleaned = re.sub(r"^[A-Za-z]{2,12}\s*:\s*", "", cleaned).strip()
+    for sep in (" — ", " - ", " | ", ": "):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0].strip()
+    return cleaned
+
+
+def _strip_slug_date_tail(text: str) -> str:
+    """
+    Slugs often end with YYYY MM DD (after replacing '-' with spaces).
+    Strip that suffix so team names don't include date tokens.
+    """
+    return re.sub(r"\b20\d{2}\s+[01]?\d\s+[0-3]?\d\b.*$", "", text).strip()
+
+
+def _clean_team_name(name: str) -> str:
+    return re.sub(r"[?!.]+$", "", name).strip()
+
+
+def _extract_matchup(text: str) -> Optional[Tuple[str, str]]:
+    if not text:
+        return None
+    cleaned = _clean_matchup_text(text)
+    patterns = [
+        r"^will (?P<a>.+?) (?:beat|defeat|win(?: vs| against)?|win over|over) (?P<b>.+?)\??$",
+        r"^(?P<a>.+?) vs\.? (?P<b>.+)$",
+        r"^(?P<a>.+?) v\.? (?P<b>.+)$",
+        r"^(?P<a>.+?) @ (?P<b>.+)$",
+        r"^(?P<a>.+?) at (?P<b>.+)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, cleaned, flags=re.IGNORECASE)
+        if not match:
+            continue
+        team_a = _clean_team_name(match.group("a"))
+        team_b = _clean_team_name(match.group("b"))
+        if team_a and team_b:
+            return team_a, team_b
+    return None
+
+
+def _extract_matchup_from_market(market: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    for key in ("title", "question"):
+        value = str(market.get(key) or "").strip()
+        matchup = _extract_matchup(value)
+        if matchup:
+            return matchup
+    slug = str(market.get("slug") or "").strip()
+    if slug:
+        slug_text = _strip_slug_date_tail(slug.replace("-", " "))
+        matchup = _extract_matchup(slug_text)
+        if matchup:
+            return matchup
+        if " vs " in slug_text:
+            parts = slug_text.split(" vs ", 1)
+            if len(parts) == 2:
+                team_a = _clean_team_name(_strip_slug_date_tail(parts[0]))
+                team_b = _clean_team_name(_strip_slug_date_tail(parts[1]))
+                if team_a and team_b:
+                    return team_a, team_b
+    return None
+
+
+def _normalize_generic_outcomes(
+    market: Dict[str, Any],
+    outcomes: List[Any],
+    prices: List[Any],
+    debug: Dict[str, Any],
+) -> Optional[Tuple[str, str, float, float]]:
+    o1, o2 = str(outcomes[0]), str(outcomes[1])
+    canon_o1 = canon(o1)
+    canon_o2 = canon(o2)
+    yes_no = {canon_o1, canon_o2} <= {"yes", "no"}
+    if not yes_no:
+        debug["parse_skipped_generic_outcomes"] += 1
+        sample = debug.setdefault("skipped_generic_samples", [])
+        if len(sample) < 20:
+            sample.append(str(market.get("title") or market.get("question") or market.get("slug") or ""))
+        return None
+
+    matchup = _extract_matchup_from_market(market)
+    if not matchup:
+        debug["parse_generic_title_failed"] += 1
+        return None
+
+    try:
+        p1 = float(prices[0])
+        p2 = float(prices[1])
+    except Exception:
+        debug["parse_generic_yesno_missing"] += 1
+        return None
+
+    yes_prob = p1 if canon_o1 == "yes" else p2
+    no_prob = p2 if canon_o1 == "yes" else p1
+    if not (0.0 < yes_prob < 1.0 and 0.0 < no_prob < 1.0):
+        debug["parse_generic_yesno_missing"] += 1
+        return None
+
+    team_a, team_b = matchup
+    return team_a, team_b, yes_prob, no_prob
+
+
 def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str, Any]) -> List[PolyMoneylineMarket]:
     markets: List[PolyMoneylineMarket] = []
     for m in raw_markets:
@@ -394,26 +505,40 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
             continue
 
         o1, o2 = str(outcomes[0]), str(outcomes[1])
-        if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
-            continue
 
         slug = str(m.get("slug") or "").strip()
         title = str(m.get("title") or "").strip()
         question = str(m.get("question") or "").strip()
-        text = " ".join([slug, title, question, o1, o2]).lower()
-        if any(keyword in text for keyword in EXCLUDED_MARKET_KEYWORDS):
+        # IMPORTANT: do NOT include slug here because slugs often include dates (e.g., 2025-11-03)
+        # which can trigger signed-number detection and incorrectly exclude valid markets.
+        text = " ".join([title, question, o1, o2]).lower()
+        if EXCLUDED_MARKET_RE.search(text):
             debug["parse_excluded_non_moneyline"] += 1
             continue
-        if SIGNED_NUMBER_RE.search(text):
-            debug["parse_excluded_non_moneyline"] += 1
-            continue
+        m_signed = SIGNED_NUMBER_RE.search(text)
+        if m_signed:
+            s = m_signed.group(0).replace(" ", "")
+            try:
+                val = float(s)
+            except Exception:
+                val = 0.0
+            if abs(val) <= 50:
+                debug["parse_excluded_non_moneyline"] += 1
+                continue
 
-        try:
-            p1 = float(prices[0])
-            p2 = float(prices[1])
-        except Exception:
-            debug["parse_prices_failed"] += 1
-            continue
+        if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
+            normalized = _normalize_generic_outcomes(m, outcomes, prices, debug)
+            if not normalized:
+                continue
+            team1, team2, p1, p2 = normalized
+        else:
+            team1, team2 = o1, o2
+            try:
+                p1 = float(prices[0])
+                p2 = float(prices[1])
+            except Exception:
+                debug["parse_prices_failed"] += 1
+                continue
 
         if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
             debug["parse_prices_failed"] += 1
@@ -433,8 +558,8 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 slug=slug,
                 url=url,
                 start_time=start_time,
-                team1=o1,
-                team2=o2,
+                team1=team1,
+                team2=team2,
                 prob1=p1,
                 prob2=p2,
                 ml1=prob_to_moneyline(p1),
@@ -463,11 +588,21 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "parse_outcomes_failed",
         "parse_prices_failed",
         "parse_excluded_non_moneyline",
+        "parse_skipped_generic_outcomes",
+        "parse_generic_title_failed",
+        "parse_generic_yesno_missing",
         "selected_attempt",
     ]:
         if k in debug:
             lines.append(f"- {k}: {debug.get(k)}")
     lines.append("")
+
+    skipped_samples = debug.get("skipped_generic_samples") or []
+    if skipped_samples:
+        lines.append("SAMPLE SKIPPED GENERIC TITLES (first 20)")
+        for title in skipped_samples[:20]:
+            lines.append(f"- {textwrap.shorten(str(title), width=140, placeholder='…')}")
+        lines.append("")
 
     lines.append("SAMPLE RAW MARKETS (first 60)")
     sample = raw_markets[:60]
@@ -532,6 +667,10 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         "parse_outcomes_failed": 0,
         "parse_prices_failed": 0,
         "parse_excluded_non_moneyline": 0,
+        "parse_skipped_generic_outcomes": 0,
+        "parse_generic_title_failed": 0,
+        "parse_generic_yesno_missing": 0,
+        "skipped_generic_samples": [],
     }
 
     def _pull_raw(params_base: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -555,12 +694,7 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
     attempts: List[Tuple[str, Dict[str, Any]]] = [
         (
             "tag+types",
-            {
-                "active": "true",
-                "closed": "false",
-                "tag_id": str(GAME_BETS_TAG_ID),
-                "sports_market_types": ",".join(ml_types) if ml_types else "",
-            },
+            {"active": "true", "closed": "false", "tag_id": str(GAME_BETS_TAG_ID)},
         ),
         ("tag_only", {"active": "true", "closed": "false", "tag_id": str(GAME_BETS_TAG_ID)}),
         ("no_tag", {"active": "true", "closed": "false"}),
@@ -573,11 +707,40 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         if name != "tag+types" and not POLY_FALLBACK:
             continue
         try:
-            batch = _pull_raw(params)
-            debug["attempts"].append({"name": name, "params": params, "count": len(batch)})
-            if batch:
-                raw_markets = batch
-                debug["selected_attempt"] = name
+            if name == "tag+types":
+                if not ml_types:
+                    batch = _pull_raw(params)
+                    debug["attempts"].append({"name": name, "params": params, "count": len(batch)})
+                    if batch:
+                        raw_markets = batch
+                        debug["selected_attempt"] = name
+                else:
+                    combined: List[Dict[str, Any]] = []
+                    seen_ids: set = set()
+                    for market_type in ml_types:
+                        typed_params = dict(params)
+                        typed_params["sports_market_types"] = market_type
+                        batch = _pull_raw(typed_params)
+                        debug["attempts"].append(
+                            {"name": name, "params": typed_params, "count": len(batch)}
+                        )
+                        for item in batch:
+                            market_id = str(
+                                item.get("id") or item.get("marketId") or item.get("slug") or ""
+                            )
+                            if market_id in seen_ids:
+                                continue
+                            seen_ids.add(market_id)
+                            combined.append(item)
+                    if combined:
+                        raw_markets = combined
+                        debug["selected_attempt"] = name
+            else:
+                batch = _pull_raw(params)
+                debug["attempts"].append({"name": name, "params": params, "count": len(batch)})
+                if batch:
+                    raw_markets = batch
+                    debug["selected_attempt"] = name
         except Exception as exc:
             debug["attempts"].append(
                 {"name": name, "params": params, "count": 0, "error": str(exc)}
