@@ -70,6 +70,7 @@ DEBUG_MODE = env_int("DEBUG_MODE", 0)  # 1 = print Discord debug preview
 DEBUG_POLY_SLUG = (os.getenv("DEBUG_POLY_SLUG", "") or "").strip()
 DEBUG_POLY_MAX = env_int("DEBUG_POLY_MAX", 10)  # max markets to dump when debug is on
 CLOB_BASE = "https://clob.polymarket.com"
+POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "buy") or "buy").strip().lower()
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -189,6 +190,41 @@ def parse_json_list(value: Any) -> List[Any]:
     return []
 
 
+def resolve_polymarket_prob(market: Dict[str, Any], side_index: int) -> Optional[float]:
+    """
+    Return the real Polymarket probability using CLOB (buy/sell/mid depending on POLY_PRICE_SIDE).
+    Falls back to Gamma only if CLOB is unavailable.
+    """
+    token_ids = parse_json_list(market.get("clobTokenIds"))
+
+    if len(token_ids) == 2:
+        token_id = str(token_ids[side_index])
+        if POLY_PRICE_SIDE == "mid":
+            buy_p = clob_get_price(token_id, side="buy")
+            sell_p = clob_get_price(token_id, side="sell")
+            if buy_p is not None and sell_p is not None:
+                p = (buy_p + sell_p) / 2.0
+            else:
+                p = buy_p if buy_p is not None else sell_p
+        else:
+            side = POLY_PRICE_SIDE if POLY_PRICE_SIDE in {"buy", "sell"} else "buy"
+            p = clob_get_price(token_id, side=side)
+        if p is not None and 0.0 < p < 1.0:
+            return p
+
+    prices = parse_json_list(market.get("outcomePrices"))
+    if len(prices) != 2:
+        return None
+    try:
+        p = float(prices[side_index])
+        if 0.0 < p < 1.0:
+            return p
+    except Exception:
+        pass
+
+    return None
+
+
 def _market_debug_block(m: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
 
@@ -220,6 +256,8 @@ def _market_debug_block(m: Dict[str, Any]) -> List[str]:
     lines.append(f"outcomes={outcomes}")
     lines.append(f"outcomePrices(Gamma)={prices}")
     lines.append(f"clobTokenIds={token_ids}")
+    lines.append("NOTE: VALUE CALCULATION USES CLOB PRICES")
+    lines.append(f"POLY_PRICE_SIDE={POLY_PRICE_SIDE}")
 
     if len(outcomes) == 2 and len(prices) == 2:
         try:
@@ -237,14 +275,27 @@ def _market_debug_block(m: Dict[str, Any]) -> List[str]:
     if len(token_ids) == 2:
         t1 = str(token_ids[0])
         t2 = str(token_ids[1])
-        p1 = clob_get_price(t1, side="buy")
-        p2 = clob_get_price(t2, side="buy")
-        lines.append(f"clob_buy_price1={p1}")
-        lines.append(f"clob_buy_price2={p2}")
-        if p1 and 0.0 < p1 < 1.0:
-            lines.append(f"clob_ml1={prob_to_moneyline(p1)}")
-        if p2 and 0.0 < p2 < 1.0:
-            lines.append(f"clob_ml2={prob_to_moneyline(p2)}")
+        b1 = clob_get_price(t1, side="buy")
+        s1 = clob_get_price(t1, side="sell")
+        b2 = clob_get_price(t2, side="buy")
+        s2 = clob_get_price(t2, side="sell")
+
+        lines.append(f"clob_buy_price1={b1} | clob_sell_price1={s1}")
+        lines.append(f"clob_buy_price2={b2} | clob_sell_price2={s2}")
+
+        m1 = (b1 + s1) / 2.0 if (b1 is not None and s1 is not None) else (b1 if b1 is not None else s1)
+        m2 = (b2 + s2) / 2.0 if (b2 is not None and s2 is not None) else (b2 if b2 is not None else s2)
+        lines.append(f"clob_mid_price1={m1}")
+        lines.append(f"clob_mid_price2={m2}")
+
+        e1 = resolve_polymarket_prob(m, 0)
+        e2 = resolve_polymarket_prob(m, 1)
+        lines.append(f"clob_effective_price1={e1}")
+        lines.append(f"clob_effective_price2={e2}")
+        if e1 is not None and 0.0 < e1 < 1.0:
+            lines.append(f"clob_effective_ml1={prob_to_moneyline(e1)}")
+        if e2 is not None and 0.0 < e2 < 1.0:
+            lines.append(f"clob_effective_ml2={prob_to_moneyline(e2)}")
 
     lines.append("------------------------")
     return lines
@@ -406,11 +457,13 @@ def is_outside_range(poly_odds: int, range_data: Dict[str, Any]) -> bool:
 
 @dataclass(frozen=True)
 class PolyMoneylineMarket:
+    market_id: str
     slug: str
     url: str
     start_time: Optional[datetime]
     team1: str
     team2: str
+    sports_market_type: str
     prob1: float
     prob2: float
     ml1: Optional[int]
@@ -555,7 +608,8 @@ def _extract_matchup_from_market(market: Dict[str, Any]) -> Optional[Tuple[str, 
 def _normalize_generic_outcomes(
     market: Dict[str, Any],
     outcomes: List[Any],
-    prices: List[Any],
+    prob1: float,
+    prob2: float,
     debug: Dict[str, Any],
 ) -> Optional[Tuple[str, str, float, float]]:
     o1, o2 = str(outcomes[0]), str(outcomes[1])
@@ -574,15 +628,8 @@ def _normalize_generic_outcomes(
         debug["parse_generic_title_failed"] += 1
         return None
 
-    try:
-        p1 = float(prices[0])
-        p2 = float(prices[1])
-    except Exception:
-        debug["parse_generic_yesno_missing"] += 1
-        return None
-
-    yes_prob = p1 if canon_o1 == "yes" else p2
-    no_prob = p2 if canon_o1 == "yes" else p1
+    yes_prob = prob1 if canon_o1 == "yes" else prob2
+    no_prob = prob2 if canon_o1 == "yes" else prob1
     if not (0.0 < yes_prob < 1.0 and 0.0 < no_prob < 1.0):
         debug["parse_generic_yesno_missing"] += 1
         return None
@@ -596,18 +643,27 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
     for m in raw_markets:
         outcomes = parse_json_list(m.get("outcomes"))
         prices = parse_json_list(m.get("outcomePrices"))
+        p1 = resolve_polymarket_prob(m, 0)
+        p2 = resolve_polymarket_prob(m, 1)
 
         if len(outcomes) != 2:
             debug["parse_outcomes_failed"] += 1
             continue
 
-        if len(prices) != 2:
+        if p1 is None or p2 is None:
             debug["parse_prices_failed"] += 1
             continue
 
         o1, o2 = str(outcomes[0]), str(outcomes[1])
 
         slug = str(m.get("slug") or "").strip()
+        market_id = str(m.get("id") or m.get("marketId") or "").strip()
+        sports_market_type = str(
+            m.get("sportsMarketType")
+            or m.get("sports_market_type")
+            or m.get("sports_market_types")
+            or ""
+        ).strip()
         title = str(m.get("title") or "").strip()
         question = str(m.get("question") or "").strip()
         # IMPORTANT: do NOT include slug here because slugs often include dates (e.g., 2025-11-03)
@@ -628,22 +684,26 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 continue
 
         if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
-            normalized = _normalize_generic_outcomes(m, outcomes, prices, debug)
+            normalized = _normalize_generic_outcomes(m, outcomes, p1, p2, debug)
             if not normalized:
                 continue
             team1, team2, p1, p2 = normalized
         else:
             team1, team2 = o1, o2
-            try:
-                p1 = float(prices[0])
-                p2 = float(prices[1])
-            except Exception:
-                debug["parse_prices_failed"] += 1
-                continue
 
         if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
             debug["parse_prices_failed"] += 1
             continue
+
+        if len(prices) == 2:
+            try:
+                g1 = float(prices[0])
+                g2 = float(prices[1])
+            except Exception:
+                g1 = None
+                g2 = None
+            if g1 and g2 and (abs(p1 - g1) > 0.20 or abs(p2 - g2) > 0.20):
+                debug["gamma_clob_divergence"] = debug.get("gamma_clob_divergence", 0) + 1
 
         url = f"https://polymarket.com/market/{slug}" if slug else ""
 
@@ -656,11 +716,13 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
 
         markets.append(
             PolyMoneylineMarket(
+                market_id=market_id,
                 slug=slug,
                 url=url,
                 start_time=start_time,
                 team1=team1,
                 team2=team2,
+                sports_market_type=sports_market_type,
                 prob1=p1,
                 prob2=p2,
                 ml1=prob_to_moneyline(p1),
@@ -692,6 +754,7 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "parse_skipped_generic_outcomes",
         "parse_generic_title_failed",
         "parse_generic_yesno_missing",
+        "gamma_clob_divergence",
         "selected_attempt",
     ]:
         if k in debug:
@@ -894,9 +957,11 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
         w = csv.writer(f)
         w.writerow(
             [
+                "market_id",
                 "start_time_utc",
                 "team1",
                 "team2",
+                "sports_market_type",
                 "prob1",
                 "prob2",
                 "ml1",
@@ -911,9 +976,11 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
         ):
             w.writerow(
                 [
+                    m.market_id,
                     (m.start_time.isoformat().replace("+00:00", "Z") if m.start_time else ""),
                     m.team1,
                     m.team2,
+                    m.sports_market_type,
                     f"{m.prob1:.6f}",
                     f"{m.prob2:.6f}",
                     m.ml1 if m.ml1 is not None else "",
@@ -929,9 +996,11 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
         json.dumps(
             [
                 {
+                    "market_id": m.market_id,
                     "start_time_utc": (m.start_time.isoformat().replace("+00:00", "Z") if m.start_time else None),
                     "team1": m.team1,
                     "team2": m.team2,
+                    "sports_market_type": m.sports_market_type,
                     "prob1": m.prob1,
                     "prob2": m.prob2,
                     "ml1": m.ml1,
@@ -1196,6 +1265,8 @@ def compute_value_rankings(
                         "pass_edge": pass_edge,
                         "pass_prob": pass_prob,
                         "polymarket_url": pm.url,
+                        "poly_market_id": pm.market_id,
+                        "poly_sports_market_type": pm.sports_market_type,
                     }
                 )
 
@@ -1234,6 +1305,8 @@ def compute_value_rankings(
                     "edge_abs": edge_abs,
                     "value_rel": value_rel,
                     "polymarket_url": pm.url,
+                    "poly_market_id": pm.market_id,
+                    "poly_sports_market_type": pm.sports_market_type,
                     "home_team": sb.home_team,
                     "away_team": sb.away_team,
                     "home_fair_ml": sb.home_fair_ml,
@@ -1283,6 +1356,8 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "start_time_et",
         "sportsbook_ml",
         "polymarket_ml",
+        "poly_market_id",
+        "poly_sports_market_type",
         "home_team",
         "away_team",
         "polymarket_home_ml",
@@ -1419,7 +1494,8 @@ def format_discord_message(
             lines.append(
                 f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')} — "
                 f"{row['recommended_side']} | PM {pm_ml_s} ({pmp:.1%}) vs Fair {sb_ml} ({sbp:.1%}) | "
-                f"Edge {edge:+.1%} | books={books_used}{tag_s}"
+                f"Edge {edge:+.1%} | books={books_used} | id={row.get('poly_market_id','?')} | "
+                f"type={row.get('poly_sports_market_type','?')}{tag_s}"
             )
 
         return "\n".join(lines)
@@ -1510,6 +1586,7 @@ def main() -> None:
             "min_books": env_int("MIN_BOOKS", 3),
             "poly_tag_id": GAME_BETS_TAG_ID,
             "poly_fallback": POLY_FALLBACK,
+            "poly_price_side": POLY_PRICE_SIDE,
             "debug_mode": DEBUG_MODE,
         },
     }
