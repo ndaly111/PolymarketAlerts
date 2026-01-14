@@ -17,6 +17,7 @@ import csv
 import json
 import os
 import re
+import textwrap
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -444,6 +445,49 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
     return markets
 
 
+def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[str, Any]) -> None:
+    """
+    Writes a lightweight text dump so we can see why markets are being excluded.
+    This is intentionally human-readable (not huge JSON).
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUT_DIR / "polymarket_parse_debug.txt"
+
+    lines: List[str] = []
+    lines.append("POLYMARKET PARSE DEBUG")
+    lines.append("")
+    lines.append("COUNTS")
+    for k in [
+        "raw_markets",
+        "parsed_markets",
+        "parse_outcomes_failed",
+        "parse_prices_failed",
+        "parse_excluded_non_moneyline",
+        "selected_attempt",
+    ]:
+        if k in debug:
+            lines.append(f"- {k}: {debug.get(k)}")
+    lines.append("")
+
+    lines.append("SAMPLE RAW MARKETS (first 60)")
+    sample = raw_markets[:60]
+    for i, m in enumerate(sample, 1):
+        slug = (m.get("slug") or "").strip()
+        title = (m.get("title") or m.get("question") or "").strip().replace("\n", " ")
+        outcomes = m.get("outcomes")
+        prices = m.get("outcomePrices") or m.get("outcome_prices")
+        start = m.get("eventStartTime") or m.get("gameStartTime") or m.get("startDateIso") or m.get("startDate")
+        title = textwrap.shorten(title, width=140, placeholder="…")
+        lines.append(f"{i:02d}) slug={slug}")
+        lines.append(f"    title={title}")
+        lines.append(f"    start={start}")
+        lines.append(f"    outcomes={outcomes}")
+        lines.append(f"    prices={prices}")
+        lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _gamma_param(v: Any) -> str:
     """
     Gamma query params are picky. Legacy script uses lowercase 'true'/'false' strings.
@@ -542,6 +586,7 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
     debug["raw_markets"] = len(raw_markets)
     markets = _parse_polymarket_markets(raw_markets, debug)
     debug["parsed_markets"] = len(markets)
+    write_polymarket_parse_debug(raw_markets, debug)
     return markets, debug
 
 
