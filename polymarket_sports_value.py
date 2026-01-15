@@ -70,7 +70,7 @@ DEBUG_MODE = env_int("DEBUG_MODE", 0)  # 1 = print Discord debug preview
 DEBUG_POLY_SLUG = (os.getenv("DEBUG_POLY_SLUG", "") or "").strip()
 DEBUG_POLY_MAX = env_int("DEBUG_POLY_MAX", 10)  # max markets to dump when debug is on
 CLOB_BASE = "https://clob.polymarket.com"
-POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "buy") or "buy").strip().lower()
+POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "mid") or "mid").strip().lower()
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -102,6 +102,22 @@ EXCLUDED_MARKET_RE = re.compile(
 # Detect signed point/goal totals like -3.5, +7, etc.
 # IMPORTANT: do not match dates in slugs like 2025-11-03 (the "-03" part).
 SIGNED_NUMBER_RE = re.compile(r"(?<!\d)[+-]\s*\d+(?:\.\d+)?(?!\d)")
+
+PARTIAL_GAME_RE = re.compile(
+    r"\b(1st|first|2nd|second|3rd|third|4th|fourth)\s+(half|quarter|period|set|map|game)\b"
+    r"|\bhalf\b"
+    r"|\bquarter\b"
+    r"|\bqtr\b"
+    r"|\b[1-4]q\b"
+    r"|\b[12]h\b"
+    r"|\bperiod\b"
+    r"|\bset\b"
+    r"|\bmap\b"
+    r"|\bgame\s*[1-5]\b"
+    r"|\binnings?\b"
+    r"|\bframe\b",
+    flags=re.IGNORECASE,
+)
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -306,9 +322,13 @@ def iso_to_dt(s: Any) -> Optional[datetime]:
         return None
     try:
         # handle trailing "Z"
+        s = s.strip()
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -463,15 +483,21 @@ class PolyMoneylineMarket:
     start_time: Optional[datetime]
     team1: str
     team2: str
+    title: str
     sports_market_type: str
     prob1: float
     prob2: float
+    prob1_raw: float
+    prob2_raw: float
+    prob_sum_raw: float
+    price_side_used: str
     ml1: Optional[int]
     ml2: Optional[int]
 
 
 @dataclass(frozen=True)
 class SportsbookGame:
+    event_id: str
     start_time: Optional[datetime]
     home_team: str
     away_team: str
@@ -485,6 +511,14 @@ class SportsbookGame:
     league: str
     sport_key: str
     per_book: List[Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class MatchResult:
+    index: int
+    game: SportsbookGame
+    delta_seconds: float
+    overlap_score: float
 
 
 def get_moneyline_types() -> List[str]:
@@ -605,6 +639,19 @@ def _extract_matchup_from_market(market: Dict[str, Any]) -> Optional[Tuple[str, 
     return None
 
 
+def _is_partial_game_market(market: Dict[str, Any]) -> bool:
+    title = str(market.get("title") or "").strip()
+    question = str(market.get("question") or "").strip()
+    market_type = str(
+        market.get("sportsMarketType")
+        or market.get("sports_market_type")
+        or market.get("sports_market_types")
+        or ""
+    ).strip()
+    combined = " ".join([title, question, market_type])
+    return bool(PARTIAL_GAME_RE.search(combined))
+
+
 def _normalize_generic_outcomes(
     market: Dict[str, Any],
     outcomes: List[Any],
@@ -641,17 +688,23 @@ def _normalize_generic_outcomes(
 def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str, Any]) -> List[PolyMoneylineMarket]:
     markets: List[PolyMoneylineMarket] = []
     for m in raw_markets:
+        if _is_partial_game_market(m):
+            debug["reject_partial_game"] = debug.get("reject_partial_game", 0) + 1
+            continue
+
         outcomes = parse_json_list(m.get("outcomes"))
         prices = parse_json_list(m.get("outcomePrices"))
-        p1 = resolve_polymarket_prob(m, 0)
-        p2 = resolve_polymarket_prob(m, 1)
+        p1_raw = resolve_polymarket_prob(m, 0)
+        p2_raw = resolve_polymarket_prob(m, 1)
 
         if len(outcomes) != 2:
             debug["parse_outcomes_failed"] += 1
+            debug["reject_non_2_outcome"] = debug.get("reject_non_2_outcome", 0) + 1
             continue
 
-        if p1 is None or p2 is None:
+        if p1_raw is None or p2_raw is None:
             debug["parse_prices_failed"] += 1
+            debug["reject_missing_probs"] = debug.get("reject_missing_probs", 0) + 1
             continue
 
         o1, o2 = str(outcomes[0]), str(outcomes[1])
@@ -684,16 +737,28 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 continue
 
         if canon(o1) in GENERIC_OUTCOMES or canon(o2) in GENERIC_OUTCOMES:
-            normalized = _normalize_generic_outcomes(m, outcomes, p1, p2, debug)
+            normalized = _normalize_generic_outcomes(m, outcomes, p1_raw, p2_raw, debug)
             if not normalized:
+                debug["reject_generic_outcomes"] = debug.get("reject_generic_outcomes", 0) + 1
                 continue
-            team1, team2, p1, p2 = normalized
+            team1, team2, p1_raw, p2_raw = normalized
+            debug["normalized_generic_outcomes"] = debug.get("normalized_generic_outcomes", 0) + 1
         else:
             team1, team2 = o1, o2
 
-        if not (0.0 < p1 < 1.0 and 0.0 < p2 < 1.0):
+        if not (0.0 < p1_raw < 1.0 and 0.0 < p2_raw < 1.0):
             debug["parse_prices_failed"] += 1
+            debug["reject_missing_probs"] = debug.get("reject_missing_probs", 0) + 1
             continue
+
+        prob_sum = p1_raw + p2_raw
+        if prob_sum <= 0:
+            debug["parse_prices_failed"] += 1
+            debug["reject_missing_probs"] = debug.get("reject_missing_probs", 0) + 1
+            continue
+
+        p1_norm = p1_raw / prob_sum
+        p2_norm = p2_raw / prob_sum
 
         if len(prices) == 2:
             try:
@@ -702,17 +767,20 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
             except Exception:
                 g1 = None
                 g2 = None
-            if g1 and g2 and (abs(p1 - g1) > 0.20 or abs(p2 - g2) > 0.20):
+            if g1 and g2 and (abs(p1_raw - g1) > 0.20 or abs(p2_raw - g2) > 0.20):
                 debug["gamma_clob_divergence"] = debug.get("gamma_clob_divergence", 0) + 1
 
         url = f"https://polymarket.com/market/{slug}" if slug else ""
 
-        start_time = iso_to_dt(
+        start_raw = (
             m.get("eventStartTime")
             or m.get("gameStartTime")
             or m.get("startDateIso")
             or m.get("startDate")
         )
+        start_time = iso_to_dt(start_raw)
+        if not start_time:
+            debug["reject_missing_start_time"] = debug.get("reject_missing_start_time", 0) + 1
 
         markets.append(
             PolyMoneylineMarket(
@@ -722,11 +790,16 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 start_time=start_time,
                 team1=team1,
                 team2=team2,
+                title=title,
                 sports_market_type=sports_market_type,
-                prob1=p1,
-                prob2=p2,
-                ml1=prob_to_moneyline(p1),
-                ml2=prob_to_moneyline(p2),
+                prob1=p1_norm,
+                prob2=p2_norm,
+                prob1_raw=p1_raw,
+                prob2_raw=p2_raw,
+                prob_sum_raw=prob_sum,
+                price_side_used=POLY_PRICE_SIDE,
+                ml1=prob_to_moneyline(p1_norm),
+                ml2=prob_to_moneyline(p2_norm),
             )
         )
 
@@ -754,6 +827,13 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "parse_skipped_generic_outcomes",
         "parse_generic_title_failed",
         "parse_generic_yesno_missing",
+        "reject_partial_game",
+        "reject_missing_start_time",
+        "reject_missing_probs",
+        "reject_non_2_outcome",
+        "reject_bad_team_parse",
+        "reject_generic_outcomes",
+        "normalized_generic_outcomes",
         "gamma_clob_divergence",
         "selected_attempt",
     ]:
@@ -849,6 +929,13 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         "parse_skipped_generic_outcomes": 0,
         "parse_generic_title_failed": 0,
         "parse_generic_yesno_missing": 0,
+        "reject_partial_game": 0,
+        "reject_missing_start_time": 0,
+        "reject_missing_probs": 0,
+        "reject_non_2_outcome": 0,
+        "reject_bad_team_parse": 0,
+        "reject_generic_outcomes": 0,
+        "normalized_generic_outcomes": 0,
         "skipped_generic_samples": [],
     }
 
@@ -1054,6 +1141,7 @@ def load_sportsbook_games_with_debug() -> Tuple[List[SportsbookGame], Dict[str, 
 
         out.append(
             SportsbookGame(
+                event_id=str(event.get("event_id") or ""),
                 start_time=start,
                 home_team=home,
                 away_team=away,
@@ -1075,23 +1163,24 @@ def load_sportsbook_games_with_debug() -> Tuple[List[SportsbookGame], Dict[str, 
 
 def match_sportsbook_game(
     poly: PolyMoneylineMarket, books: List[SportsbookGame]
-) -> Optional[Tuple[int, SportsbookGame]]:
+) -> Optional[MatchResult]:
     """
     Match by lightweight token overlap + time proximity.
     No aliases/uniforming; this is only to align sportsbook odds with Polymarket outcomes.
     """
-    best_match: Optional[Tuple[int, SportsbookGame]] = None
+    if not poly.start_time:
+        return None
+
+    best_match: Optional[MatchResult] = None
     best_score = 0.0
     best_delta = float("inf")
 
     for idx, sb in enumerate(books):
-        # If both have times, require proximity (avoids accidental collisions)
-        if poly.start_time and sb.start_time:
-            delta = abs((poly.start_time - sb.start_time).total_seconds())
-            if delta > TIME_WINDOW_HOURS * 3600:
-                continue
-        else:
-            delta = float("inf")
+        if not sb.start_time:
+            continue
+        delta = abs((poly.start_time - sb.start_time).total_seconds())
+        if delta > TIME_WINDOW_HOURS * 3600:
+            continue
 
         p1 = team_tokens(poly.team1)
         p2 = team_tokens(poly.team2)
@@ -1107,7 +1196,12 @@ def match_sportsbook_game(
             continue
 
         if score > best_score or (score == best_score and delta < best_delta):
-            best_match = (idx, sb)
+            best_match = MatchResult(
+                index=idx,
+                game=sb,
+                delta_seconds=delta,
+                overlap_score=score,
+            )
             best_score = score
             best_delta = delta
 
@@ -1170,9 +1264,13 @@ def compute_value_rankings(
     for pm in polys:
         matched = match_sportsbook_game(pm, books)
         if not matched:
+            if pm.start_time is None:
+                skipped_reasons.append(
+                    f"Missing Polymarket start time: {pm.team1} vs {pm.team2} ({pm.slug})"
+                )
             unmatched_polys.append(pm)
             continue
-        sb_index, sb = matched
+        sb_index, sb = matched.index, matched.game
         matched_books.add(sb_index)
         debug_counts["matched_games"] += 1
 
@@ -1202,6 +1300,12 @@ def compute_value_rankings(
 
         start = pm.start_time or sb.start_time
         start_s = fmt_start_time(start)
+        poly_start_utc = pm.start_time.isoformat().replace("+00:00", "Z") if pm.start_time else ""
+        sb_start_utc = sb.start_time.isoformat().replace("+00:00", "Z") if sb.start_time else ""
+        poly_start_et = fmt_start_time(pm.start_time)
+        sb_start_et = fmt_start_time(sb.start_time)
+        match_delta_hours = matched.delta_seconds / 3600.0
+        match_overlap_score = matched.overlap_score
         # Always show Polymarket's team strings exactly (what you asked for).
         matchup = f"{pm.team1} vs {pm.team2}"
 
@@ -1211,6 +1315,7 @@ def compute_value_rankings(
                 "sportsbook_ml": sb_ml_1,
                 "sportsbook_fair_prob": sb_p_1,
                 "polymarket_prob": pm.prob1,
+                "polymarket_prob_raw": pm.prob1_raw,
                 "polymarket_ml": pm.ml1,
                 "range": range_1,
                 "range_side": "home" if direct >= swapped else "away",
@@ -1220,6 +1325,7 @@ def compute_value_rankings(
                 "sportsbook_ml": sb_ml_2,
                 "sportsbook_fair_prob": sb_p_2,
                 "polymarket_prob": pm.prob2,
+                "polymarket_prob_raw": pm.prob2_raw,
                 "polymarket_ml": pm.ml2,
                 "range": range_2,
                 "range_side": "away" if direct >= swapped else "home",
@@ -1233,6 +1339,7 @@ def compute_value_rankings(
             range_data = candidate["range"]
             sportsbook_fair_prob = candidate["sportsbook_fair_prob"]
             polymarket_prob = candidate["polymarket_prob"]
+            polymarket_prob_raw = candidate["polymarket_prob_raw"]
             edge_abs = sportsbook_fair_prob - polymarket_prob
             outside_range = False
             if polymarket_ml is not None:
@@ -1256,9 +1363,13 @@ def compute_value_rankings(
                         "polymarket_ml": polymarket_ml,
                         "sportsbook_fair_prob": sportsbook_fair_prob,
                         "polymarket_prob": polymarket_prob,
+                        "polymarket_prob_raw": polymarket_prob_raw,
+                        "polymarket_prob_sum_raw": pm.prob_sum_raw,
                         "edge_abs": edge_abs,
                         "outside_range": outside_range,
                         "books_used": sb.books_used,
+                        "match_time_delta_hours": match_delta_hours,
+                        "match_overlap_score": match_overlap_score,
                         "pass_sportsbook_ml": pass_sportsbook,
                         "pass_polymarket_ml": pass_polymarket,
                         "pass_outside_range": pass_outside,
@@ -1267,6 +1378,7 @@ def compute_value_rankings(
                         "polymarket_url": pm.url,
                         "poly_market_id": pm.market_id,
                         "poly_sports_market_type": pm.sports_market_type,
+                        "poly_price_side_used": pm.price_side_used,
                     }
                 )
 
@@ -1298,15 +1410,36 @@ def compute_value_rankings(
                     "recommended_side": candidate["team"],
                     "range_side": candidate["range_side"],
                     "start_time_et": start_s,
+                    "poly_start_time_utc": poly_start_utc,
+                    "poly_start_time_et": poly_start_et,
+                    "sb_start_time_utc": sb_start_utc,
+                    "sb_start_time_et": sb_start_et,
+                    "match_time_delta_hours": match_delta_hours,
+                    "match_overlap_score": match_overlap_score,
+                    "comparison_scope": "full_game",
                     "sportsbook_ml": sportsbook_ml,
+                    "sb_fair_ml": sportsbook_ml,
                     "polymarket_ml": polymarket_ml,
                     "sportsbook_fair_prob": sportsbook_fair_prob,
+                    "sb_fair_prob": sportsbook_fair_prob,
                     "polymarket_prob": polymarket_prob,
+                    "poly_prob_raw": polymarket_prob_raw,
+                    "poly_prob_norm": polymarket_prob,
+                    "poly_prob_raw_sum": pm.prob_sum_raw,
+                    "poly_raw_prob1": pm.prob1_raw,
+                    "poly_raw_prob2": pm.prob2_raw,
+                    "poly_norm_prob1": pm.prob1,
+                    "poly_norm_prob2": pm.prob2,
                     "edge_abs": edge_abs,
+                    "edge_pct": value_rel,
                     "value_rel": value_rel,
                     "polymarket_url": pm.url,
                     "poly_market_id": pm.market_id,
+                    "poly_market_slug": pm.slug,
                     "poly_sports_market_type": pm.sports_market_type,
+                    "poly_title": pm.title,
+                    "poly_price_side_used": pm.price_side_used,
+                    "sb_event_id": sb.event_id,
                     "home_team": sb.home_team,
                     "away_team": sb.away_team,
                     "home_fair_ml": sb.home_fair_ml,
@@ -1354,10 +1487,30 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "recommended_side",
         "range_side",
         "start_time_et",
+        "poly_start_time_utc",
+        "poly_start_time_et",
+        "sb_start_time_utc",
+        "sb_start_time_et",
+        "match_time_delta_hours",
+        "match_overlap_score",
+        "comparison_scope",
         "sportsbook_ml",
+        "sb_fair_ml",
         "polymarket_ml",
         "poly_market_id",
+        "poly_market_slug",
         "poly_sports_market_type",
+        "poly_title",
+        "poly_price_side_used",
+        "poly_prob_raw",
+        "poly_prob_norm",
+        "poly_prob_raw_sum",
+        "poly_raw_prob1",
+        "poly_raw_prob2",
+        "poly_norm_prob1",
+        "poly_norm_prob2",
+        "sb_fair_prob",
+        "sb_event_id",
         "home_team",
         "away_team",
         "polymarket_home_ml",
@@ -1384,6 +1537,7 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "sportsbook_fair_prob",
         "polymarket_prob",
         "edge_abs",
+        "edge_pct",
         "value_rel",
         "polymarket_url",
     ]
@@ -1477,6 +1631,8 @@ def format_discord_message(
             sbp = row.get("sportsbook_fair_prob", 0.0)
             pmp = row.get("polymarket_prob", 0.0)
             books_used = row.get("books_used")
+            match_delta_hours = row.get("match_time_delta_hours")
+            overlap_score = row.get("match_overlap_score")
 
             fail_tags = []
             if not row.get("pass_outside_range", True) and REQUIRE_OUTSIDE_RANGE:
@@ -1492,7 +1648,8 @@ def format_discord_message(
             tag_s = f" ({', '.join(fail_tags)})" if fail_tags else ""
 
             lines.append(
-                f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')} — "
+                f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')} "
+                f"(Δt={match_delta_hours:.1f}h, overlap={overlap_score:.2f}) — "
                 f"{row['recommended_side']} | PM {pm_ml_s} ({pmp:.1%}) vs Fair {sb_ml} ({sbp:.1%}) | "
                 f"Edge {edge:+.1%} | books={books_used} | id={row.get('poly_market_id','?')} | "
                 f"type={row.get('poly_sports_market_type','?')}{tag_s}"
@@ -1509,7 +1666,6 @@ def format_discord_message(
 
     lines: List[str] = [header]
     for i, r in enumerate(top, 1):
-        pm_ml_s = str(r["polymarket_ml"]) if r["polymarket_ml"] is not None else "n/a"
         league_prefix = f"{r['league']} - " if r.get("league") else ""
         if r.get("range_side") == "home":
             min_odds = r.get("home_min_odds")
@@ -1529,12 +1685,17 @@ def format_discord_message(
             return f"{int(odds)}({label})" if label else f"{int(odds)}"
 
         sb_range = f"{_fmt_range(min_odds, min_book)}→{_fmt_range(max_odds, max_book)}"
+        price_side = r.get("poly_price_side_used", "mid")
+        match_delta = r.get("match_time_delta_hours", 0.0)
+        poly_type = textwrap.shorten(str(r.get("poly_sports_market_type") or ""), width=18, placeholder="…")
+        poly_prob = r.get("poly_prob_norm", r.get("polymarket_prob", 0.0))
+        sb_prob = r.get("sb_fair_prob", r.get("sportsbook_fair_prob", 0.0))
+        books_used = r.get("books_used")
+        start_time = r.get("poly_start_time_et") or r.get("start_time_et")
         lines.append(
-            f"{i}) {league_prefix}{r['matchup']} — {r['recommended_side']} | "
-            f"PM {pm_ml_s} vs Fair {r['sportsbook_ml']} | "
-            f"Edge {r['edge_abs']:+.1%} | "
-            f"SB {sb_range} | "
-            f"{r['polymarket_url']}"
+            f"{i}) {league_prefix}{r['matchup']} ({start_time}, Δt={match_delta:.1f}h, {poly_type}) | "
+            f"Poly {poly_prob:.1%} ({price_side}, norm) vs Books {sb_prob:.1%} (N={books_used}) | "
+            f"Edge {r['edge_abs']:+.1%} | SB {sb_range} | {r['polymarket_url']}"
         )
 
     # Optional lightweight debug footer (helps you confirm matching volume without digging into artifacts)
