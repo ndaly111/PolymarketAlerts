@@ -57,6 +57,8 @@ def env_float(name: str, default: float) -> float:
 
 TOP_N = env_int("TOP_N", 20)
 DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
+SKIP_NEUTRAL_5050 = env_int("SKIP_NEUTRAL_5050", 1)  # 1=yes: drop 50/50 placeholder markets
+NEUTRAL_5050_EPS = env_float("NEUTRAL_5050_EPS", 1e-4)  # float tolerance for "exactly 0.50"
 DEBUG_DISCORD_TOP_N = env_int("DEBUG_DISCORD_TOP_N", 20)  # how many lines to print in DEBUG_MODE
 MIN_EDGE = env_float("MIN_EDGE", 0.03)  # prob gap threshold (e.g., 0.03 = 3%)
 GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets" tag
@@ -78,6 +80,7 @@ POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "mid") or "mid").strip().lower()
 CLOB_REVIEW_TOP = env_int("CLOB_REVIEW_TOP", 25)
 CLOB_MARKET_TIMEOUT = env_int("CLOB_MARKET_TIMEOUT", 10)  # seconds per market; fallback to gamma if exceeded
 CLOB_REQUEST_TIMEOUT = env_int("CLOB_REQUEST_TIMEOUT", 6)  # seconds per HTTP request within a market
+MAX_CLOB_MID_SPREAD = env_float("MAX_CLOB_MID_SPREAD", 0.10)
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -814,6 +817,13 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
         p1_norm = p1_raw / prob_sum
         p2_norm = p2_raw / prob_sum
 
+        # Noise filter: many illiquid/placeholder markets sit at exactly 0.50 / 0.50 in Gamma.
+        # IMPORTANT: check raw gamma prices so we don't drop real markets that normalize to 0.50/0.50.
+        if SKIP_NEUTRAL_5050:
+            if abs(p1_raw - 0.5) <= NEUTRAL_5050_EPS and abs(p2_raw - 0.5) <= NEUTRAL_5050_EPS:
+                debug["reject_neutral_5050"] = debug.get("reject_neutral_5050", 0) + 1
+                continue
+
         if len(prices) == 2:
             try:
                 g1 = float(prices[0])
@@ -883,6 +893,7 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "reject_partial_game",
         "reject_missing_start_time",
         "reject_missing_probs",
+        "reject_neutral_5050",
         "reject_non_2_outcome",
         "reject_bad_team_parse",
         "reject_generic_outcomes",
@@ -987,6 +998,7 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         "reject_partial_game": 0,
         "reject_missing_start_time": 0,
         "reject_missing_probs": 0,
+        "reject_neutral_5050": 0,
         "reject_non_2_outcome": 0,
         "reject_bad_team_parse": 0,
         "reject_generic_outcomes": 0,
@@ -1591,6 +1603,14 @@ def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneyli
     except Exception:
         return None
 
+    if (POLY_PRICE_SIDE or "mid").lower() == "mid":
+        if b1 is None or a1 is None or b2 is None or a2 is None:
+            return None
+        spread1 = max(0.0, a1 - b1)
+        spread2 = max(0.0, a2 - b2)
+        if spread1 > MAX_CLOB_MID_SPREAD or spread2 > MAX_CLOB_MID_SPREAD:
+            return None
+
     e1 = clob_effective_price(b1, a1, POLY_PRICE_SIDE)
     e2 = clob_effective_price(b2, a2, POLY_PRICE_SIDE)
     if e1 is None or e2 is None:
@@ -1603,6 +1623,9 @@ def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneyli
 
     p1 = e1 / ssum
     p2 = e2 / ssum
+    if SKIP_NEUTRAL_5050:
+        if abs(p1 - 0.5) <= NEUTRAL_5050_EPS and abs(p2 - 0.5) <= NEUTRAL_5050_EPS:
+            return None
     ml1 = prob_to_moneyline(p1)
     ml2 = prob_to_moneyline(p2)
 
@@ -1942,6 +1965,8 @@ def main() -> None:
             "min_edge": MIN_EDGE,
             "top_n": TOP_N,
             "discord_top_n": DISCORD_TOP_N,
+            "skip_neutral_5050": SKIP_NEUTRAL_5050,
+            "neutral_5050_eps": NEUTRAL_5050_EPS,
             "time_window_hours": TIME_WINDOW_HOURS,
             "past_start_grace_min": PAST_START_GRACE_MIN,
             "odds_sport_keys": ODDS_SPORT_KEYS or None,
@@ -1953,6 +1978,7 @@ def main() -> None:
             "clob_review_top": CLOB_REVIEW_TOP,
             "clob_market_timeout": CLOB_MARKET_TIMEOUT,
             "clob_request_timeout": CLOB_REQUEST_TIMEOUT,
+            "max_clob_mid_spread": MAX_CLOB_MID_SPREAD,
             "debug_mode": DEBUG_MODE,
         },
     }
