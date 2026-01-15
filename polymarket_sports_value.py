@@ -21,7 +21,7 @@ import textwrap
 import time
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -63,6 +63,7 @@ GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets"
 SPORTSBOOK_MAX_UNDERDOG = env_int("SPORTSBOOK_MAX_UNDERDOG", 200)
 POLYMARKET_MAX_FAVORITE = env_int("POLYMARKET_MAX_FAVORITE", -300)
 TIME_WINDOW_HOURS = env_int("TIME_WINDOW_HOURS", 36)
+PAST_START_GRACE_MIN = max(env_int("PAST_START_GRACE_MIN", 0), 0)  # 0 = drop anything already started
 INCLUDE_DEBUG_SUMMARY = env_int("INCLUDE_DEBUG_SUMMARY", 1)  # 1=yes, 0=no
 DEBUG_SUMMARY_LINES = env_int("DEBUG_SUMMARY_LINES", 8)
 DRY_RUN = env_int("DRY_RUN", 0)
@@ -824,12 +825,7 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 debug["gamma_clob_divergence"] = debug.get("gamma_clob_divergence", 0) + 1
 
         url = f"https://polymarket.com/market/{slug}" if slug else ""
-        start_raw = (
-            m.get("eventStartTime")
-            or m.get("gameStartTime")
-            or m.get("startDateIso")
-            or m.get("startDate")
-        )
+        start_raw = m.get("eventStartTime") or m.get("gameStartTime")
         start_time = iso_to_dt(start_raw)
         if not start_time:
             debug["reject_missing_start_time"] = debug.get("reject_missing_start_time", 0) + 1
@@ -892,6 +888,8 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "reject_generic_outcomes",
         "normalized_generic_outcomes",
         "gamma_clob_divergence",
+        "reject_start_time_missing_postparse",
+        "reject_start_time_past",
         "selected_attempt",
     ]:
         if k in debug:
@@ -927,7 +925,7 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         title = (m.get("title") or m.get("question") or "").strip().replace("\n", " ")
         outcomes = m.get("outcomes")
         prices = m.get("outcomePrices") or m.get("outcome_prices")
-        start = m.get("eventStartTime") or m.get("gameStartTime") or m.get("startDateIso") or m.get("startDate")
+        start = m.get("eventStartTime") or m.get("gameStartTime")
         title = textwrap.shorten(title, width=140, placeholder="…")
         lines.append(f"{i:02d}) slug={slug}")
         lines.append(f"    title={title}")
@@ -1082,6 +1080,14 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
 
     debug["raw_markets"] = len(raw_markets)
     markets = _parse_polymarket_markets(raw_markets, debug)
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(minutes=PAST_START_GRACE_MIN)
+    missing_start = sum(1 for m in markets if m.start_time is None)
+    past_start = sum(1 for m in markets if (m.start_time is not None and m.start_time < cutoff))
+    markets = [m for m in markets if (m.start_time is not None and m.start_time >= cutoff)]
+    debug["reject_start_time_missing_postparse"] = missing_start
+    debug["reject_start_time_past"] = past_start
+    debug["past_cutoff_utc"] = cutoff.isoformat()
     debug["parsed_markets"] = len(markets)
     write_polymarket_parse_debug(raw_markets, debug)
     return markets, debug
@@ -1173,10 +1179,21 @@ def load_sportsbook_games_with_debug() -> Tuple[List[SportsbookGame], Dict[str, 
         return_debug=True,
     )
 
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc - timedelta(minutes=PAST_START_GRACE_MIN)
+    rejected_past = 0
+    rejected_missing = 0
+
     out: List[SportsbookGame] = []
     for event in board:
         consensus = event.get("consensus") or {}
         start = iso_to_dt(event.get("commence_time"))
+        if start is None:
+            rejected_missing += 1
+            continue
+        if start is not None and start < cutoff:
+            rejected_past += 1
+            continue
         home = str(event.get("home_team") or "").strip()
         away = str(event.get("away_team") or "").strip()
         if not home or not away:
@@ -1215,6 +1232,9 @@ def load_sportsbook_games_with_debug() -> Tuple[List[SportsbookGame], Dict[str, 
             )
         )
 
+    odds_debug["reject_start_time_past"] = rejected_past
+    odds_debug["reject_start_time_missing"] = rejected_missing
+    odds_debug["past_cutoff_utc"] = cutoff.isoformat()
     return out, odds_debug
 
 
@@ -1923,6 +1943,7 @@ def main() -> None:
             "top_n": TOP_N,
             "discord_top_n": DISCORD_TOP_N,
             "time_window_hours": TIME_WINDOW_HOURS,
+            "past_start_grace_min": PAST_START_GRACE_MIN,
             "odds_sport_keys": ODDS_SPORT_KEYS or None,
             "odds_regions": ODDS_REGIONS,
             "min_books": env_int("MIN_BOOKS", 3),
@@ -1954,12 +1975,14 @@ def main() -> None:
         rows, unmatched_polys, unmatched_books, _skips, debug_rows_all, debug_counts = compute_value_rankings(
             polys, books
         )
+    clob_enriched_count = sum(1 for p in polys if getattr(p, "prob_source", "") == "clob")
     diagnostics["results"] = {
         "polymarket_count": len(polys),
         "sportsbook_count": len(books),
         "unmatched_polymarket": len(unmatched_polys),
         "unmatched_sportsbook": len(unmatched_books),
         "qualifying_edges": len(rows),
+        "clob_enriched_count": clob_enriched_count,
     }
     write_diagnostics(diagnostics)
     write_value_reports(rows)
