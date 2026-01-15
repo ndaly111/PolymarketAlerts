@@ -18,6 +18,7 @@ import json
 import os
 import re
 import textwrap
+import time
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +72,11 @@ DEBUG_POLY_SLUG = (os.getenv("DEBUG_POLY_SLUG", "") or "").strip()
 DEBUG_POLY_MAX = env_int("DEBUG_POLY_MAX", 10)  # max markets to dump when debug is on
 CLOB_BASE = "https://clob.polymarket.com"
 POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "mid") or "mid").strip().lower()
+
+# CLOB enrichment (only used for a small review set; gamma is used for full scan)
+CLOB_REVIEW_TOP = env_int("CLOB_REVIEW_TOP", 25)
+CLOB_MARKET_TIMEOUT = env_int("CLOB_MARKET_TIMEOUT", 10)  # seconds per market; fallback to gamma if exceeded
+CLOB_REQUEST_TIMEOUT = env_int("CLOB_REQUEST_TIMEOUT", 6)  # seconds per HTTP request within a market
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -135,9 +141,21 @@ def make_session() -> requests.Session:
 
 SESSION = make_session()
 
+# Separate session for CLOB calls (no retries) to avoid long stalls
+CLOB_SESSION = requests.Session()
+CLOB_SESSION.headers.update({"Accept": "application/json", "User-Agent": "polymarket-sports-value/1.0"})
 
-def http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    r = SESSION.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+
+def http_get_json(
+    url: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
+    *,
+    use_clob_session: bool = False,
+) -> Any:
+    session = CLOB_SESSION if use_clob_session else SESSION
+    eff_timeout = REQUEST_TIMEOUT if timeout is None else timeout
+    r = session.get(url, params=params or {}, timeout=eff_timeout)
     if r.status_code >= 400:
         raise RuntimeError(f"HTTP {r.status_code} GET {url}: {r.text[:300]}")
     return r.json()
@@ -152,10 +170,7 @@ _CLOB_PRICE_CACHE: Dict[Tuple[str, str], Optional[float]] = {}
 
 def clob_get_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     url = f"{CLOB_BASE}{path}"
-    r = SESSION.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} GET {url}: {r.text[:300]}")
-    return r.json()
+    return http_get_json(url, params=params, timeout=CLOB_REQUEST_TIMEOUT, use_clob_session=True)
 
 
 def clob_get_price(token_id: str, side: str = "buy") -> Optional[float]:
@@ -184,6 +199,29 @@ def clob_get_price(token_id: str, side: str = "buy") -> Optional[float]:
         return None
 
 
+def get_clob_best_prices(
+    token_id: str,
+    *,
+    timeout: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Return (best_bid, best_ask) in probability terms for a token_id.
+    """
+    eff_timeout = CLOB_REQUEST_TIMEOUT if timeout is None else timeout
+    data = http_get_json(
+        f"{CLOB_BASE}/book",
+        params={"token_id": token_id},
+        timeout=eff_timeout,
+        use_clob_session=True,
+    )
+
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+    best_bid = float(bids[0]["price"]) if bids else None
+    best_ask = float(asks[0]["price"]) if asks else None
+    return best_bid, best_ask
+
+
 def parse_json_list(value: Any) -> List[Any]:
     """
     Gamma returns some list fields as JSON-encoded strings.
@@ -204,6 +242,18 @@ def parse_json_list(value: Any) -> List[Any]:
             v = v.strip("[]")
             return [x.strip().strip('"').strip("'") for x in v.split(",") if x.strip()]
     return []
+
+
+def gamma_outcome_prob(market: Dict[str, Any], idx: int) -> Optional[float]:
+    """Return Gamma outcome price/probability for outcome idx (0/1), or None."""
+    prices = parse_json_list(market.get("outcomePrices"))
+    if len(prices) != 2:
+        return None
+    try:
+        p = float(prices[idx])
+    except Exception:
+        return None
+    return p if 0.0 < p < 1.0 else None
 
 
 def resolve_polymarket_prob(market: Dict[str, Any], side_index: int) -> Optional[float]:
@@ -228,17 +278,7 @@ def resolve_polymarket_prob(market: Dict[str, Any], side_index: int) -> Optional
         if p is not None and 0.0 < p < 1.0:
             return p
 
-    prices = parse_json_list(market.get("outcomePrices"))
-    if len(prices) != 2:
-        return None
-    try:
-        p = float(prices[side_index])
-        if 0.0 < p < 1.0:
-            return p
-    except Exception:
-        pass
-
-    return None
+    return gamma_outcome_prob(market, side_index)
 
 
 def _market_debug_block(m: Dict[str, Any]) -> List[str]:
@@ -272,7 +312,7 @@ def _market_debug_block(m: Dict[str, Any]) -> List[str]:
     lines.append(f"outcomes={outcomes}")
     lines.append(f"outcomePrices(Gamma)={prices}")
     lines.append(f"clobTokenIds={token_ids}")
-    lines.append("NOTE: VALUE CALCULATION USES CLOB PRICES")
+    lines.append("NOTE: VALUE CALCULATION USES GAMMA PRICES (CLOB ONLY FOR TOP REVIEW)")
     lines.append(f"POLY_PRICE_SIDE={POLY_PRICE_SIDE}")
 
     if len(outcomes) == 2 and len(prices) == 2:
@@ -291,21 +331,22 @@ def _market_debug_block(m: Dict[str, Any]) -> List[str]:
     if len(token_ids) == 2:
         t1 = str(token_ids[0])
         t2 = str(token_ids[1])
-        b1 = clob_get_price(t1, side="buy")
-        s1 = clob_get_price(t1, side="sell")
-        b2 = clob_get_price(t2, side="buy")
-        s2 = clob_get_price(t2, side="sell")
+        try:
+            b1, a1 = get_clob_best_prices(t1)
+            b2, a2 = get_clob_best_prices(t2)
+        except Exception:
+            b1 = a1 = b2 = a2 = None
 
-        lines.append(f"clob_buy_price1={b1} | clob_sell_price1={s1}")
-        lines.append(f"clob_buy_price2={b2} | clob_sell_price2={s2}")
+        lines.append(f"clob_best_bid1={b1} | clob_best_ask1={a1}")
+        lines.append(f"clob_best_bid2={b2} | clob_best_ask2={a2}")
 
-        m1 = (b1 + s1) / 2.0 if (b1 is not None and s1 is not None) else (b1 if b1 is not None else s1)
-        m2 = (b2 + s2) / 2.0 if (b2 is not None and s2 is not None) else (b2 if b2 is not None else s2)
+        m1 = clob_effective_price(b1, a1, "mid")
+        m2 = clob_effective_price(b2, a2, "mid")
         lines.append(f"clob_mid_price1={m1}")
         lines.append(f"clob_mid_price2={m2}")
 
-        e1 = resolve_polymarket_prob(m, 0)
-        e2 = resolve_polymarket_prob(m, 1)
+        e1 = clob_effective_price(b1, a1, POLY_PRICE_SIDE)
+        e2 = clob_effective_price(b2, a2, POLY_PRICE_SIDE)
         lines.append(f"clob_effective_price1={e1}")
         lines.append(f"clob_effective_price2={e2}")
         if e1 is not None and 0.0 < e1 < 1.0:
@@ -485,12 +526,17 @@ class PolyMoneylineMarket:
     team2: str
     title: str
     sports_market_type: str
+    clob_token_ids: Tuple[str, str]
     prob1: float
     prob2: float
     prob1_raw: float
     prob2_raw: float
     prob_sum_raw: float
+    prob_source: str
     price_side_used: str
+    gamma_prob1_raw: float
+    gamma_prob2_raw: float
+    gamma_prob_sum_raw: float
     ml1: Optional[int]
     ml2: Optional[int]
 
@@ -694,13 +740,20 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
 
         outcomes = parse_json_list(m.get("outcomes"))
         prices = parse_json_list(m.get("outcomePrices"))
-        p1_raw = resolve_polymarket_prob(m, 0)
-        p2_raw = resolve_polymarket_prob(m, 1)
+        token_ids = parse_json_list(m.get("clobTokenIds"))
+        p1_raw = gamma_outcome_prob(m, 0)
+        p2_raw = gamma_outcome_prob(m, 1)
 
         if len(outcomes) != 2:
             debug["parse_outcomes_failed"] += 1
             debug["reject_non_2_outcome"] = debug.get("reject_non_2_outcome", 0) + 1
             continue
+
+        tid1 = tid2 = ""
+        if len(token_ids) == 2:
+            tid1, tid2 = str(token_ids[0]), str(token_ids[1])
+        else:
+            debug["missing_token_ids"] = debug.get("missing_token_ids", 0) + 1
 
         if p1_raw is None or p2_raw is None:
             debug["parse_prices_failed"] += 1
@@ -771,7 +824,6 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 debug["gamma_clob_divergence"] = debug.get("gamma_clob_divergence", 0) + 1
 
         url = f"https://polymarket.com/market/{slug}" if slug else ""
-
         start_raw = (
             m.get("eventStartTime")
             or m.get("gameStartTime")
@@ -792,12 +844,17 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 team2=team2,
                 title=title,
                 sports_market_type=sports_market_type,
+                clob_token_ids=(tid1, tid2),
                 prob1=p1_norm,
                 prob2=p2_norm,
                 prob1_raw=p1_raw,
                 prob2_raw=p2_raw,
                 prob_sum_raw=prob_sum,
-                price_side_used=POLY_PRICE_SIDE,
+                prob_source="gamma",
+                price_side_used="gamma",
+                gamma_prob1_raw=p1_raw,
+                gamma_prob2_raw=p2_raw,
+                gamma_prob_sum_raw=prob_sum,
                 ml1=prob_to_moneyline(p1_norm),
                 ml2=prob_to_moneyline(p2_norm),
             )
@@ -1378,6 +1435,7 @@ def compute_value_rankings(
                         "polymarket_url": pm.url,
                         "poly_market_id": pm.market_id,
                         "poly_sports_market_type": pm.sports_market_type,
+                        "poly_prob_source": pm.prob_source,
                         "poly_price_side_used": pm.price_side_used,
                     }
                 )
@@ -1438,6 +1496,7 @@ def compute_value_rankings(
                     "poly_market_slug": pm.slug,
                     "poly_sports_market_type": pm.sports_market_type,
                     "poly_title": pm.title,
+                    "poly_prob_source": pm.prob_source,
                     "poly_price_side_used": pm.price_side_used,
                     "sb_event_id": sb.event_id,
                     "home_team": sb.home_team,
@@ -1476,6 +1535,127 @@ def compute_value_rankings(
     return rows, unmatched_polys, unmatched_books, skipped_reasons, None, None
 
 
+def clob_effective_price(best_bid: Optional[float], best_ask: Optional[float], side: str) -> Optional[float]:
+    """Pick a single effective price from CLOB best bid/ask."""
+    side = (side or "mid").lower()
+    if side == "buy":
+        return best_ask if best_ask is not None else best_bid
+    if side == "sell":
+        return best_bid if best_bid is not None else best_ask
+    # mid (default)
+    if best_bid is not None and best_ask is not None:
+        return (best_bid + best_ask) / 2.0
+    return best_bid if best_bid is not None else best_ask
+
+
+def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneylineMarket]:
+    """
+    Return a new PolyMoneylineMarket with CLOB-derived probabilities, or None on timeout/failure.
+    Hard-bounded by CLOB_MARKET_TIMEOUT seconds per market.
+    """
+    t0 = time.monotonic()
+    tid1, tid2 = pm.clob_token_ids
+    if not tid1 or not tid2:
+        return None
+
+    try:
+        remaining = CLOB_MARKET_TIMEOUT - (time.monotonic() - t0)
+        if remaining <= 0:
+            return None
+        b1, a1 = get_clob_best_prices(tid1, timeout=min(CLOB_REQUEST_TIMEOUT, remaining))
+
+        remaining = CLOB_MARKET_TIMEOUT - (time.monotonic() - t0)
+        if remaining <= 0:
+            return None
+        b2, a2 = get_clob_best_prices(tid2, timeout=min(CLOB_REQUEST_TIMEOUT, remaining))
+    except Exception:
+        return None
+
+    e1 = clob_effective_price(b1, a1, POLY_PRICE_SIDE)
+    e2 = clob_effective_price(b2, a2, POLY_PRICE_SIDE)
+    if e1 is None or e2 is None:
+        return None
+    if not (0.0 < e1 < 1.0 and 0.0 < e2 < 1.0):
+        return None
+    ssum = e1 + e2
+    if ssum <= 0:
+        return None
+
+    p1 = e1 / ssum
+    p2 = e2 / ssum
+    ml1 = prob_to_moneyline(p1)
+    ml2 = prob_to_moneyline(p2)
+
+    return PolyMoneylineMarket(
+        market_id=pm.market_id,
+        slug=pm.slug,
+        url=pm.url,
+        start_time=pm.start_time,
+        team1=pm.team1,
+        team2=pm.team2,
+        title=pm.title,
+        sports_market_type=pm.sports_market_type,
+        clob_token_ids=pm.clob_token_ids,
+        prob1=p1,
+        prob2=p2,
+        prob1_raw=e1,
+        prob2_raw=e2,
+        prob_sum_raw=ssum,
+        prob_source="clob",
+        price_side_used=POLY_PRICE_SIDE,
+        gamma_prob1_raw=pm.gamma_prob1_raw,
+        gamma_prob2_raw=pm.gamma_prob2_raw,
+        gamma_prob_sum_raw=pm.gamma_prob_sum_raw,
+        ml1=ml1,
+        ml2=ml2,
+    )
+
+
+def enrich_top_with_clob(
+    polys: List[PolyMoneylineMarket],
+    rows: List[Dict[str, Any]],
+) -> List[PolyMoneylineMarket]:
+    """
+    Enrich only the top CLOB_REVIEW_TOP markets (based on the current ranking rows)
+    using the CLOB order book. If enrichment fails or exceeds the timeout,
+    keep the original gamma prices.
+    """
+    if CLOB_REVIEW_TOP <= 0:
+        return polys
+
+    top_ids: List[str] = []
+    seen: set[str] = set()
+    for r in rows[:CLOB_REVIEW_TOP]:
+        mid = str(r.get("poly_market_id") or "")
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        top_ids.append(mid)
+
+    if not top_ids:
+        return polys
+
+    poly_by_id = {p.market_id: p for p in polys if p.market_id}
+    updated: Dict[str, PolyMoneylineMarket] = {}
+
+    for mid in top_ids:
+        pm = poly_by_id.get(mid)
+        if not pm:
+            continue
+        enriched = try_enrich_market_with_clob(pm)
+        if enriched is not None:
+            updated[mid] = enriched
+
+    if not updated:
+        return polys
+
+    out: List[PolyMoneylineMarket] = []
+    for pm in polys:
+        repl = updated.get(pm.market_id)
+        out.append(repl if repl is not None else pm)
+    return out
+
+
 def write_value_reports(rows: List[Dict[str, Any]]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1501,6 +1681,7 @@ def write_value_reports(rows: List[Dict[str, Any]]) -> None:
         "poly_market_slug",
         "poly_sports_market_type",
         "poly_title",
+        "poly_prob_source",
         "poly_price_side_used",
         "poly_prob_raw",
         "poly_prob_norm",
@@ -1748,6 +1929,9 @@ def main() -> None:
             "poly_tag_id": GAME_BETS_TAG_ID,
             "poly_fallback": POLY_FALLBACK,
             "poly_price_side": POLY_PRICE_SIDE,
+            "clob_review_top": CLOB_REVIEW_TOP,
+            "clob_market_timeout": CLOB_MARKET_TIMEOUT,
+            "clob_request_timeout": CLOB_REQUEST_TIMEOUT,
             "debug_mode": DEBUG_MODE,
         },
     }
@@ -1761,7 +1945,15 @@ def main() -> None:
     books, odds_debug = load_sportsbook_games_with_debug()
     diagnostics["odds_api"] = odds_debug
     write_diagnostics(diagnostics)
-    rows, unmatched_polys, unmatched_books, _skips, debug_rows_all, debug_counts = compute_value_rankings(polys, books)
+    rows, unmatched_polys, unmatched_books, _skips, debug_rows_all, debug_counts = compute_value_rankings(
+        polys, books
+    )
+    polys_refined = enrich_top_with_clob(polys, rows)
+    if polys_refined is not polys:
+        polys = polys_refined
+        rows, unmatched_polys, unmatched_books, _skips, debug_rows_all, debug_counts = compute_value_rankings(
+            polys, books
+        )
     diagnostics["results"] = {
         "polymarket_count": len(polys),
         "sportsbook_count": len(books),
