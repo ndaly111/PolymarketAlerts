@@ -58,7 +58,7 @@ def env_float(name: str, default: float) -> float:
 TOP_N = env_int("TOP_N", 20)
 DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
 SKIP_NEUTRAL_5050 = env_int("SKIP_NEUTRAL_5050", 1)  # 1=yes: drop 50/50 placeholder markets
-NEUTRAL_5050_EPS = env_float("NEUTRAL_5050_EPS", 1e-6)  # float tolerance for "exactly 0.50"
+NEUTRAL_5050_EPS = env_float("NEUTRAL_5050_EPS", 1e-4)  # float tolerance for "exactly 0.50"
 DEBUG_DISCORD_TOP_N = env_int("DEBUG_DISCORD_TOP_N", 20)  # how many lines to print in DEBUG_MODE
 MIN_EDGE = env_float("MIN_EDGE", 0.03)  # prob gap threshold (e.g., 0.03 = 3%)
 GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets" tag
@@ -80,7 +80,7 @@ POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "mid") or "mid").strip().lower()
 CLOB_REVIEW_TOP = env_int("CLOB_REVIEW_TOP", 25)
 CLOB_MARKET_TIMEOUT = env_int("CLOB_MARKET_TIMEOUT", 10)  # seconds per market; fallback to gamma if exceeded
 CLOB_REQUEST_TIMEOUT = env_int("CLOB_REQUEST_TIMEOUT", 6)  # seconds per HTTP request within a market
-MAX_CLOB_MID_SPREAD = env_float("MAX_CLOB_MID_SPREAD", 0.2)
+MAX_CLOB_MID_SPREAD = env_float("MAX_CLOB_MID_SPREAD", 0.10)
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -817,10 +817,10 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
         p1_norm = p1_raw / prob_sum
         p2_norm = p2_raw / prob_sum
 
-        # Noise filter: many illiquid/placeholder markets normalize to exactly 0.50 / 0.50.
-        # These create fake "edges" vs sportsbooks. Make it configurable.
+        # Noise filter: many illiquid/placeholder markets sit at exactly 0.50 / 0.50 in Gamma.
+        # IMPORTANT: check raw gamma prices so we don't drop real markets that normalize to 0.50/0.50.
         if SKIP_NEUTRAL_5050:
-            if abs(p1_norm - 0.5) <= NEUTRAL_5050_EPS and abs(p2_norm - 0.5) <= NEUTRAL_5050_EPS:
+            if abs(p1_raw - 0.5) <= NEUTRAL_5050_EPS and abs(p2_raw - 0.5) <= NEUTRAL_5050_EPS:
                 debug["reject_neutral_5050"] = debug.get("reject_neutral_5050", 0) + 1
                 continue
 
