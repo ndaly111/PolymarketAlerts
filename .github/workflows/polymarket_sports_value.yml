@@ -58,6 +58,8 @@ jobs:
           DISCORD_MENTION: ${{ vars.DISCORD_MENTION }}
           TOP_N: ${{ vars.TOP_N }}
           DISCORD_TOP_N: ${{ vars.DISCORD_TOP_N }}
+          SKIP_NEUTRAL_5050: ${{ vars.SKIP_NEUTRAL_5050 }}
+          NEUTRAL_5050_EPS: ${{ vars.NEUTRAL_5050_EPS }}
           MIN_EDGE: ${{ vars.MIN_EDGE }}
           TIME_WINDOW_HOURS: ${{ vars.TIME_WINDOW_HOURS }}
           DRY_RUN: ${{ vars.DRY_RUN }}
@@ -67,6 +69,7 @@ jobs:
           MIN_BOOKS: ${{ vars.MIN_BOOKS }}
           ODDS_REGIONS: ${{ vars.ODDS_REGIONS }}
           POLY_FALLBACK: ${{ vars.POLY_FALLBACK }}
+          MAX_CLOB_MID_SPREAD: ${{ vars.MAX_CLOB_MID_SPREAD }}
           DEBUG_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.debug_mode) && '1' || '0' }}
         run: python polymarket_sports_value.py
 

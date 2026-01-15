@@ -80,6 +80,7 @@ POLY_PRICE_SIDE = (os.getenv("POLY_PRICE_SIDE", "mid") or "mid").strip().lower()
 CLOB_REVIEW_TOP = env_int("CLOB_REVIEW_TOP", 25)
 CLOB_MARKET_TIMEOUT = env_int("CLOB_MARKET_TIMEOUT", 10)  # seconds per market; fallback to gamma if exceeded
 CLOB_REQUEST_TIMEOUT = env_int("CLOB_REQUEST_TIMEOUT", 6)  # seconds per HTTP request within a market
+MAX_CLOB_MID_SPREAD = env_float("MAX_CLOB_MID_SPREAD", 0.2)
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -763,13 +764,6 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
             debug["reject_missing_probs"] = debug.get("reject_missing_probs", 0) + 1
             continue
 
-        # Noise filter: many illiquid/placeholder markets sit at exactly 0.50 / 0.50.
-        # These create fake "edges" vs sportsbooks. Make it configurable.
-        if SKIP_NEUTRAL_5050:
-            if abs(p1_raw - 0.5) <= NEUTRAL_5050_EPS and abs(p2_raw - 0.5) <= NEUTRAL_5050_EPS:
-                debug["reject_neutral_5050"] = debug.get("reject_neutral_5050", 0) + 1
-                continue
-
         o1, o2 = str(outcomes[0]), str(outcomes[1])
 
         slug = str(m.get("slug") or "").strip()
@@ -822,6 +816,13 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
 
         p1_norm = p1_raw / prob_sum
         p2_norm = p2_raw / prob_sum
+
+        # Noise filter: many illiquid/placeholder markets normalize to exactly 0.50 / 0.50.
+        # These create fake "edges" vs sportsbooks. Make it configurable.
+        if SKIP_NEUTRAL_5050:
+            if abs(p1_norm - 0.5) <= NEUTRAL_5050_EPS and abs(p2_norm - 0.5) <= NEUTRAL_5050_EPS:
+                debug["reject_neutral_5050"] = debug.get("reject_neutral_5050", 0) + 1
+                continue
 
         if len(prices) == 2:
             try:
@@ -1602,6 +1603,14 @@ def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneyli
     except Exception:
         return None
 
+    if (POLY_PRICE_SIDE or "mid").lower() == "mid":
+        if b1 is None or a1 is None or b2 is None or a2 is None:
+            return None
+        spread1 = max(0.0, a1 - b1)
+        spread2 = max(0.0, a2 - b2)
+        if spread1 > MAX_CLOB_MID_SPREAD or spread2 > MAX_CLOB_MID_SPREAD:
+            return None
+
     e1 = clob_effective_price(b1, a1, POLY_PRICE_SIDE)
     e2 = clob_effective_price(b2, a2, POLY_PRICE_SIDE)
     if e1 is None or e2 is None:
@@ -1614,6 +1623,9 @@ def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneyli
 
     p1 = e1 / ssum
     p2 = e2 / ssum
+    if SKIP_NEUTRAL_5050:
+        if abs(p1 - 0.5) <= NEUTRAL_5050_EPS and abs(p2 - 0.5) <= NEUTRAL_5050_EPS:
+            return None
     ml1 = prob_to_moneyline(p1)
     ml2 = prob_to_moneyline(p2)
 
@@ -1953,6 +1965,8 @@ def main() -> None:
             "min_edge": MIN_EDGE,
             "top_n": TOP_N,
             "discord_top_n": DISCORD_TOP_N,
+            "skip_neutral_5050": SKIP_NEUTRAL_5050,
+            "neutral_5050_eps": NEUTRAL_5050_EPS,
             "time_window_hours": TIME_WINDOW_HOURS,
             "past_start_grace_min": PAST_START_GRACE_MIN,
             "odds_sport_keys": ODDS_SPORT_KEYS or None,
@@ -1964,6 +1978,7 @@ def main() -> None:
             "clob_review_top": CLOB_REVIEW_TOP,
             "clob_market_timeout": CLOB_MARKET_TIMEOUT,
             "clob_request_timeout": CLOB_REQUEST_TIMEOUT,
+            "max_clob_mid_spread": MAX_CLOB_MID_SPREAD,
             "debug_mode": DEBUG_MODE,
         },
     }
