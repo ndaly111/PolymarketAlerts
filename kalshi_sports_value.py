@@ -126,9 +126,9 @@ def _kalshi_signed_headers(method: str, full_path: str) -> Dict[str, str]:
       message = timestamp_ms + method + path
       headers: KALSHI-ACCESS-KEY, KALSHI-ACCESS-SIGNATURE, KALSHI-ACCESS-TIMESTAMP
     """
-    key_id = (os.getenv("KALSHI_KEY_ID") or "").strip()
+    key_id = (os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip()
     if not key_id:
-        raise RuntimeError("Missing KALSHI_KEY_ID.")
+        raise RuntimeError("Missing KALSHI_KEY_ID (or KALSHI_API_KEY_ID).")
 
     # Kalshi uses millisecond timestamps in signing examples.
     ts = str(int(time.time() * 1000))
@@ -581,11 +581,12 @@ def scan() -> int:
         return 2
 
     # Fail fast if Kalshi auth isn't present (trade-api/v2 requires signed requests).
-    if not (os.getenv("KALSHI_KEY_ID") and os.getenv("KALSHI_PRIVATE_KEY")):
+    has_key_id = bool((os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip())
+    if not (has_key_id and os.getenv("KALSHI_PRIVATE_KEY")):
         run_meta["status"] = "error_missing_kalshi_auth"
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
-        print("Missing Kalshi auth env vars: KALSHI_KEY_ID and/or KALSHI_PRIVATE_KEY")
+        print("Missing Kalshi auth env vars: KALSHI_KEY_ID (or KALSHI_API_KEY_ID) and/or KALSHI_PRIVATE_KEY")
         return 2
 
     # Kalshi markets
