@@ -70,6 +70,11 @@ jobs:
           ODDS_REGIONS: ${{ vars.ODDS_REGIONS }}
           POLY_FALLBACK: ${{ vars.POLY_FALLBACK }}
           MAX_CLOB_MID_SPREAD: ${{ vars.MAX_CLOB_MID_SPREAD }}
+          POLY_MARKET_TYPE_ALLOWLIST: ${{ vars.POLY_MARKET_TYPE_ALLOWLIST }}
+          POLY_VOLUME_FILTER_ENABLED: ${{ vars.POLY_VOLUME_FILTER_ENABLED }}
+          MIN_POLY_TOTAL_VOLUME_USD: ${{ vars.MIN_POLY_TOTAL_VOLUME_USD }}
+          MIN_POLY_VOLUME_24H_USD: ${{ vars.MIN_POLY_VOLUME_24H_USD }}
+          MIN_POLY_LIQUIDITY_USD: ${{ vars.MIN_POLY_LIQUIDITY_USD }}
           DEBUG_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.debug_mode) && '1' || '0' }}
         run: python polymarket_sports_value.py
 
