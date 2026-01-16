@@ -1,0 +1,112 @@
+name: Kalshi vs Sportsbook - Lines Value Scan
+
+on:
+  schedule:
+    # 6:05 AM America/New_York year-round (DST-safe via dual cron + gate)
+    - cron: "5 10 * * *"  # 6:05 AM EDT
+    - cron: "5 11 * * *"  # 6:05 AM EST
+  workflow_dispatch:
+    inputs:
+      sport_keys:
+        description: "Comma-separated Odds API sport keys"
+        required: false
+        default: "americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl"
+      top_n:
+        description: "Number of results to keep/post"
+        required: false
+        default: "25"
+      min_edge:
+        description: "Minimum edge (0.03 = 3 percentage points)"
+        required: false
+        default: "0.03"
+      min_books:
+        description: "Minimum books required for a fair probability"
+        required: false
+        default: "3"
+      lookahead_hours:
+        description: "Only consider Kalshi markets closing within this many hours"
+        required: false
+        default: "72"
+      buy_fee_cents:
+        description: "Kalshi opening fee per contract (cents) added to YES/NO buy price"
+        required: false
+        default: "3"
+      series_tickers:
+        description: "Optional: comma-separated Kalshi series tickers (overrides auto-discovery)"
+        required: false
+        default: ""
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Gate schedule to 6:05 AM America/New_York
+        id: gate
+        if: github.event_name == 'schedule'
+        run: |
+          python - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+
+          now = datetime.now(ZoneInfo('America/New_York'))
+          should_run = (now.hour == 6 and now.minute == 5)
+
+          out = os.environ.get("GITHUB_OUTPUT")
+          if out:
+              with open(out, "a", encoding="utf-8") as f:
+                  f.write(f"run={'true' if should_run else 'false'}\n")
+          else:
+              # Shouldn't happen in Actions, but makes local runs less confusing.
+              print("WARNING: GITHUB_OUTPUT not set; cannot emit step output.")
+
+          print("NY time:", now.isoformat())
+          print("Gate decision:", should_run)
+          PY
+
+      - name: Run Kalshi scan
+        if: github.event_name != 'schedule' || steps.gate.outputs.run == 'true'
+        env:
+          THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
+
+          # Kalshi auth (required for trade-api/v2)
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          # Optional override; if omitted we fall back to the documented base host and ensure /trade-api/v2 exists
+          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+
+          SPORT_KEYS: ${{ github.event.inputs.sport_keys || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl' }}
+          TOP_N: ${{ github.event.inputs.top_n || '25' }}
+          MIN_EDGE: ${{ github.event.inputs.min_edge || '0.03' }}
+          MIN_BOOKS: ${{ github.event.inputs.min_books || '3' }}
+
+          KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
+          KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
+          KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
+
+          OUTDIR: out
+        run: |
+          python kalshi_sports_value.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-value-output
+          path: out/
+          if-no-files-found: warn
+          retention-days: 14

@@ -57,3 +57,36 @@ The `Polymarket Sports Value Scan` GitHub Action runs daily and can be triggered
 - `POLY_FALLBACK` (0/1, default 1): retry Polymarket fetch with looser filters if empty
 - `REQUIRE_OUTSIDE_RANGE` (0/1, default 1): require Polymarket moneyline to be outside sportsbook range
 - `GAME_BETS_TAG_ID` (int, default 100639): Polymarket tag filter (can be overridden)
+
+---
+
+## Kalshi lines scanner (moneyline, spread, total)
+
+This repo now includes a **separate** workflow and script to scan Kalshi sports *lines* (no player props yet):
+
+- **Moneyline (H2H)**
+- **Spreads**
+- **Totals / Over-Under**
+
+It compares Kalshi prices vs sportsbook consensus (The Odds API), calculates a no-vig fair probability, and reports the biggest gaps.
+
+### Important: +3¢ Kalshi opening fee
+
+Kalshi charges a flat fee when you **open** (buy) a contract. The scanner accounts for this by adding `KALSHI_BUY_FEE_CENTS` (default **3**) to the **YES or NO** buy price before computing edge.
+
+Example: if a contract is listed at **72¢**, the scanner treats it as **75¢ all-in** when evaluating value.
+
+### Run in GitHub Actions
+
+Workflow: `.github/workflows/kalshi_sports_value.yml`
+
+Secrets used:
+- `THE_ODDS_API` (or `ODDS_API_KEY`)
+- `DISCORD_WEBHOOK_URL` (or `DISCORD_SPORTS_ALERT`)
+- `KALSHI_KEY_ID` (Kalshi API key id)
+- `KALSHI_PRIVATE_KEY` (Kalshi RSA private key PEM)
+
+Optional:
+- `KALSHI_BASE` (repo variable recommended): Kalshi trade API base URL. If you set only the host, the script will append `/trade-api/v2`.
+
+Manual inputs let you change sport keys, edge thresholds, lookahead window, fee cents, and (optionally) the Kalshi series tickers.
