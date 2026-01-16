@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -54,11 +54,29 @@ def env_float(name: str, default: float) -> float:
         return default
     return float(value)
 
+POLY_VOLUME_FILTER_ENABLED = env_int("POLY_VOLUME_FILTER_ENABLED", 1)  # default ON
+
+def env_csv_set(name: str) -> Set[str]:
+    raw = os.getenv(name) or ""
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def maybe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if value is None:
+            return default
+        s = str(value).strip()
+        if not s:
+            return default
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
 
 TOP_N = env_int("TOP_N", 20)
 DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
 SKIP_NEUTRAL_5050 = env_int("SKIP_NEUTRAL_5050", 1)  # 1=yes: drop 50/50 placeholder markets
-NEUTRAL_5050_EPS = env_float("NEUTRAL_5050_EPS", 1e-4)  # float tolerance for "exactly 0.50"
+NEUTRAL_5050_EPS = env_float("NEUTRAL_5050_EPS", 1e-6)  # float tolerance for "exactly 0.50"
 DEBUG_DISCORD_TOP_N = env_int("DEBUG_DISCORD_TOP_N", 20)  # how many lines to print in DEBUG_MODE
 MIN_EDGE = env_float("MIN_EDGE", 0.03)  # prob gap threshold (e.g., 0.03 = 3%)
 GAME_BETS_TAG_ID = env_int("GAME_BETS_TAG_ID", 100639)  # Polymarket "game bets" tag
@@ -81,6 +99,16 @@ CLOB_REVIEW_TOP = env_int("CLOB_REVIEW_TOP", 25)
 CLOB_MARKET_TIMEOUT = env_int("CLOB_MARKET_TIMEOUT", 10)  # seconds per market; fallback to gamma if exceeded
 CLOB_REQUEST_TIMEOUT = env_int("CLOB_REQUEST_TIMEOUT", 6)  # seconds per HTTP request within a market
 MAX_CLOB_MID_SPREAD = env_float("MAX_CLOB_MID_SPREAD", 0.10)
+
+# Liquidity/quality filters (0 = disabled)
+MIN_POLY_VOLUME_USD = env_float("MIN_POLY_VOLUME_USD", 0.0)
+MIN_POLY_TOTAL_VOLUME_USD = env_float("MIN_POLY_TOTAL_VOLUME_USD", MIN_POLY_VOLUME_USD)
+MIN_POLY_VOLUME_24H_USD = env_float("MIN_POLY_VOLUME_24H_USD", 0.0)
+MIN_POLY_LIQUIDITY_USD = env_float("MIN_POLY_LIQUIDITY_USD", 0.0)
+
+# Comma-separated Polymarket sportsMarketType allowlist (empty = allow all).
+# Example: nfl,nba,nhl,mlb,ncaaf,ncaab
+POLY_MARKET_TYPE_ALLOWLIST = env_csv_set("POLY_MARKET_TYPE_ALLOWLIST")
 
 # Moneyline types override (comma-separated). If empty, we autodetect using /sports/market-types.
 MONEYLINE_TYPES = os.getenv("MONEYLINE_TYPES", "").strip()
@@ -543,6 +571,9 @@ class PolyMoneylineMarket:
     gamma_prob_sum_raw: float
     ml1: Optional[int]
     ml2: Optional[int]
+    volume_total_usd: Optional[float]
+    volume_24h_usd: Optional[float]
+    liquidity_usd: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -774,6 +805,34 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
             or m.get("sports_market_types")
             or ""
         ).strip()
+        smt_key = sports_market_type.lower().strip()
+        if smt_key:
+            market_type_counts = debug.get("market_type_counts") or {}
+            market_type_counts[smt_key] = market_type_counts.get(smt_key, 0) + 1
+            debug["market_type_counts"] = market_type_counts
+        if POLY_MARKET_TYPE_ALLOWLIST and smt_key and smt_key not in POLY_MARKET_TYPE_ALLOWLIST:
+            debug["reject_market_type"] = debug.get("reject_market_type", 0) + 1
+            continue
+
+        vol_total = maybe_float(m.get("volumeNum") or m.get("volume"))
+        vol_24h = maybe_float(m.get("volume24hr"))
+        if vol_24h is None:
+            vol_24h_amm = maybe_float(m.get("volume24hrAmm")) or 0.0
+            vol_24h_clob = maybe_float(m.get("volume24hrClob")) or 0.0
+            if vol_24h_amm or vol_24h_clob:
+                vol_24h = vol_24h_amm + vol_24h_clob
+        liq = maybe_float(m.get("liquidityNum") or m.get("liquidity"))
+
+        if POLY_VOLUME_FILTER_ENABLED:
+            if MIN_POLY_TOTAL_VOLUME_USD > 0 and (vol_total or 0.0) < MIN_POLY_TOTAL_VOLUME_USD:
+                debug["reject_low_total_volume"] = debug.get("reject_low_total_volume", 0) + 1
+                continue
+            if MIN_POLY_VOLUME_24H_USD > 0 and (vol_24h or 0.0) < MIN_POLY_VOLUME_24H_USD:
+                debug["reject_low_volume_24h"] = debug.get("reject_low_volume_24h", 0) + 1
+                continue
+            if MIN_POLY_LIQUIDITY_USD > 0 and (liq or 0.0) < MIN_POLY_LIQUIDITY_USD:
+                debug["reject_low_liquidity"] = debug.get("reject_low_liquidity", 0) + 1
+                continue
         title = str(m.get("title") or "").strip()
         question = str(m.get("question") or "").strip()
         # IMPORTANT: do NOT include slug here because slugs often include dates (e.g., 2025-11-03)
@@ -863,6 +922,9 @@ def _parse_polymarket_markets(raw_markets: List[Dict[str, Any]], debug: Dict[str
                 gamma_prob_sum_raw=prob_sum,
                 ml1=prob_to_moneyline(p1_norm),
                 ml2=prob_to_moneyline(p2_norm),
+                volume_total_usd=vol_total,
+                volume_24h_usd=vol_24h,
+                liquidity_usd=liq,
             )
         )
 
@@ -897,6 +959,10 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         "reject_non_2_outcome",
         "reject_bad_team_parse",
         "reject_generic_outcomes",
+        "reject_market_type",
+        "reject_low_total_volume",
+        "reject_low_volume_24h",
+        "reject_low_liquidity",
         "normalized_generic_outcomes",
         "gamma_clob_divergence",
         "reject_start_time_missing_postparse",
@@ -912,6 +978,13 @@ def write_polymarket_parse_debug(raw_markets: List[Dict[str, Any]], debug: Dict[
         lines.append("SAMPLE SKIPPED GENERIC TITLES (first 20)")
         for title in skipped_samples[:20]:
             lines.append(f"- {textwrap.shorten(str(title), width=140, placeholder='…')}")
+        lines.append("")
+
+    market_types = debug.get("market_type_counts") or {}
+    if market_types:
+        lines.append("POLYMARKET MARKET TYPE COUNTS")
+        for key, count in sorted(market_types.items()):
+            lines.append(f"- {key}: {count}")
         lines.append("")
 
     if DEBUG_MODE and DEBUG_POLY_SLUG:
@@ -1002,6 +1075,11 @@ def fetch_polymarket_moneylines_with_debug() -> Tuple[List[PolyMoneylineMarket],
         "reject_non_2_outcome": 0,
         "reject_bad_team_parse": 0,
         "reject_generic_outcomes": 0,
+        "reject_market_type": 0,
+        "reject_low_total_volume": 0,
+        "reject_low_volume_24h": 0,
+        "reject_low_liquidity": 0,
+        "market_type_counts": {},
         "normalized_generic_outcomes": 0,
         "skipped_generic_samples": [],
     }
@@ -1128,6 +1206,9 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
                 "prob2",
                 "ml1",
                 "ml2",
+                "volume_total_usd",
+                "volume_24h_usd",
+                "liquidity_usd",
                 "url",
                 "slug",
             ]
@@ -1147,6 +1228,9 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
                     f"{m.prob2:.6f}",
                     m.ml1 if m.ml1 is not None else "",
                     m.ml2 if m.ml2 is not None else "",
+                    m.volume_total_usd if m.volume_total_usd is not None else "",
+                    m.volume_24h_usd if m.volume_24h_usd is not None else "",
+                    m.liquidity_usd if m.liquidity_usd is not None else "",
                     m.url,
                     m.slug,
                 ]
@@ -1167,6 +1251,9 @@ def write_polymarket_snapshot(markets: List[PolyMoneylineMarket]) -> None:
                     "prob2": m.prob2,
                     "ml1": m.ml1,
                     "ml2": m.ml2,
+                    "volume_total_usd": m.volume_total_usd,
+                    "volume_24h_usd": m.volume_24h_usd,
+                    "liquidity_usd": m.liquidity_usd,
                     "url": m.url,
                     "slug": m.slug,
                 }
@@ -1469,6 +1556,9 @@ def compute_value_rankings(
                         "poly_sports_market_type": pm.sports_market_type,
                         "poly_prob_source": pm.prob_source,
                         "poly_price_side_used": pm.price_side_used,
+                        "poly_volume_total_usd": pm.volume_total_usd,
+                        "poly_volume_24h_usd": pm.volume_24h_usd,
+                        "poly_liquidity_usd": pm.liquidity_usd,
                     }
                 )
 
@@ -1530,6 +1620,9 @@ def compute_value_rankings(
                     "poly_title": pm.title,
                     "poly_prob_source": pm.prob_source,
                     "poly_price_side_used": pm.price_side_used,
+                    "poly_volume_total_usd": pm.volume_total_usd,
+                    "poly_volume_24h_usd": pm.volume_24h_usd,
+                    "poly_liquidity_usd": pm.liquidity_usd,
                     "sb_event_id": sb.event_id,
                     "home_team": sb.home_team,
                     "away_team": sb.away_team,
@@ -1651,6 +1744,9 @@ def try_enrich_market_with_clob(pm: PolyMoneylineMarket) -> Optional[PolyMoneyli
         gamma_prob_sum_raw=pm.gamma_prob_sum_raw,
         ml1=ml1,
         ml2=ml2,
+        volume_total_usd=pm.volume_total_usd,
+        volume_24h_usd=pm.volume_24h_usd,
+        liquidity_usd=pm.liquidity_usd,
     )
 
 
@@ -1891,6 +1987,7 @@ def format_discord_message(
     lines: List[str] = [header]
     for i, r in enumerate(top, 1):
         league_prefix = f"{r['league']} - " if r.get("league") else ""
+        recommended_team = r.get("recommended_side") or "?"
         if r.get("range_side") == "home":
             min_odds = r.get("home_min_odds")
             max_odds = r.get("home_max_odds")
@@ -1915,11 +2012,20 @@ def format_discord_message(
         poly_prob = r.get("poly_prob_norm", r.get("polymarket_prob", 0.0))
         sb_prob = r.get("sb_fair_prob", r.get("sportsbook_fair_prob", 0.0))
         books_used = r.get("books_used")
+        poly_ml = r.get("polymarket_ml")
+        sb_ml = r.get("sportsbook_ml")
+        poly_ml_s = f"{int(poly_ml):+d}" if isinstance(poly_ml, int) else "?"
+        sb_ml_s = f"{int(sb_ml):+d}" if isinstance(sb_ml, int) else "?"
+        vol_24h = r.get("poly_volume_24h_usd")
+        liq = r.get("poly_liquidity_usd")
+        vol_s = f"${vol_24h:,.0f}" if isinstance(vol_24h, (int, float)) else "-"
+        liq_s = f"${liq:,.0f}" if isinstance(liq, (int, float)) else "-"
         start_time = r.get("poly_start_time_et") or r.get("start_time_et")
         lines.append(
             f"{i}) {league_prefix}{r['matchup']} ({start_time}, Δt={match_delta:.1f}h, {poly_type}) | "
-            f"Poly {poly_prob:.1%} ({price_side}, norm) vs Books {sb_prob:.1%} (N={books_used}) | "
-            f"Edge {r['edge_abs']:+.1%} | SB {sb_range} | {r['polymarket_url']}"
+            f"BUY {recommended_team} | Poly {poly_prob:.1%} ({poly_ml_s}, {price_side}) vs "
+            f"Books {sb_prob:.1%} ({sb_ml_s}, N={books_used}) | Edge {r['edge_abs']:+.1%} | "
+            f"Poly Vol24h {vol_s} Liq {liq_s} | SB {sb_range} | {r['polymarket_url']}"
         )
 
     # Optional lightweight debug footer (helps you confirm matching volume without digging into artifacts)
@@ -1979,6 +2085,11 @@ def main() -> None:
             "clob_market_timeout": CLOB_MARKET_TIMEOUT,
             "clob_request_timeout": CLOB_REQUEST_TIMEOUT,
             "max_clob_mid_spread": MAX_CLOB_MID_SPREAD,
+            "poly_volume_filter_enabled": POLY_VOLUME_FILTER_ENABLED,
+            "poly_market_type_allowlist": sorted(POLY_MARKET_TYPE_ALLOWLIST) or None,
+            "min_poly_total_volume_usd": MIN_POLY_TOTAL_VOLUME_USD,
+            "min_poly_volume_24h_usd": MIN_POLY_VOLUME_24H_USD,
+            "min_poly_liquidity_usd": MIN_POLY_LIQUIDITY_USD,
             "debug_mode": DEBUG_MODE,
         },
     }
