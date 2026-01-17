@@ -539,6 +539,61 @@ def map_team_to_event_team(
 def kalshi_market_url(market_ticker: str) -> str:
     return f"https://kalshi.com/markets/{str(market_ticker).lower()}"
 
+def _league_tokens_from_sport_keys(sport_keys: List[str]) -> List[str]:
+    """Best-effort mapping from Odds API sport keys -> league keywords likely to appear in Kalshi series."""
+    toks: List[str] = []
+    for k in (sport_keys or []):
+        kl = str(k).lower()
+        if "_nfl" in kl:
+            toks += ["NFL"]
+        if "_nba" in kl:
+            toks += ["NBA"]
+        if "_mlb" in kl:
+            toks += ["MLB"]
+        if "_nhl" in kl:
+            toks += ["NHL"]
+        if "_ncaaf" in kl:
+            toks += ["NCAAF", "CFB", "NCAA", "NCAA FOOTBALL", "COLLEGE FOOTBALL"]
+        if "_ncaab" in kl:
+            toks += ["NCAAB", "CBB", "NCAA", "NCAA BASKETBALL", "COLLEGE BASKETBALL"]
+
+    out: List[str] = []
+    seen: set = set()
+    for t in toks:
+        tt = str(t).strip()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+    return out
+
+def _score_series_candidate(ticker: str, title: str, league_tokens: List[str]) -> int:
+    """Higher score = more likely the series is relevant to the requested sports + line types."""
+    txt = f"{ticker} {title}".upper()
+    weights = {
+        "NFL": 12, "NBA": 12, "MLB": 12, "NHL": 12,
+        "NCAAF": 10, "NCAAB": 10,
+        "COLLEGE FOOTBALL": 8, "COLLEGE BASKETBALL": 8,
+        "NCAA FOOTBALL": 7, "NCAA BASKETBALL": 7,
+        "CFB": 6, "CBB": 6,
+        "NCAA": 4,
+    }
+    score = 0
+    for tok in league_tokens or []:
+        tt = str(tok).upper().strip()
+        if tt and tt in txt:
+            score += int(weights.get(tt, 3))
+
+    if "MONEYLINE" in txt or "H2H" in txt:
+        score += 3
+    if "SPREAD" in txt:
+        score += 3
+    if "TOTAL" in txt or "OVER" in txt or "UNDER" in txt or "O/U" in txt:
+        score += 3
+    if "GAME" in txt or "MATCH" in txt:
+        score += 1
+    return int(score)
+
 
 # -----------------------------
 # Output + Discord
@@ -683,7 +738,7 @@ def scan() -> int:
 
     include_pat = env_str(
         "KALSHI_SPORTS_SERIES_INCLUDE_REGEX",
-        r"(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)",
+        r"(GAME|MATCH|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)",
     )
     exclude_pat = env_str(
         "KALSHI_SPORTS_SERIES_EXCLUDE_REGEX",
@@ -725,6 +780,8 @@ def scan() -> int:
     if series_override:
         series = [s.strip() for s in series_override.split(",") if s.strip()]
     else:
+        min_series_for_include = env_int("KALSHI_MIN_SERIES_FOR_INCLUDE", 8)
+
         # Discover sports series tickers and keep those that match the include regex.
         discovered_series = list_series(session, category=series_category)
         if not discovered_series and series_category:
@@ -738,6 +795,8 @@ def scan() -> int:
             categories[c] = categories.get(c, 0) + 1
         run_meta["discovered_series_count"] = len(discovered_series)
         run_meta["discovered_category_counts"] = categories
+        run_meta["min_series_for_include"] = min_series_for_include
+        candidates: List[str] = []
         for s in discovered_series:
             ticker = str(s.get("ticker") or "").strip()
             title = str(s.get("title") or "")
@@ -745,28 +804,61 @@ def scan() -> int:
                 continue
             if exclude_re.search(ticker) or exclude_re.search(title):
                 continue
+            candidates.append(ticker)
             if include_re.search(ticker) or include_re.search(title):
                 series.append(ticker)
 
-        if series:
+        if len(series) >= min_series_for_include:
             run_meta["series_discovery_mode"] = "include_regex"
         else:
             # If include regex was too strict, fall back to anything not excluded.
-            for s in discovered_series:
-                ticker = str(s.get("ticker") or "").strip()
-                title = str(s.get("title") or "")
-                if not ticker:
-                    continue
-                if exclude_re.search(ticker) or exclude_re.search(title):
-                    continue
-                series.append(ticker)
+            series = candidates
             if series:
-                run_meta["series_discovery_mode"] = "fallback_not_excluded"
+                run_meta["series_discovery_mode"] = "fallback_not_excluded_min_series"
 
-    series = sorted(set(series))
-    if (not series_override) and len(series) > max_series:
-        series = series[:max_series]
-        run_meta["series_truncated_to"] = max_series
+    if series_override:
+        seen: set[str] = set()
+        deduped: List[str] = []
+        for t in series:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            deduped.append(t)
+        series = deduped
+    else:
+        title_by_ticker: Dict[str, str] = {}
+        for s in discovered_series:
+            t = str(s.get("ticker") or "").strip()
+            if not t:
+                continue
+            title_by_ticker.setdefault(t, str(s.get("title") or ""))
+
+        league_tokens = _league_tokens_from_sport_keys(env_sport_keys())
+        run_meta["series_league_tokens"] = league_tokens
+
+        scored: List[Tuple[int, str, str]] = []
+        seen: set[str] = set()
+        for t in series:
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            title = title_by_ticker.get(t, "")
+            score = _score_series_candidate(t, title, league_tokens)
+            scored.append((int(score), t, title))
+
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        scored_pos = [x for x in scored if int(x[0]) > 0]
+        if scored_pos:
+            scored = scored_pos
+        if len(scored) > max_series:
+            scored = scored[:max_series]
+            run_meta["series_truncated_to"] = max_series
+
+        series = [t for _, t, _ in scored]
+        run_meta["series_scored_top"] = [
+            {"ticker": t, "title": title, "score": int(score)}
+            for (score, t, title) in scored[: min(25, len(scored))]
+        ]
     if not series:
         run_meta["status"] = "error_no_series"
 
@@ -1227,13 +1319,20 @@ def scan() -> int:
     print(f"Wrote {len(rows)} rows to {csv_path} and {json_path}")
 
     webhook = env_str("DISCORD_WEBHOOK_URL", "")
+    always_notify = env_bool("ALWAYS_NOTIFY", False)
 
     # Discord notifications:
     # - Never post in debug mode
     # - Never post when there are no edges (rows will be empty in normal mode)
     if debug_mode:
         print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
-    elif webhook and rows:
+    elif webhook and (rows or always_notify):
+        if not rows:
+            post_discord(
+                webhook,
+                f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, lookahead {lookahead_hours}h).",
+            )
+            return 0
         lines: List[str] = []
         lines.append(f"**Kalshi value ({len(rows)} plays, min {min_edge*100:.1f}pp, fee +{fee_cents}¢)**")
         for i, r in enumerate(rows[: min(10, len(rows))], start=1):
