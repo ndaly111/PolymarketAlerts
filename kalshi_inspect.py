@@ -222,7 +222,16 @@ class KalshiClient:
         path = path if path.startswith("/") else "/" + path
         url = self.base + path
         headers = self.signed_headers("GET", path)
-        r = self.session.get(url, params=params or {}, headers=headers, timeout=30)
+        try:
+            r = self.session.get(url, params=params or {}, headers=headers, timeout=30)
+        except requests.RequestException as e:
+            return 0, {
+                "_request_error": True,
+                "error": str(e),
+                "url": url,
+                "path": path,
+                "params": params or {},
+            }
         try:
             data = r.json()
         except Exception:
@@ -346,6 +355,14 @@ def fetch_event(client: KalshiClient, event_ticker: str) -> Tuple[int, Dict[str,
     return client.get(f"/events/{event_ticker}", params={})
 
 
+def fetch_filters_by_sport(client: KalshiClient) -> Tuple[int, Dict[str, Any]]:
+    return client.get("/search/filters_by_sport", params={})
+
+
+def fetch_tags_by_categories(client: KalshiClient) -> Tuple[int, Dict[str, Any]]:
+    return client.get("/search/tags_by_categories", params={})
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -362,7 +379,7 @@ def main() -> int:
         "base_normalized": kalshi_base_url(),
         "has_key_id": bool(env_str("KALSHI_KEY_ID", "") or env_str("KALSHI_API_KEY_ID", "")),
         "has_private_key": bool(env_str("KALSHI_PRIVATE_KEY", "")),
-        "category": env_str("KALSHI_CATEGORY", "sports"),
+        "category": env_str("KALSHI_CATEGORY", "Sports"),
         "series_limit": env_int("KALSHI_SERIES_LIMIT", 200),
         "market_limit": env_int("KALSHI_MARKET_LIMIT", 120),
         "sample_series": env_str("KALSHI_SAMPLE_SERIES", ""),
@@ -386,6 +403,16 @@ def main() -> int:
 
     client = KalshiClient.from_env()
 
+    # 0) Discovery helpers (very useful for sports)
+    f_status, filters = fetch_filters_by_sport(client)
+    t_status, tags = fetch_tags_by_categories(client)
+    meta["filters_by_sport_status"] = f_status
+    meta["tags_by_categories_status"] = t_status
+    filters_path = os.path.join(outdir, f"kalshi_filters_by_sport_{stamp}.json")
+    tags_path = os.path.join(outdir, f"kalshi_tags_by_categories_{stamp}.json")
+    write_json(filters_path, {"status": f_status, "data": filters})
+    write_json(tags_path, {"status": t_status, "data": tags})
+
     category = meta["category"]
     series_limit = int(meta["series_limit"])
 
@@ -397,8 +424,21 @@ def main() -> int:
     write_json(series_raw_path, {"category": category, "series": series_items, "last_page": series_last})
 
     if not series_items:
-        # 1b) Fallback: series without category (sometimes category strings differ)
-        meta["notes"].append(f"No series returned for category='{category}'. Falling back to /series without category filter.")
+        # 1b) Fallback: try common casing variants, then no filter
+        base_cat = str(category).strip()
+        tried = {base_cat}
+        for alt in [base_cat.title(), base_cat.upper(), base_cat.lower()]:
+            if not alt or alt in tried:
+                continue
+            tried.add(alt)
+            series_items2, series_meta2, series_last2 = fetch_series(client, category=alt, limit=series_limit)
+            meta[f"series_request_retry_{alt}"] = series_meta2
+            if series_items2:
+                meta["notes"].append(f"Category '{category}' returned 0; retry '{alt}' returned {len(series_items2)}.")
+                series_items, series_last = series_items2, series_last2
+                break
+        if not series_items:
+            meta["notes"].append(f"No series returned for category='{category}'. Falling back to /series without category filter.")
         series_items2, series_meta2, series_last2 = fetch_series(client, category=None, limit=series_limit)
         meta["series_request_fallback"] = series_meta2
         series_items = series_items2
@@ -490,6 +530,8 @@ def main() -> int:
     summary_lines.append(f"- Stamp (UTC): `{stamp}`")
     summary_lines.append(f"- Base: `{kalshi_base_url()}`")
     summary_lines.append(f"- Category requested: `{category}`")
+    summary_lines.append(f"- filters_by_sport status: **{f_status}**")
+    summary_lines.append(f"- tags_by_categories status: **{t_status}**")
     summary_lines.append(f"- Series returned: **{len(series_items)}**")
     summary_lines.append(f"- Chosen series: `{', '.join(chosen_series) if chosen_series else '(none)'}`")
     summary_lines.append(f"- Market samples written: **{len(market_samples)}**")
@@ -560,6 +602,8 @@ def main() -> int:
     copy_latest(series_csv_path, os.path.join(outdir, "kalshi_series_sample_latest.csv"))
     copy_latest(markets_path, os.path.join(outdir, "kalshi_markets_sample_latest.json"))
     copy_latest(events_path, os.path.join(outdir, "kalshi_events_sample_latest.json"))
+    copy_latest(filters_path, os.path.join(outdir, "kalshi_filters_by_sport_latest.json"))
+    copy_latest(tags_path, os.path.join(outdir, "kalshi_tags_by_categories_latest.json"))
 
     print(
         f"Wrote artifacts to {outdir}/ (series={len(series_items)}, market_samples={len(market_samples)}, event_samples={len(event_samples)})"

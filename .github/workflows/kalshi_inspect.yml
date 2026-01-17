@@ -6,7 +6,7 @@ on:
       category:
         description: "Kalshi series category to query (best-effort; falls back if empty)"
         required: false
-        default: "sports"
+        default: "Sports"
       series_limit:
         description: "Max series to fetch (script paginates if a cursor is present)"
         required: false
@@ -60,7 +60,7 @@ jobs:
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
           # Inspect parameters
-          KALSHI_CATEGORY: ${{ github.event.inputs.category || 'sports' }}
+          KALSHI_CATEGORY: ${{ github.event.inputs.category || 'Sports' }}
           KALSHI_SERIES_LIMIT: ${{ github.event.inputs.series_limit || '200' }}
           KALSHI_MARKET_LIMIT: ${{ github.event.inputs.market_limit || '120' }}
           KALSHI_SAMPLE_SERIES: ${{ github.event.inputs.sample_series || '' }}
