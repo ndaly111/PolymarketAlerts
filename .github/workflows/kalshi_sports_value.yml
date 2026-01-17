@@ -35,6 +35,22 @@ on:
         description: "Optional: comma-separated Kalshi series tickers (overrides auto-discovery)"
         required: false
         default: ""
+      series_category:
+        description: "Kalshi series category label (usually 'Sports')"
+        required: false
+        default: "Sports"
+      series_include_regex:
+        description: "Include series when ticker/title matches (case-insensitive)"
+        required: false
+        default: "(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)"
+      series_exclude_regex:
+        description: "Exclude series when ticker/title matches (case-insensitive)"
+        required: false
+        default: "(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|MVE)"
+      max_series_tickers:
+        description: "Max auto-discovered series tickers to scan"
+        required: false
+        default: "60"
 
 jobs:
   scan:
@@ -51,7 +67,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -q requests cryptography python-dateutil
 
       - name: Gate schedule to 6:05 AM America/New_York
         id: gate
@@ -63,7 +80,7 @@ jobs:
           import os
 
           now = datetime.now(ZoneInfo('America/New_York'))
-          should_run = (now.hour == 6 and now.minute == 5)
+          should_run = (now.hour == 6 and 5 <= now.minute < 15)
 
           out = os.environ.get("GITHUB_OUTPUT")
           if out:
@@ -97,6 +114,10 @@ jobs:
           KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
+          KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
+          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_include_regex || '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)' }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|MVE)' }}
+          KALSHI_MAX_SERIES_TICKERS: ${{ github.event.inputs.max_series_tickers || '60' }}
 
           OUTDIR: out
         run: |
