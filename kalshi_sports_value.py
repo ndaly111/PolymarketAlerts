@@ -75,6 +75,19 @@ def env_str(name: str, default: str) -> str:
     return s if s else default
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    """Parse common truthy/falsey env values."""
+    v = os.getenv(name)
+    if v is None:
+        return default
+    s = str(v).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off", ""):
+        return False
+    return default
+
+
 # -----------------------------
 # Kalshi client
 # -----------------------------
@@ -346,6 +359,34 @@ def infer_line_type(series_ticker: str, market_ticker: str, market_title: str) -
     return None
 
 
+def infer_line_type_from_subtitles(yes_sub: str, no_sub: str) -> Optional[str]:
+    """Fallback inference when ticker/title don't include obvious keywords."""
+    ys = (yes_sub or "").strip()
+    ns = (no_sub or "").strip()
+    if not ys and not ns:
+        return None
+
+    hay = f"{ys} {ns}".upper()
+
+    # Totals usually look like: "Over 42.5" / "Under 42.5"
+    if ("OVER" in hay or "UNDER" in hay) and re.search(r"\d", hay):
+        return "total"
+
+    # Spreads usually contain +/- with a number: "-4.5", "+3", etc.
+    if re.search(r"(^|\s)[+-]\s*\d", hay):
+        return "spread"
+
+    # H2H usually looks like two team names (no digits) and not literal YES/NO
+    if ys and ns:
+        ys_l = ys.lower()
+        ns_l = ns.lower()
+        if ys_l not in ("yes", "no") and ns_l not in ("yes", "no"):
+            if not re.search(r"\d", hay):
+                return "h2h"
+
+    return None
+
+
 def cents_to_prob(cents: Optional[Any]) -> Optional[float]:
     if cents is None:
         return None
@@ -583,9 +624,11 @@ def scan() -> int:
 
     min_edge = env_float("MIN_EDGE", 0.03)
     top_n = env_int("TOP_N", 25)
+    debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
+    min_books_effective = 1 if debug_mode else min_books
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
@@ -593,7 +636,9 @@ def scan() -> int:
         "lookahead_hours": lookahead_hours,
         "min_edge": min_edge,
         "top_n": top_n,
+        "debug_mode": debug_mode,
         "min_books": min_books,
+        "min_books_effective": min_books_effective,
         "odds_regions": odds_regions,
         "sport_keys": env_sport_keys(),
         "kalshi_base": _kalshi_base_url(),
@@ -768,16 +813,53 @@ def scan() -> int:
 
             event_ticker = str(m.get("event_ticker") or "")
             market_title = str(m.get("title") or "")
-            yes_sub = str(m.get("yes_sub_title") or "")
-            no_sub = str(m.get("no_sub_title") or "")
+            yes_sub = str(
+                m.get("yes_sub_title")
+                or m.get("yes_subtitle")
+                or m.get("yes_sub_title_text")
+                or ""
+            )
+            no_sub = str(
+                m.get("no_sub_title")
+                or m.get("no_subtitle")
+                or m.get("no_sub_title_text")
+                or ""
+            )
 
-            lt = infer_line_type(st, market_ticker, market_title)
+            lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
             if lt is None:
+                if debug_mode and len(debug_unmatched) < debug_max:
+                    debug_unmatched.append(
+                        {
+                            "reason": "unknown_line_type",
+                            "series_ticker": st,
+                            "event_title": "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "yes_sub_title": yes_sub,
+                            "no_sub_title": no_sub,
+                            "kalshi_market": m,
+                        }
+                    )
                 continue
 
             # Parse the YES proposition from subtitle (preferred) else title.
             line = parse_line_from_subtitle(lt, yes_sub) or parse_line_from_subtitle(lt, market_title)
             if not line:
+                if debug_mode and len(debug_unmatched) < debug_max:
+                    debug_unmatched.append(
+                        {
+                            "reason": "line_parse_failed",
+                            "line_type": lt,
+                            "series_ticker": st,
+                            "event_title": "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "yes_sub_title": yes_sub,
+                            "no_sub_title": no_sub,
+                            "kalshi_market": m,
+                        }
+                    )
                 continue
 
             # Resolve event title (to get matchup) - prefer nested event in response
@@ -797,6 +879,20 @@ def scan() -> int:
 
             matchup = parse_matchup(event_title) or parse_matchup(market_title)
             if not matchup:
+                if debug_mode and len(debug_unmatched) < debug_max:
+                    debug_unmatched.append(
+                        {
+                            "reason": "matchup_parse_failed",
+                            "line_type": lt,
+                            "series_ticker": st,
+                            "event_title": event_title,
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "yes_sub_title": yes_sub,
+                            "no_sub_title": no_sub,
+                            "kalshi_market": m,
+                        }
+                    )
                 continue
 
             team_a, team_b = matchup
@@ -833,20 +929,20 @@ def scan() -> int:
             fair_yes: Optional[Dict[str, Any]] = None
 
             if lt == "h2h":
-                fair_yes = fair_prob_h2h(odds_event, team_name=line["team"], min_books=min_books)
+                fair_yes = fair_prob_h2h(odds_event, team_name=line["team"], min_books=min_books_effective)
             elif lt == "spread":
                 fair_yes = fair_prob_spread(
                     odds_event,
                     team_name=line["team"],
                     point=float(line["spread"]),
-                    min_books=min_books,
+                    min_books=min_books_effective,
                 )
             elif lt == "total":
                 fair_yes = fair_prob_total(
                     odds_event,
                     side=line["side"],
                     point=float(line["points"]),
-                    min_books=min_books,
+                    min_books=min_books_effective,
                 )
 
             if not fair_yes:
@@ -854,7 +950,7 @@ def scan() -> int:
 
             fair_prob_yes = float(fair_yes["fair_prob"])
             books_used = int(fair_yes.get("books_used") or 0)
-            if books_used < min_books:
+            if books_used < min_books_effective:
                 continue
 
             # Kalshi buy prices (asks)
@@ -893,7 +989,7 @@ def scan() -> int:
             if best_side is None or best_all_in is None or best_fair_side is None:
                 continue
 
-            if best_edge < min_edge:
+            if (not debug_mode) and best_edge < min_edge:
                 continue
 
             if len(debug_matched) < debug_max:
@@ -911,7 +1007,7 @@ def scan() -> int:
                             "fair_prob_yes": float(fair_prob_yes),
                             "fair_prob_no": float(1.0 - fair_prob_yes),
                             "books_used": books_used,
-                            "min_books": min_books,
+                            "min_books": min_books_effective,
                         },
                         "kalshi_buy": {
                             "yes_buy_prob": yes_buy,
@@ -991,18 +1087,26 @@ def scan() -> int:
 
     webhook = env_str("DISCORD_WEBHOOK_URL", "")
 
-    if webhook and rows:
+    # Discord notifications:
+    # - Never post in debug mode
+    # - Never post when there are no edges (rows will be empty in normal mode)
+    if debug_mode:
+        print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
+    elif webhook and rows:
         lines: List[str] = []
-        lines.append(f"**Kalshi value scan (fee +{fee_cents}¢ on open)**")
-        for i, r in enumerate(rows[: min(8, len(rows))], start=1):
+        lines.append(f"**Kalshi value ({len(rows)} plays, min {min_edge*100:.1f}pp, fee +{fee_cents}¢)**")
+        for i, r in enumerate(rows[: min(10, len(rows))], start=1):
             all_in_c = int(round(r.all_in_buy_prob * 100))
-            fair_c = r.fair_prob_side * 100.0
+            fair_pct = r.fair_prob_side * 100.0
             edge_pp = r.edge * 100.0
+            desc = (f"{r.line_type.upper()} {r.line_label}").strip()
             lines.append(
-                f"{i}. `{r.line_type.upper()}` **BUY {r.side_to_buy}** @ **{all_in_c}¢** (all-in) | fair {fair_c:.1f}% | edge {edge_pp:.1f}pp | books {r.books_used} | {r.event_title} | {r.line_label} | {r.url}"
+                f"{i}. {r.event_title} — {desc} | BUY {r.side_to_buy} {all_in_c}¢ | fair {fair_pct:.1f}% | +{edge_pp:.1f}pp | {r.url}"
             )
 
         post_discord(webhook, "\n".join(lines))
+    elif webhook and not rows:
+        print("No edges above MIN_EDGE; skipping Discord post.")
 
     # Print top results for logs
     for r in rows[: min(10, len(rows))]:
