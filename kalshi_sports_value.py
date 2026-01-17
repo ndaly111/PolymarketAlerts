@@ -256,6 +256,7 @@ def list_markets_for_series(
     session: requests.Session,
     series_ticker: str,
     status: str = "open",
+    min_close_ts: Optional[int] = None,
     max_close_ts: Optional[int] = None,
     limit: int = 200,
     mve_filter: str = "all",
@@ -266,8 +267,10 @@ def list_markets_for_series(
         params["mve_filter"] = mf
     # Some Kalshi filters can be picky about mixing status with close-ts bounds.
     # If we're bounding close time, omit status in the API call and filter locally.
-    if status and max_close_ts is None:
+    if status and max_close_ts is None and min_close_ts is None:
         params["status"] = status
+    if min_close_ts is not None:
+        params["min_close_ts"] = int(min_close_ts)
     if max_close_ts is not None:
         params["max_close_ts"] = int(max_close_ts)
 
@@ -442,7 +445,11 @@ def name_similarity(a: str, b: str) -> float:
     if na == nb:
         return 1.0
     if na in nb or nb in na:
-        return 0.90
+        short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+        if len(short) >= 4:
+            return 0.90
+        if len(short) == 3 and long_.startswith(short):
+            return 0.85
 
     stop = {
         "pro",
@@ -701,7 +708,10 @@ def scan() -> int:
     fee_prob = fee_cents / 100.0
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
-    max_close_ts = int(time.time()) + lookahead_hours * 3600
+    now_ts = int(time.time())
+    max_close_ts = now_ts + lookahead_hours * 3600
+    min_close_buffer_hours = env_int("KALSHI_MIN_CLOSE_BUFFER_HOURS", 0)
+    min_close_ts = now_ts - max(0, min_close_buffer_hours) * 3600
     mve_filter = env_str("KALSHI_MVE_FILTER", "all")
 
     min_edge = env_float("MIN_EDGE", 0.03)
@@ -712,6 +722,7 @@ def scan() -> int:
     min_books = env_min_books()
     min_books_effective = 1 if debug_mode else min_books
     max_close_ts_effective = None if debug_mode else max_close_ts
+    min_close_ts_effective = None if debug_mode else min_close_ts
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
@@ -720,6 +731,9 @@ def scan() -> int:
         "min_edge": min_edge,
         "top_n": top_n,
         "debug_mode": debug_mode,
+        "min_close_buffer_hours": min_close_buffer_hours,
+        "min_close_ts": min_close_ts_effective,
+        "max_close_ts": max_close_ts_effective,
         "min_books": min_books,
         "min_books_effective": min_books_effective,
         "odds_regions": odds_regions,
@@ -916,6 +930,7 @@ def scan() -> int:
                 session,
                 st,
                 status="" if debug_mode else "open",
+                min_close_ts=min_close_ts_effective,
                 max_close_ts=max_close_ts_effective,
                 mve_filter=mve_filter,
             )
@@ -966,6 +981,7 @@ def scan() -> int:
                 or m.get("no_sub_title_text")
                 or ""
             )
+            subtitle = str(m.get("subtitle") or "").strip()
 
             lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
             if lt is None:
@@ -1003,22 +1019,30 @@ def scan() -> int:
                     )
                 continue
 
-            # Resolve event title (to get matchup) - prefer nested event in response
-            event_title = ""
+            # Resolve event title (to get matchup) - prefer subtitle if present.
+            event_title = subtitle
             if event_ticker:
-                event_title = event_title_cache.get(event_ticker, "")
-                if not event_title:
-                    ev = get_event(session, event_ticker)
-                    if ev and isinstance(ev, dict):
-                        eobj = ev.get("event") if "event" in ev else ev
-                        event_title = str((eobj or {}).get("title") or "")
+                if event_title and not event_title_cache.get(event_ticker):
                     event_title_cache[event_ticker] = event_title
+                if not event_title:
+                    cached_title = event_title_cache.get(event_ticker, "")
+                    if cached_title:
+                        event_title = cached_title
+                    else:
+                        ev = get_event(session, event_ticker)
+                        fetched_title = ""
+                        if ev and isinstance(ev, dict):
+                            eobj = ev.get("event") if "event" in ev else ev
+                            fetched_title = str((eobj or {}).get("title") or "")
+                        if fetched_title:
+                            event_title = fetched_title
+                        event_title_cache[event_ticker] = fetched_title
 
             if not event_title:
                 # Some responses include nested event dict
                 event_title = str((m.get("event") or {}).get("title") or "")
 
-            matchup = parse_matchup(event_title) or parse_matchup(market_title)
+            matchup = parse_matchup(event_title) or parse_matchup(subtitle) or parse_matchup(market_title)
             if not matchup:
                 if debug_mode and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
@@ -1029,6 +1053,7 @@ def scan() -> int:
                             "event_title": event_title,
                             "market_title": market_title,
                             "market_ticker": market_ticker,
+                            "subtitle": subtitle,
                             "yes_sub_title": yes_sub,
                             "no_sub_title": no_sub,
                             "kalshi_market": m,
