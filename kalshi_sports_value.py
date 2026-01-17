@@ -258,9 +258,12 @@ def list_markets_for_series(
     status: str = "open",
     max_close_ts: Optional[int] = None,
     limit: int = 200,
-    mve_filter: str = "exclude",
+    mve_filter: str = "all",
 ) -> List[Dict[str, Any]]:
-    params: Dict[str, Any] = {"series_ticker": series_ticker, "limit": limit, "mve_filter": mve_filter}
+    params: Dict[str, Any] = {"series_ticker": series_ticker, "limit": limit}
+    mf = str(mve_filter or "").strip().lower()
+    if mf in ("exclude", "only"):
+        params["mve_filter"] = mf
     # Some Kalshi filters can be picky about mixing status with close-ts bounds.
     # If we're bounding close time, omit status in the API call and filter locally.
     if status and max_close_ts is None:
@@ -302,7 +305,9 @@ SPREAD_RE = re.compile(
 
 def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
     """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
-    t = " ".join(str(title).replace("@", " at ").split())
+    t = str(title)
+    t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
+    t = " ".join(t.replace("@", " at ").split())
     m = re.search(r"^(.*?)\s+(?:at|vs\.?|v\.?|versus)\s+(.*?)(?:\s*:\s*.*)?$", t, re.IGNORECASE)
     if not m:
         return None
@@ -510,6 +515,27 @@ def best_event_match(events: List[Dict[str, Any]], team_a: str, team_b: str) -> 
     return best
 
 
+def map_team_to_event_team(
+    team_guess: str,
+    odds_event: Dict[str, Any],
+    min_score: float = 0.72,
+) -> Tuple[Optional[str], float]:
+    home = str(odds_event.get("home_team") or "")
+    away = str(odds_event.get("away_team") or "")
+    if not team_guess or not home or not away:
+        return None, 0.0
+
+    sh = name_similarity(team_guess, home)
+    sa = name_similarity(team_guess, away)
+
+    best_team = home if sh >= sa else away
+    best_score = max(sh, sa)
+
+    if best_score < float(min_score):
+        return None, best_score
+    return best_team, best_score
+
+
 def kalshi_market_url(market_ticker: str) -> str:
     return f"https://kalshi.com/markets/{str(market_ticker).lower()}"
 
@@ -621,6 +647,7 @@ def scan() -> int:
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
     max_close_ts = int(time.time()) + lookahead_hours * 3600
+    mve_filter = env_str("KALSHI_MVE_FILTER", "all")
 
     min_edge = env_float("MIN_EDGE", 0.03)
     top_n = env_int("TOP_N", 25)
@@ -629,6 +656,7 @@ def scan() -> int:
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
     min_books_effective = 1 if debug_mode else min_books
+    max_close_ts_effective = None if debug_mode else max_close_ts
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
@@ -642,6 +670,7 @@ def scan() -> int:
         "odds_regions": odds_regions,
         "sport_keys": env_sport_keys(),
         "kalshi_base": _kalshi_base_url(),
+        "mve_filter": mve_filter,
         "status": "starting",
     }
 
@@ -658,7 +687,7 @@ def scan() -> int:
     )
     exclude_pat = env_str(
         "KALSHI_SPORTS_SERIES_EXCLUDE_REGEX",
-        r"(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\s*\d|MVE)",
+        r"(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\s*\d)",
     )
     include_re = re.compile(include_pat, re.IGNORECASE)
     exclude_re = re.compile(exclude_pat, re.IGNORECASE)
@@ -785,26 +814,46 @@ def scan() -> int:
 
     debug_matched: List[Dict[str, Any]] = []
     debug_unmatched: List[Dict[str, Any]] = []
+    debug_candidates: List[Dict[str, Any]] = []
+    debug_series_counts: List[Dict[str, Any]] = []
     series_errors = 0
 
     for st in series:
         try:
-            markets = list_markets_for_series(session, st, status="open", max_close_ts=max_close_ts)
+            markets = list_markets_for_series(
+                session,
+                st,
+                status="" if debug_mode else "open",
+                max_close_ts=max_close_ts_effective,
+                mve_filter=mve_filter,
+            )
         except Exception as exc:
             series_errors += 1
             if series_errors <= 3:
                 print(f"[WARN] list_markets_for_series failed for {st}: {type(exc).__name__}: {exc}")
             continue
 
+        raw_count = len(markets)
         # If the API didn't enforce open-only (or doesn't like combining filters),
         # enforce it here without dropping markets that omit 'status'.
         filtered: List[Dict[str, Any]] = []
         for m in markets:
             s = str(m.get("status") or "").strip().lower()
-            if s and s != "open":
-                continue
+            if not debug_mode:
+                if s in ("closed", "settled"):
+                    continue
+                if s and s not in ("open", "paused", "active"):
+                    continue
             filtered.append(m)
         markets = filtered
+        if debug_mode and len(debug_series_counts) < debug_max:
+            debug_series_counts.append(
+                {
+                    "series_ticker": st,
+                    "raw_count": raw_count,
+                    "open_count": len(markets),
+                }
+            )
 
         for m in markets:
             market_ticker = str(m.get("ticker") or "")
@@ -897,7 +946,8 @@ def scan() -> int:
 
             team_a, team_b = matchup
             ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
-            odds_event = ranked[0][1] if ranked and ranked[0][0] >= 1.30 else None
+            match_threshold = 0.0 if debug_mode else 1.30
+            odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
             if not odds_event:
                 if len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
@@ -924,16 +974,73 @@ def scan() -> int:
                             "kalshi_market": m,
                         }
                     )
+                if debug_mode and len(debug_candidates) < debug_max:
+                    debug_candidates.append(
+                        {
+                            "reason": "odds_event_match_failed",
+                            "series_ticker": st,
+                            "event_title": event_title or "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "line_type": lt,
+                            "parsed_line": line,
+                            "matchup": {"a": team_a, "b": team_b},
+                            "top_candidates": [
+                                {
+                                    "score": float(s),
+                                    "sport_key": e.get("sport_key"),
+                                    "commence_time": e.get("commence_time"),
+                                    "home_team": e.get("home_team"),
+                                    "away_team": e.get("away_team"),
+                                    "id": e.get("id"),
+                                }
+                                for (s, e) in ranked
+                            ],
+                        }
+                    )
                 continue
 
             fair_yes: Optional[Dict[str, Any]] = None
+            team_for_books = str(line.get("team") or "")
+            team_map_score = None
+            if lt in ("h2h", "spread"):
+                min_map = 0.55 if debug_mode else 0.72
+                team_for_books, team_map_score = map_team_to_event_team(
+                    team_for_books,
+                    odds_event,
+                    min_score=min_map,
+                )
+                if not team_for_books:
+                    if debug_mode and len(debug_candidates) < debug_max:
+                        debug_candidates.append(
+                            {
+                                "reason": "team_map_failed",
+                                "series_ticker": st,
+                                "event_title": event_title or "",
+                                "market_title": market_title,
+                                "market_ticker": market_ticker,
+                                "line_type": lt,
+                                "parsed_line": line,
+                                "matchup": {"a": team_a, "b": team_b},
+                                "team_guess": line.get("team"),
+                                "team_map_score": team_map_score,
+                                "odds_event": {
+                                    "home_team": odds_event.get("home_team"),
+                                    "away_team": odds_event.get("away_team"),
+                                    "sport_key": odds_event.get("sport_key"),
+                                    "commence_time": odds_event.get("commence_time"),
+                                    "id": odds_event.get("id"),
+                                },
+                            }
+                        )
+                    continue
 
             if lt == "h2h":
-                fair_yes = fair_prob_h2h(odds_event, team_name=line["team"], min_books=min_books_effective)
+                fair_yes = fair_prob_h2h(odds_event, team_name=team_for_books, min_books=min_books_effective)
             elif lt == "spread":
                 fair_yes = fair_prob_spread(
                     odds_event,
-                    team_name=line["team"],
+                    team_name=team_for_books,
                     point=float(line["spread"]),
                     min_books=min_books_effective,
                 )
@@ -946,6 +1053,28 @@ def scan() -> int:
                 )
 
             if not fair_yes:
+                if debug_mode and len(debug_candidates) < debug_max:
+                    debug_candidates.append(
+                        {
+                            "reason": "fair_prob_unavailable",
+                            "series_ticker": st,
+                            "event_title": event_title or "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "line_type": lt,
+                            "parsed_line": line,
+                            "team_guess": line.get("team"),
+                            "team_mapped": team_for_books,
+                            "team_map_score": team_map_score,
+                            "odds_event": {
+                                "home_team": odds_event.get("home_team"),
+                                "away_team": odds_event.get("away_team"),
+                                "sport_key": odds_event.get("sport_key"),
+                                "commence_time": odds_event.get("commence_time"),
+                                "id": odds_event.get("id"),
+                            },
+                        }
+                    )
                 continue
 
             fair_prob_yes = float(fair_yes["fair_prob"])
@@ -1054,8 +1183,12 @@ def scan() -> int:
 
     matched_path = os.path.join(outdir, f"kalshi_debug_matched_{stamp}.jsonl")
     unmatched_path = os.path.join(outdir, f"kalshi_debug_unmatched_{stamp}.jsonl")
+    candidates_path = os.path.join(outdir, f"kalshi_debug_candidates_{stamp}.jsonl")
+    series_counts_path = os.path.join(outdir, f"kalshi_debug_series_market_counts_{stamp}.json")
     matched_latest = os.path.join(outdir, "kalshi_debug_matched_latest.jsonl")
     unmatched_latest = os.path.join(outdir, "kalshi_debug_unmatched_latest.jsonl")
+    candidates_latest = os.path.join(outdir, "kalshi_debug_candidates_latest.jsonl")
+    series_counts_latest = os.path.join(outdir, "kalshi_debug_series_market_counts_latest.json")
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=FIELDNAMES)
@@ -1075,11 +1208,19 @@ def scan() -> int:
     _write_jsonl(unmatched_path, debug_unmatched)
     _copy_text(matched_path, matched_latest)
     _copy_text(unmatched_path, unmatched_latest)
+    if debug_mode:
+        _write_jsonl(candidates_path, debug_candidates)
+        _copy_text(candidates_path, candidates_latest)
+        _write_json(series_counts_path, debug_series_counts)
+        _copy_text(series_counts_path, series_counts_latest)
 
     run_meta["status"] = "ok"
     run_meta["rows_written"] = len(rows)
     run_meta["debug_matched_rows"] = len(debug_matched)
     run_meta["debug_unmatched_rows"] = len(debug_unmatched)
+    if debug_mode:
+        run_meta["debug_candidates_rows"] = len(debug_candidates)
+        run_meta["debug_series_count_rows"] = len(debug_series_counts)
     _write_json(meta_path, run_meta)
     _copy_text(meta_path, meta_latest)
 
