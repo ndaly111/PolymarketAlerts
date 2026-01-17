@@ -153,6 +153,8 @@ jobs:
 
           KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
+          # Avoid paging through historical markets by bounding the close window.
+          KALSHI_MIN_CLOSE_BUFFER_HOURS: "0"
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
           KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
           # Only ML / spread / totals; avoid tennis/golf “MATCH/SET/DISTANCE” rabbit holes.
