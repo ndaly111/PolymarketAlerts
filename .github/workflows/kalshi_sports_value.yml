@@ -7,53 +7,85 @@ on:
     - cron: "5 11 * * *"  # 6:05 AM EST
   workflow_dispatch:
     inputs:
-      sport_keys:
-        description: "Comma-separated Odds API sport keys"
+      sport_preset:
+        description: "Sports preset (Odds API keys)"
+        type: choice
+        options:
+          - major_us
+          - nfl
+          - nba
+          - mlb
+          - nhl
+          - custom
+        default: major_us
+      sport_keys_custom:
+        description: "Comma-separated Odds API sport keys (only if sport_preset=custom)"
         required: false
-        default: "americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl"
+        default: ""
       top_n:
         description: "Number of results to keep/post"
-        required: false
+        type: choice
+        options: ["10", "25", "50", "100"]
         default: "25"
       min_edge:
         description: "Minimum edge (0.03 = 3 percentage points)"
-        required: false
+        type: choice
+        options: ["0.00", "0.01", "0.02", "0.03", "0.05"]
         default: "0.03"
       min_books:
         description: "Minimum books required for a fair probability"
-        required: false
+        type: choice
+        options: ["1", "2", "3", "4", "5"]
         default: "3"
       lookahead_hours:
         description: "Only consider Kalshi markets closing within this many hours"
-        required: false
+        type: choice
+        options: ["24", "48", "72", "168"]
         default: "72"
       buy_fee_cents:
         description: "Kalshi opening fee per contract (cents) added to YES/NO buy price"
-        required: false
+        type: choice
+        options: ["0", "1", "2", "3", "5"]
         default: "3"
       series_tickers:
         description: "Optional: comma-separated Kalshi series tickers (overrides auto-discovery)"
         required: false
         default: ""
+      series_filter_preset:
+        description: "Series filter preset"
+        type: choice
+        options:
+          - default
+          - lenient
+          - strict
+          - custom
+        default: default
       series_category:
         description: "Kalshi series category label (usually 'Sports')"
         required: false
         default: "Sports"
       series_include_regex:
-        description: "Include series when ticker/title matches (case-insensitive)"
+        description: "Include series when ticker/title matches (case-insensitive) - used only when preset=custom"
         required: false
-        default: "(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)"
+        default: ""
       series_exclude_regex:
-        description: "Exclude series when ticker/title matches (case-insensitive)"
+        description: "Exclude series when ticker/title matches (case-insensitive) - used only when preset=custom"
         required: false
-        default: "(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|MVE)"
+        default: ""
+      mve_filter:
+        description: "MVE markets"
+        type: choice
+        options: ["all", "exclude", "only"]
+        default: "all"
       max_series_tickers:
         description: "Max auto-discovered series tickers to scan"
-        required: false
+        type: choice
+        options: ["30", "60", "90", "120"]
         default: "60"
       debug_mode:
         description: "Debug: write top results even if below min_edge (no Discord post)"
-        required: false
+        type: choice
+        options: ["false", "true"]
         default: "false"
 
 jobs:
@@ -110,7 +142,7 @@ jobs:
           # Optional override; if omitted we fall back to the documented base host and ensure /trade-api/v2 exists
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
-          SPORT_KEYS: ${{ github.event.inputs.sport_keys || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl' }}
+          SPORT_KEYS: ${{ github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl' }}
           TOP_N: ${{ github.event.inputs.top_n || '25' }}
           MIN_EDGE: ${{ github.event.inputs.min_edge || '0.03' }}
           MIN_BOOKS: ${{ github.event.inputs.min_books || '3' }}
@@ -120,8 +152,9 @@ jobs:
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
           KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
-          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_include_regex }}
-          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_exclude_regex }}
+          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL)' || github.event.inputs.series_filter_preset == 'lenient' && '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE|LINE|SCORE)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_include_regex || '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)' }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE)' || github.event.inputs.series_filter_preset == 'lenient' && '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d)' }}
+          KALSHI_MVE_FILTER: ${{ github.event.inputs.mve_filter || 'all' }}
           KALSHI_MAX_SERIES_TICKERS: ${{ github.event.inputs.max_series_tickers || '60' }}
 
           OUTDIR: out
