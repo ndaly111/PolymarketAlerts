@@ -51,6 +51,10 @@ on:
         description: "Max auto-discovered series tickers to scan"
         required: false
         default: "60"
+      debug_mode:
+        description: "Debug: write top results even if below min_edge (no Discord post)"
+        required: false
+        default: "false"
 
 jobs:
   scan:
@@ -110,13 +114,14 @@ jobs:
           TOP_N: ${{ github.event.inputs.top_n || '25' }}
           MIN_EDGE: ${{ github.event.inputs.min_edge || '0.03' }}
           MIN_BOOKS: ${{ github.event.inputs.min_books || '3' }}
+          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
 
           KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
           KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
-          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_include_regex || '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)' }}
-          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|MVE)' }}
+          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_include_regex }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_exclude_regex }}
           KALSHI_MAX_SERIES_TICKERS: ${{ github.event.inputs.max_series_tickers || '60' }}
 
           OUTDIR: out
