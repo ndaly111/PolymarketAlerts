@@ -1,0 +1,82 @@
+name: Kalshi Inspect (one-off)
+
+on:
+  workflow_dispatch:
+    inputs:
+      category:
+        description: "Kalshi series category to query (best-effort; falls back if empty)"
+        required: false
+        default: "sports"
+      series_limit:
+        description: "Max series to fetch (script paginates if a cursor is present)"
+        required: false
+        default: "200"
+      market_limit:
+        description: "Max markets to fetch per series (script paginates if a cursor is present)"
+        required: false
+        default: "120"
+      sample_series:
+        description: "Optional: comma-separated series tickers to inspect (overrides auto selection)"
+        required: false
+        default: ""
+      sample_series_count:
+        description: "If sample_series is empty, inspect this many series from the results"
+        required: false
+        default: "6"
+      markets_per_series:
+        description: "How many markets to sample per inspected series"
+        required: false
+        default: "12"
+      events_per_series:
+        description: "How many events to sample per inspected series (derived from sampled markets)"
+        required: false
+        default: "6"
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ensure these exist even if requirements.txt is missing or incomplete.
+          pip install -q requests cryptography
+
+      - name: Run Kalshi inspect
+        env:
+          # Auth (your repo secrets)
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+
+          # Optional base override; defaults to elections host + /trade-api/v2 normalization
+          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+
+          # Inspect parameters
+          KALSHI_CATEGORY: ${{ github.event.inputs.category || 'sports' }}
+          KALSHI_SERIES_LIMIT: ${{ github.event.inputs.series_limit || '200' }}
+          KALSHI_MARKET_LIMIT: ${{ github.event.inputs.market_limit || '120' }}
+          KALSHI_SAMPLE_SERIES: ${{ github.event.inputs.sample_series || '' }}
+          KALSHI_SAMPLE_SERIES_COUNT: ${{ github.event.inputs.sample_series_count || '6' }}
+          KALSHI_MARKETS_PER_SERIES: ${{ github.event.inputs.markets_per_series || '12' }}
+          KALSHI_EVENTS_PER_SERIES: ${{ github.event.inputs.events_per_series || '6' }}
+
+          OUTDIR: out
+        run: |
+          python kalshi_inspect.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-inspect-output
+          path: out/
+          if-no-files-found: warn
+          retention-days: 14
