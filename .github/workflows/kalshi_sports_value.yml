@@ -16,6 +16,9 @@ on:
           - nba
           - mlb
           - nhl
+          - ncaaf
+          - ncaab
+          - college
           - custom
         default: major_us
       sport_keys_custom:
@@ -142,7 +145,7 @@ jobs:
           # Optional override; if omitted we fall back to the documented base host and ensure /trade-api/v2 exists
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
-          SPORT_KEYS: ${{ github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl' }}
+          SPORT_KEYS: ${{ github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
           TOP_N: ${{ github.event.inputs.top_n || '25' }}
           MIN_EDGE: ${{ github.event.inputs.min_edge || '0.03' }}
           MIN_BOOKS: ${{ github.event.inputs.min_books || '3' }}
@@ -152,10 +155,13 @@ jobs:
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
           KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
-          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL)' || github.event.inputs.series_filter_preset == 'lenient' && '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE|LINE|SCORE)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_include_regex || '(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)' }}
-          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE)' || github.event.inputs.series_filter_preset == 'lenient' && '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d)' }}
+          # Only ML / spread / totals; avoid tennis/golf “MATCH/SET/DISTANCE” rabbit holes.
+          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' || github.event.inputs.series_filter_preset == 'lenient' && '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_include_regex || '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE|ATP|WTA|TENNIS|GOLF)' }}
           KALSHI_MVE_FILTER: ${{ github.event.inputs.mve_filter || 'all' }}
           KALSHI_MAX_SERIES_TICKERS: ${{ github.event.inputs.max_series_tickers || '60' }}
+          # Ping Discord on manual runs even if 0 plays (so you know the job ran)
+          ALWAYS_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
 
           OUTDIR: out
         run: |
