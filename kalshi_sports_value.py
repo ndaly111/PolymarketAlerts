@@ -170,29 +170,72 @@ def kalshi_get(session: requests.Session, path: str, params: Optional[Dict[str, 
 
 def list_series(
     session: requests.Session,
-    category: str,
+    category: Optional[str] = None,
     include_volume: bool = False,
     include_product_metadata: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Best-effort series discovery. Kalshi docs show no cursor here, but we handle it if present."""
-    params: Dict[str, Any] = {
-        "category": category,
-        "include_volume": str(include_volume).lower(),
-        "include_product_metadata": str(include_product_metadata).lower(),
-        "limit": 200,
-    }
+    """
+    Fetch series from /series.
 
+    IMPORTANT: Kalshi Trade API v2 /series does not reliably support a `category` query param.
+    Passing `category=` can yield an empty response even though sports series exist. The
+    correct approach is to fetch normally and filter by the returned `series[i].category`
+    field locally.
+    """
+    # Keep paginated and bounded so it remains quick/reliable in Actions.
+    max_pages = 10
+    cursor: Optional[str] = None
     out: List[Dict[str, Any]] = []
-    cursor = None
-    for _ in range(20):
+
+    want_cat = (category or "").strip()
+    want_cat_l = want_cat.lower()
+    use_category_param = bool(want_cat)
+
+    def _next_cursor(d: Dict[str, Any]) -> Optional[str]:
+        for k in ("cursor", "next_cursor", "nextCursor", "next_page_token", "nextPageToken"):
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        pag = d.get("pagination")
+        if isinstance(pag, dict):
+            for k in ("cursor", "next_cursor", "nextCursor", "next_page_token", "nextPageToken"):
+                v = pag.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return None
+
+    for _ in range(max_pages):
+        params: Dict[str, Any] = {"limit": 200}
         if cursor:
             params["cursor"] = cursor
-        data = kalshi_get(session, "/series", params=params)
-        out.extend(data.get("series", []) or [])
-        cursor = data.get("cursor")
+
+        # Prefer server-side filtering (documented), but fall back if it returns empty on page 1.
+        params["include_volume"] = str(include_volume).lower()
+        params["include_product_metadata"] = str(include_product_metadata).lower()
+        if use_category_param:
+            params["category"] = want_cat
+
+        data = kalshi_get(session, "/series", params)
+        items = data.get("series") or []
+        if not isinstance(items, list) or not items:
+            if use_category_param and not cursor:
+                use_category_param = False
+                cursor = None
+                continue
+            break
+
+        for s in items:
+            if not isinstance(s, dict):
+                continue
+            if want_cat and str(s.get("category") or "").strip().lower() != want_cat_l:
+                continue
+            out.append(s)
+
+        cursor = _next_cursor(data)
         if not cursor:
             break
-        time.sleep(0.15)
+        time.sleep(0.10)
+
     return out
 
 
@@ -561,13 +604,24 @@ def scan() -> int:
     meta_latest = os.path.join(outdir, "kalshi_run_meta_latest.json")
 
     series_override = env_str("KALSHI_SERIES_TICKERS", "").strip()
-    series_category = env_str("KALSHI_SERIES_CATEGORY", "sports")
+    series_category = env_str("KALSHI_SERIES_CATEGORY", "Sports")
+    max_series = env_int("KALSHI_MAX_SERIES_TICKERS", 60)
 
-    include_re = re.compile(env_str("KALSHI_SPORTS_SERIES_INCLUDE_REGEX", r"(GAME|SPREAD|TOTAL)"), re.IGNORECASE)
-    exclude_re = re.compile(
-        env_str("KALSHI_SPORTS_SERIES_EXCLUDE_REGEX", r"(PROP|PLAYER|FUTURE|FUTURES|COMBO|PARLAY|PACK|MVE)"),
-        re.IGNORECASE,
+    include_pat = env_str(
+        "KALSHI_SPORTS_SERIES_INCLUDE_REGEX",
+        r"(GAME|MATCH|MONEYLINE|SPREAD|TOTAL|OVER|UNDER|SET|DISTANCE)",
     )
+    exclude_pat = env_str(
+        "KALSHI_SPORTS_SERIES_EXCLUDE_REGEX",
+        r"(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\s*\d|MVE)",
+    )
+    include_re = re.compile(include_pat, re.IGNORECASE)
+    exclude_re = re.compile(exclude_pat, re.IGNORECASE)
+
+    run_meta["series_category"] = series_category
+    run_meta["series_include_regex"] = include_pat
+    run_meta["series_exclude_regex"] = exclude_pat
+    run_meta["max_series_tickers"] = max_series
 
     # Odds events (all at once)
     sport_keys = env_sport_keys()
@@ -592,13 +646,25 @@ def scan() -> int:
     # Kalshi markets
     session = _session()
     series: List[str] = []
+    discovered_series: List[Dict[str, Any]] = []
 
     if series_override:
         series = [s.strip() for s in series_override.split(",") if s.strip()]
     else:
-        # Discover sports series tickers and keep those that look like GAME/SPREAD/TOTAL.
-        discovered = list_series(session, category=series_category)
-        for s in discovered:
+        # Discover sports series tickers and keep those that match the include regex.
+        discovered_series = list_series(session, category=series_category)
+        if not discovered_series and series_category:
+            discovered_series = list_series(session, category=None)
+            if discovered_series:
+                run_meta["series_category_fallback"] = True
+
+        categories: Dict[str, int] = {}
+        for s in discovered_series:
+            c = str(s.get("category") or "").strip() or "(missing)"
+            categories[c] = categories.get(c, 0) + 1
+        run_meta["discovered_series_count"] = len(discovered_series)
+        run_meta["discovered_category_counts"] = categories
+        for s in discovered_series:
             ticker = str(s.get("ticker") or "").strip()
             title = str(s.get("title") or "")
             if not ticker:
@@ -608,14 +674,58 @@ def scan() -> int:
             if include_re.search(ticker) or include_re.search(title):
                 series.append(ticker)
 
+        if series:
+            run_meta["series_discovery_mode"] = "include_regex"
+        else:
+            # If include regex was too strict, fall back to anything not excluded.
+            for s in discovered_series:
+                ticker = str(s.get("ticker") or "").strip()
+                title = str(s.get("title") or "")
+                if not ticker:
+                    continue
+                if exclude_re.search(ticker) or exclude_re.search(title):
+                    continue
+                series.append(ticker)
+            if series:
+                run_meta["series_discovery_mode"] = "fallback_not_excluded"
+
     series = sorted(set(series))
+    if (not series_override) and len(series) > max_series:
+        series = series[:max_series]
+        run_meta["series_truncated_to"] = max_series
     if not series:
         run_meta["status"] = "error_no_series"
+
+        debug = {
+            "stamp_utc": stamp,
+            "base": _kalshi_base_url(),
+            "requested_series_category": series_category,
+            "series_include_regex": include_re.pattern,
+            "series_exclude_regex": exclude_re.pattern,
+            "discovered_series_count": len(discovered_series),
+            "discovered_category_counts": run_meta.get("discovered_category_counts", {}),
+            "discovered_series_sample": [
+                {
+                    "ticker": s.get("ticker"),
+                    "title": s.get("title"),
+                    "category": s.get("category"),
+                    "sub_category": s.get("sub_category") or s.get("subcategory"),
+                    "active": s.get("active"),
+                }
+                for s in discovered_series[:50]
+            ],
+        }
+        debug_path = os.path.join(outdir, f"kalshi_series_discovery_debug_{stamp}.json")
+        debug_latest = os.path.join(outdir, "kalshi_series_discovery_debug_latest.json")
+        _write_json(debug_path, debug)
+        _write_json(debug_latest, debug)
+
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
         print(
-            "No Kalshi series tickers selected. Provide KALSHI_SERIES_TICKERS="
-            " (comma-separated) or adjust KALSHI_SERIES_CATEGORY/regex filters."
+            "No Kalshi series tickers selected. See "
+            f"{debug_latest} for discovery details. "
+            "Try KALSHI_SERIES_CATEGORY=Sports, or set KALSHI_SERIES_TICKERS=... to override."
         )
         return 2
 
@@ -630,11 +740,15 @@ def scan() -> int:
 
     debug_matched: List[Dict[str, Any]] = []
     debug_unmatched: List[Dict[str, Any]] = []
+    series_errors = 0
 
     for st in series:
         try:
             markets = list_markets_for_series(session, st, status="open", max_close_ts=max_close_ts)
-        except Exception:
+        except Exception as exc:
+            series_errors += 1
+            if series_errors <= 3:
+                print(f"[WARN] list_markets_for_series failed for {st}: {type(exc).__name__}: {exc}")
             continue
 
         # If the API didn't enforce open-only (or doesn't like combining filters),
