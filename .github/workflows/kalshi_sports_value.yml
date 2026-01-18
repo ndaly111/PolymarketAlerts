@@ -35,9 +35,24 @@ on:
         default: "0.03"
       min_volume:
         description: "Minimum Kalshi volume to include (0 disables volume filter)"
-        type: choice
-        options: ["0", "250", "500", "1000", "2000", "5000"]
+        required: false
         default: "1000"
+      min_books:
+        description: "Minimum sportsbook books required (1 disables this filter)"
+        required: false
+        default: "3"
+      game_lookahead_hours:
+        description: "Only consider games starting within N hours"
+        required: false
+        default: "24"
+      lookahead_hours:
+        description: "Kalshi market close-time lookahead window in hours"
+        required: false
+        default: "72"
+      buy_fee_cents:
+        description: "Kalshi buy fee in cents per contract (e.g., 2)"
+        required: false
+        default: "2"
       debug_mode:
         description: "Debug: write extra artifacts and skip Discord"
         type: choice
@@ -110,12 +125,11 @@ jobs:
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
           KALSHI_DEBUG_WIDE_SCAN: ${{ github.event.inputs.debug_wide_scan || 'false' }}
 
-          # One-time tuning knobs (set via repo Variables if you want; otherwise defaults apply)
-          MIN_BOOKS: ${{ vars.KALSHI_MIN_BOOKS || '3' }}
-          KALSHI_LOOKAHEAD_HOURS: ${{ vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
-          KALSHI_GAME_LOOKAHEAD_HOURS: ${{ vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
-          KALSHI_BUY_FEE_CENTS: ${{ vars.KALSHI_BUY_FEE_CENTS || '2' }}
-          # Allow per-run override via workflow input; fallback to repo Variable; final fallback to 1000
+          # Allow per-run overrides (workflow_dispatch); otherwise use repo Variables/defaults
+          MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '3' }}
+          KALSHI_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lookahead_hours || vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
+          KALSHI_GAME_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.game_lookahead_hours || vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
+          KALSHI_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_fee_cents || vars.KALSHI_BUY_FEE_CENTS || '2' }}
           KALSHI_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || vars.KALSHI_MIN_VOLUME || '1000' }}
           KALSHI_USE_ORDERBOOK: ${{ vars.KALSHI_USE_ORDERBOOK || 'true' }}
           KALSHI_ORDERBOOK_MAX_CALLS: ${{ vars.KALSHI_ORDERBOOK_MAX_CALLS || '300' }}
