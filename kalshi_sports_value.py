@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import itertools
 import json
 import os
 import re
@@ -25,7 +26,7 @@ from zoneinfo import ZoneInfo
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -902,6 +903,205 @@ def _copy_text(src: str, dst: str) -> None:
         pass
 
 
+def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove/replace sensitive headers before writing artifacts."""
+    if not headers:
+        return {}
+    redacted_keys = {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "apikey",
+        "api-key",
+        "signature",
+        "x-signature",
+        "kalshi-key-id",
+        "kalshi-timestamp",
+        "kalshi-signature",
+    }
+    out: Dict[str, Any] = {}
+    for k, v in headers.items():
+        lk = str(k).lower()
+        if lk in redacted_keys:
+            out[k] = "REDACTED"
+        else:
+            out[k] = v
+    return out
+
+
+def _redact_url(url: str) -> str:
+    """Redact sensitive query params (e.g., apiKey) while keeping the URL useful."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.query:
+            return url
+        qs = parse_qsl(parsed.query, keep_blank_values=True)
+        safe_qs = []
+        for k, v in qs:
+            lk = str(k).lower()
+            if lk in ("apikey", "api_key", "key", "token", "signature"):
+                safe_qs.append((k, "REDACTED"))
+            else:
+                safe_qs.append((k, v))
+        new_query = urlencode(safe_qs, doseq=True)
+        return urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
+        )
+    except Exception:
+        # If anything goes wrong, fallback to dropping the query string entirely
+        try:
+            parsed = urlparse(url)
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, "", parsed.fragment))
+        except Exception:
+            return url
+
+
+def _safe_stem_from_url(url: str) -> str:
+    """Create a short, filesystem-safe stem from a URL path."""
+    try:
+        parsed = urlparse(url)
+        path = parsed.path or ""
+        # last 2 segments are usually enough signal
+        segs = [s for s in path.split("/") if s]
+        tail = "_".join(segs[-2:]) if segs else "request"
+        tail = re.sub(r"[^A-Za-z0-9_.-]+", "_", tail)[:80]
+        return tail or "request"
+    except Exception:
+        return "request"
+
+
+def _attach_master_debug(
+    session: requests.Session,
+    outdir: str,
+    stamp: str,
+    *,
+    max_requests: int = 250,
+    max_kb: int = 512,
+) -> Dict[str, Any]:
+    """
+    Attach a response hook that writes per-request artifacts:
+      - <N>_<stem>_meta.json   (request + response metadata, secrets redacted)
+      - <N>_<stem>_raw.txt     (raw response text, truncated)
+      - <N>_<stem>_json.json   (parsed JSON pretty-printed, when possible)
+      - index.jsonl            (one line per saved response)
+
+    Returns a small dict with counters you can include in run_meta.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    index_path = os.path.join(outdir, "index.jsonl")
+    counter = itertools.count(1)
+    stats = {
+        "saved": 0,
+        "skipped_over_max": 0,
+        "parse_json_failed": 0,
+        "json_skipped_too_large": 0,
+    }
+
+    def hook(resp: requests.Response, *args: Any, **kwargs: Any) -> requests.Response:
+        n = next(counter)
+        if n > max_requests:
+            stats["skipped_over_max"] += 1
+            return resp
+
+        try:
+            req = resp.request
+            safe_url = _redact_url(getattr(req, "url", "") or "")
+            stem = _safe_stem_from_url(safe_url)
+            base = f"{n:04d}_{stem}"
+
+            meta = {
+                "stamp_utc": stamp,
+                "request": {
+                    "method": getattr(req, "method", None),
+                    "url": safe_url,
+                    "headers": _redact_headers(dict(getattr(req, "headers", {}) or {})),
+                    # NOTE: body can be bytes; avoid dumping huge payloads
+                    "body_preview": None,
+                },
+                "response": {
+                    "status_code": getattr(resp, "status_code", None),
+                    "reason": getattr(resp, "reason", None),
+                    "elapsed_seconds": getattr(
+                        getattr(resp, "elapsed", None), "total_seconds", lambda: None
+                    )(),
+                    "headers": _redact_headers(dict(getattr(resp, "headers", {}) or {})),
+                },
+            }
+
+            body = getattr(req, "body", None)
+            if body is not None:
+                try:
+                    if isinstance(body, (bytes, bytearray)):
+                        meta["request"]["body_preview"] = body[:1024].decode("utf-8", errors="replace")
+                    else:
+                        body_text = str(body)
+                        meta["request"]["body_preview"] = body_text[:1024]
+                except Exception:
+                    meta["request"]["body_preview"] = "<unavailable>"
+
+            # Raw response (truncated)
+            raw_path = os.path.join(outdir, f"{base}_raw.txt")
+            content = b""
+            try:
+                content = resp.content or b""
+                limit = max(1, int(max_kb)) * 1024
+                snippet = content[:limit]
+                Path(raw_path).write_bytes(snippet)
+            except Exception:
+                pass
+
+            # Parsed JSON (when possible)
+            json_path = os.path.join(outdir, f"{base}_json.json")
+            parsed_ok = False
+            try:
+                limit = max(1, int(max_kb)) * 1024
+                # Avoid double-heavy work: only pretty-print JSON if the response is small enough.
+                clen = len(content) if content is not None else 0
+                if clen == 0:
+                    # no body; nothing to parse
+                    pass
+                elif clen <= limit:
+                    parsed = resp.json()
+                    _write_json(json_path, parsed)
+                    parsed_ok = True
+                else:
+                    stats["json_skipped_too_large"] += 1
+            except Exception:
+                stats["parse_json_failed"] += 1
+
+            meta_path = os.path.join(outdir, f"{base}_meta.json")
+            _write_json(meta_path, meta)
+
+            # Index line
+            try:
+                idx = {
+                    "n": n,
+                    "method": meta["request"]["method"],
+                    "url": safe_url,
+                    "status": meta["response"]["status_code"],
+                    "stem": stem,
+                    "meta_file": os.path.basename(meta_path),
+                    "raw_file": os.path.basename(raw_path),
+                    "json_file": os.path.basename(json_path) if parsed_ok else None,
+                }
+                with open(index_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(idx, ensure_ascii=False))
+                    f.write("\n")
+            except Exception:
+                pass
+
+            stats["saved"] += 1
+        except Exception:
+            # Never allow debug logging to break the run
+            pass
+
+        return resp
+
+    session.hooks.setdefault("response", []).append(hook)
+    return stats
+
+
 def scan() -> int:
     # Output directory (create immediately so artifacts always have *something* if we can write it)
     outdir = env_str("OUTDIR", "out")
@@ -917,6 +1117,14 @@ def scan() -> int:
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
     game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
     min_volume = env_int("KALSHI_MIN_VOLUME", 1000)
+    volume_missing_policy = env_str("KALSHI_VOLUME_MISSING_POLICY", "include").strip().lower()
+    if volume_missing_policy not in ("include", "exclude"):
+        # Defensive: treat unknown values as include
+        volume_missing_policy = "include"
+    include_unknown_volume = volume_missing_policy != "exclude"
+    master_debug = env_bool("MASTER_DEBUG", False) or env_bool("KALSHI_MASTER_DEBUG", False)
+    master_debug_max = env_int("MASTER_DEBUG_MAX", 250)
+    master_debug_max_kb = env_int("MASTER_DEBUG_MAX_KB", 512)
     use_orderbook = env_bool("KALSHI_USE_ORDERBOOK", True)
     orderbook_max_calls = env_int("KALSHI_ORDERBOOK_MAX_CALLS", 300)
     orderbook_calls = 0
@@ -953,6 +1161,11 @@ def scan() -> int:
         "lookahead_hours": lookahead_hours,
         "game_lookahead_hours": game_lookahead_hours,
         "min_volume": min_volume,
+        "volume_missing_policy": volume_missing_policy,
+        "include_unknown_volume": include_unknown_volume,
+        "master_debug": master_debug,
+        "master_debug_max": master_debug_max,
+        "master_debug_max_kb": master_debug_max_kb,
         "min_volume_effective": min_volume_effective,
         "use_orderbook": use_orderbook,
         "min_edge": min_edge,
@@ -1047,6 +1260,28 @@ def scan() -> int:
 
     # Kalshi markets
     session = _session()
+    master_debug_dir = None
+    master_debug_stats: Optional[Dict[str, Any]] = None
+    if master_debug:
+        master_debug_dir = os.path.join(outdir, f"kalshi_master_debug_{stamp}")
+        master_debug_stats = _attach_master_debug(
+            session,
+            master_debug_dir,
+            stamp,
+            max_requests=master_debug_max,
+            max_kb=master_debug_max_kb,
+        )
+        run_meta["master_debug_dir"] = master_debug_dir
+        run_meta["master_debug_stats"] = master_debug_stats
+        try:
+            latest_debug_path = os.path.join(outdir, "kalshi_master_debug_latest.txt")
+            Path(latest_debug_path).write_text(master_debug_dir + "\n", encoding="utf-8")
+        except Exception:
+            pass
+        print(
+            "[MASTER_DEBUG] Writing per-request artifacts to: "
+            f"{master_debug_dir} (max {master_debug_max} requests)"
+        )
     series: List[str] = []
     discovered_series: List[Dict[str, Any]] = []
 
@@ -1268,8 +1503,11 @@ def scan() -> int:
                 except Exception:
                     vol = None
             if vol is None:
-                vol = -1
-            if min_volume_effective > 0 and vol < min_volume_effective:
+                drops["volume_missing"] += 1
+                if (min_volume_effective > 0) and (not include_unknown_volume):
+                    drops["volume_missing_dropped"] += 1
+                    continue
+            if min_volume_effective > 0 and vol is not None and vol < min_volume_effective:
                 drops["volume_below_min"] += 1
                 continue
 
@@ -1690,11 +1928,16 @@ def scan() -> int:
         print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
     elif webhook and (rows or always_notify):
         if not rows:
+            vol_note = f"vol≥{min_volume}"
+            if min_volume_effective > 0 and include_unknown_volume:
+                vol_note = f"{vol_note} (unknown vol included)"
+            elif min_volume_effective > 0 and not include_unknown_volume:
+                vol_note = f"{vol_note} (unknown vol dropped)"
             post_discord(
                 webhook,
                 (
                     f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
-                    f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, vol≥{min_volume})."
+                    f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, {vol_note})."
                 ),
             )
             return 0
