@@ -332,15 +332,53 @@ def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
     """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
     t = str(title)
     t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
-    t = " ".join(t.replace("@", " at ").split())
-    m = re.search(r"^(.*?)\s+(?:at|vs\.?|v\.?|versus)\s+(.*?)(?:\s*:\s*.*)?$", t, re.IGNORECASE)
+    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
+    if ":" in t:
+        t_tail = t.split(":")[-1].strip()
+        if len(t_tail) >= 5:
+            t = t_tail
+    t = " ".join(t.split())
+    m = re.search(
+        r"(?i)\b(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$",
+        t,
+    )
     if not m:
         return None
-    a = m.group(1).strip()
-    b = m.group(2).strip()
+    a = str(m.group(1)).strip()
+    b = str(m.group(3)).strip()
     if not a or not b:
         return None
     return a, b
+
+
+def derive_matchup_from_subtitles(line_type: str, yes_sub: str, no_sub: str) -> Optional[Tuple[str, str]]:
+    """
+    Fallback when Kalshi titles don't contain 'at'/'vs'.
+    For H2H, subtitles are usually team/team.
+    For spreads, subtitles are often 'TEAM -3.5' vs 'TEAM +3.5'.
+    """
+    y = str(yes_sub or "").strip()
+    n = str(no_sub or "").strip()
+    if not y or not n:
+        return None
+    if y.lower() in ("yes", "y") or n.lower() in ("no", "n"):
+        return None
+
+    if line_type == "h2h":
+        y2 = re.sub(r"(?i)\b(wins?|to\s*win)\b", "", y).strip()
+        n2 = re.sub(r"(?i)\b(wins?|to\s*win)\b", "", n).strip()
+        if y2 and n2 and y2.lower() != n2.lower():
+            return y2, n2
+
+    if line_type == "spread":
+        ly = parse_line_from_subtitle("spread", y)
+        ln = parse_line_from_subtitle("spread", n)
+        ty = str((ly or {}).get("team") or "").strip()
+        tn = str((ln or {}).get("team") or "").strip()
+        if ty and tn and ty.lower() != tn.lower():
+            return ty, tn
+
+    return None
 
 
 def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str, Any]]:
@@ -671,7 +709,60 @@ def _league_tokens_from_sport_keys(sport_keys: List[str]) -> List[str]:
         out.append(tt)
     return out
 
-def _score_series_candidate(ticker: str, title: str, league_tokens: List[str]) -> int:
+
+def _sport_words_from_sport_keys(sport_keys: List[str]) -> List[str]:
+    """Fallback sport-level tokens to help pick the right Kalshi series."""
+    sk = set((k or "").strip().lower() for k in sport_keys or [])
+    toks: List[str] = []
+    if any(k.startswith("americanfootball_") for k in sk):
+        toks.append("FOOTBALL")
+    if any(k.startswith("basketball_") for k in sk):
+        toks.append("BASKETBALL")
+    if any(k.startswith("baseball_") for k in sk):
+        toks.append("BASEBALL")
+    if any(k.startswith("icehockey_") for k in sk):
+        toks.append("HOCKEY")
+    if any("ncaaf" in k or "ncaab" in k for k in sk):
+        toks.append("COLLEGE")
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for t in toks:
+        tt = str(t).upper().strip()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+    return out
+
+
+def _team_tokens_from_odds_events(events: List[Dict[str, Any]], max_tokens: int = 350) -> List[str]:
+    """Extract a bounded set of team tokens from Odds API events for series scoring."""
+    toks: set[str] = set()
+    for ev in events or []:
+        for k in ("home_team", "away_team"):
+            raw = str(ev.get(k) or "").strip()
+            if not raw:
+                continue
+            norm = normalize_team_name(raw)
+            if not norm:
+                continue
+            toks.add(norm.upper())
+            for part in norm.split():
+                if len(part) >= 4:
+                    toks.add(part.upper())
+
+    out = sorted(toks, key=lambda s: (-len(s), s))
+    return out[: max(1, int(max_tokens))]
+
+
+def _score_series_candidate(
+    ticker: str,
+    title: str,
+    league_tokens: List[str],
+    sport_words: List[str],
+    team_tokens: List[str],
+) -> int:
     """Higher score = more likely the series is relevant to the requested sports + line types."""
     txt = f"{ticker} {title}".upper()
     weights = {
@@ -687,6 +778,17 @@ def _score_series_candidate(ticker: str, title: str, league_tokens: List[str]) -
         tt = str(tok).upper().strip()
         if tt and tt in txt:
             score += int(weights.get(tt, 3))
+
+    for w in sport_words or []:
+        ww = str(w).upper().strip()
+        if ww and ww in txt:
+            score += 2
+
+    for tok in team_tokens or []:
+        tt = str(tok).upper().strip()
+        if tt and tt in txt:
+            score += 8
+            break
 
     if "MONEYLINE" in txt or "H2H" in txt:
         score += 3
@@ -807,13 +909,15 @@ def scan() -> int:
 
     debug_max = env_int("KALSHI_DEBUG_MAX", 50)  # keep artifacts small; bump if needed
 
-    fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 3)
+    fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 2)
     fee_prob = fee_cents / 100.0
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
     game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
     min_volume = env_int("KALSHI_MIN_VOLUME", 1000)
     use_orderbook = env_bool("KALSHI_USE_ORDERBOOK", True)
+    orderbook_max_calls = env_int("KALSHI_ORDERBOOK_MAX_CALLS", 300)
+    orderbook_calls = 0
     now_ts = int(time.time())
     max_close_ts = now_ts + lookahead_hours * 3600
     min_close_buffer_hours = env_int("KALSHI_MIN_CLOSE_BUFFER_HOURS", 0)
@@ -823,12 +927,18 @@ def scan() -> int:
     min_edge = env_float("MIN_EDGE", 0.03)
     top_n = env_int("TOP_N", 25)
     debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
+    debug_wide_scan = env_bool("KALSHI_DEBUG_WIDE_SCAN", False)
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
     min_books_effective = 1 if debug_mode else min_books
-    max_close_ts_effective = None if debug_mode else max_close_ts
-    min_close_ts_effective = None if debug_mode else min_close_ts
+    min_volume_effective = 0 if debug_mode else min_volume
+    if debug_mode and debug_wide_scan:
+        max_close_ts_effective = None
+        min_close_ts_effective = None
+    else:
+        max_close_ts_effective = max_close_ts
+        min_close_ts_effective = min_close_ts
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
@@ -836,10 +946,12 @@ def scan() -> int:
         "lookahead_hours": lookahead_hours,
         "game_lookahead_hours": game_lookahead_hours,
         "min_volume": min_volume,
+        "min_volume_effective": min_volume_effective,
         "use_orderbook": use_orderbook,
         "min_edge": min_edge,
         "top_n": top_n,
         "debug_mode": debug_mode,
+        "debug_wide_scan": debug_wide_scan,
         "min_close_buffer_hours": min_close_buffer_hours,
         "min_close_ts": min_close_ts_effective,
         "max_close_ts": max_close_ts_effective,
@@ -849,6 +961,7 @@ def scan() -> int:
         "sport_keys": env_sport_keys(),
         "kalshi_base": _kalshi_base_url(),
         "mve_filter": mve_filter,
+        "orderbook_max_calls": orderbook_max_calls,
         "status": "starting",
     }
 
@@ -986,8 +1099,15 @@ def scan() -> int:
                 continue
             title_by_ticker.setdefault(t, str(s.get("title") or ""))
 
-        league_tokens = _league_tokens_from_sport_keys(env_sport_keys())
+        sport_keys = env_sport_keys()
+        league_tokens = _league_tokens_from_sport_keys(sport_keys)
+        sport_words = _sport_words_from_sport_keys(sport_keys)
+        team_tokens = _team_tokens_from_odds_events(odds_events)
+        series_min_score = env_int("KALSHI_SERIES_MIN_SCORE", 8)
         run_meta["series_league_tokens"] = league_tokens
+        run_meta["series_sport_words"] = sport_words
+        run_meta["series_team_tokens_count"] = len(team_tokens)
+        run_meta["series_min_score"] = series_min_score
 
         scored: List[Tuple[int, str, str]] = []
         seen: set[str] = set()
@@ -996,13 +1116,18 @@ def scan() -> int:
                 continue
             seen.add(t)
             title = title_by_ticker.get(t, "")
-            score = _score_series_candidate(t, title, league_tokens)
+            score = _score_series_candidate(t, title, league_tokens, sport_words, team_tokens)
             scored.append((int(score), t, title))
 
         scored.sort(key=lambda x: (-x[0], x[1]))
-        scored_pos = [x for x in scored if int(x[0]) > 0]
-        if scored_pos:
-            scored = scored_pos
+        scored_keep = [x for x in scored if int(x[0]) >= series_min_score]
+        if scored_keep:
+            scored = scored_keep
+        else:
+            scored_pos = [x for x in scored if int(x[0]) > 0]
+            if scored_pos:
+                scored = scored_pos
+            run_meta["series_score_filter_fallback"] = True
         if len(scored) > max_series:
             scored = scored[:max_series]
             run_meta["series_truncated_to"] = max_series
@@ -1121,18 +1246,18 @@ def scan() -> int:
                 or ""
             )
             subtitle = str(m.get("subtitle") or "").strip()
-            raw_vol = (
-                m.get("volume")
-                or m.get("volume_24h")
-                or m.get("volume_fp")
-                or m.get("volume_24h_fp")
-                or 0
-            )
-            try:
-                vol = int(float(str(raw_vol).replace(",", "")))
-            except Exception:
-                vol = 0
-            if not debug_mode and vol < min_volume:
+            raw_vol = m.get("volume_24h")
+            if raw_vol is None:
+                raw_vol = m.get("volume")
+            vol: Optional[int] = None
+            if raw_vol is not None:
+                try:
+                    vol = int(float(str(raw_vol).replace(",", "")))
+                except Exception:
+                    vol = None
+            if vol is None:
+                vol = -1
+            if min_volume_effective > 0 and vol < min_volume_effective:
                 continue
 
             lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
@@ -1197,6 +1322,8 @@ def scan() -> int:
                 event_title = str((m.get("event") or {}).get("title") or "")
 
             matchup = parse_matchup(event_title) or parse_matchup(subtitle) or parse_matchup(market_title)
+            if not matchup:
+                matchup = derive_matchup_from_subtitles(lt, yes_sub, no_sub)
             if not matchup:
                 if debug_mode and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
@@ -1355,10 +1482,15 @@ def scan() -> int:
 
             # Kalshi buy prices (asks)
             yes_buy, no_buy = best_buy_probs(m)
-            # If snapshot prices are missing (or even if present), optionally refine via orderbook.
-            # IMPORTANT: do this BEFORE bailing out, since newer APIs may omit yes_ask/no_ask cent fields.
-            if use_orderbook and market_ticker and (yes_buy is None or no_buy is None):
+            # In debug, always use the orderbook for pricing.
+            # In normal mode, use it as a fallback when snapshot asks are missing.
+            want_orderbook = False
+            if use_orderbook and market_ticker:
+                want_orderbook = debug_mode or (yes_buy is None or no_buy is None)
+
+            if want_orderbook and orderbook_calls < orderbook_max_calls:
                 try:
+                    orderbook_calls += 1
                     ob_yes_buy, ob_no_buy = best_buy_probs_from_orderbook(session, market_ticker)
                     if ob_yes_buy is not None:
                         yes_buy = ob_yes_buy
@@ -1461,7 +1593,7 @@ def scan() -> int:
                     line_type=lt,
                     line_label=str(line.get("label") or ""),
                     commence_time_iso=str(odds_event.get("commence_time") or ""),
-                    kalshi_volume=vol,
+                    kalshi_volume=int(vol),
                     books_used=books_used,
                     url=kalshi_market_url(market_ticker),
                 )
@@ -1510,6 +1642,7 @@ def scan() -> int:
 
     run_meta["status"] = "ok"
     run_meta["rows_written"] = len(rows)
+    run_meta["orderbook_calls"] = orderbook_calls
     run_meta["debug_matched_rows"] = len(debug_matched)
     run_meta["debug_unmatched_rows"] = len(debug_unmatched)
     if debug_mode:

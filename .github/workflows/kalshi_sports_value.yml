@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       sport_preset:
-        description: "Sports preset (Odds API keys)"
+        description: "Sports preset (Odds API sport keys)"
         type: choice
         options:
-          - major_us
+          - all
           - nfl
           - nba
           - mlb
@@ -20,88 +20,26 @@ on:
           - ncaab
           - college
           - custom
-        default: major_us
+        default: all
       sport_keys_custom:
-        description: "Comma-separated Odds API sport keys (only if sport_preset=custom)"
+        description: "Comma-separated Odds API sport keys (only when preset=custom)"
         required: false
         default: ""
       top_n:
-        description: "Number of results to keep/post"
-        type: choice
-        options: ["10", "25", "50", "100"]
+        description: "Number of results to post"
+        required: false
         default: "25"
       min_edge:
-        description: "Minimum edge (0.03 = 3 percentage points)"
-        type: choice
-        options: ["0.00", "0.01", "0.02", "0.03", "0.05"]
+        description: "Minimum edge (probability points; 0.03 = 3pp)"
+        required: false
         default: "0.03"
-      min_books:
-        description: "Minimum books required for a fair probability"
-        type: choice
-        options: ["1", "2", "3", "4", "5"]
-        default: "3"
-      lookahead_hours:
-        description: "Only consider Kalshi markets closing within this many hours"
-        type: choice
-        options: ["24", "48", "72", "168"]
-        default: "72"
-      buy_fee_cents:
-        description: "Kalshi opening fee per contract (cents) added to YES/NO buy price"
-        type: choice
-        options: ["0", "1", "2", "3", "5"]
-        default: "3"
-      game_lookahead_hours:
-        description: "Only consider games starting within this many hours (reduces scan size)"
-        type: choice
-        options: ["12", "24", "36", "48"]
-        default: "24"
-      min_volume:
-        description: "Skip Kalshi markets with volume below this threshold (e.g., 1000)"
-        type: choice
-        options: ["0", "250", "500", "1000", "2000", "5000"]
-        default: "1000"
-      use_orderbook:
-        description: "If true, fallback to orderbook when snapshot asks are missing"
-        type: choice
-        options: ["true", "false"]
-        default: "true"
-      series_tickers:
-        description: "Optional: comma-separated Kalshi series tickers (overrides auto-discovery)"
-        required: false
-        default: ""
-      series_filter_preset:
-        description: "Series filter preset"
-        type: choice
-        options:
-          - default
-          - lenient
-          - strict
-          - custom
-        default: default
-      series_category:
-        description: "Kalshi series category label (usually 'Sports')"
-        required: false
-        default: "Sports"
-      series_include_regex:
-        description: "Include series when ticker/title matches (case-insensitive) - used only when preset=custom"
-        required: false
-        default: ""
-      series_exclude_regex:
-        description: "Exclude series when ticker/title matches (case-insensitive) - used only when preset=custom"
-        required: false
-        default: ""
-      mve_filter:
-        description: "MVE markets"
-        type: choice
-        options: ["all", "exclude", "only"]
-        default: "all"
-      max_series_tickers:
-        description: "Max auto-discovered series tickers to scan"
-        type: choice
-        options: ["30", "60", "90", "120"]
-        default: "60"
       debug_mode:
-        description: "Debug: write top results even if below min_edge (no Discord post)"
+        description: "Debug: write extra artifacts and skip Discord"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      debug_wide_scan:
+        description: "DEBUG only: remove close-window bounds (can be very slow)"
         type: choice
         options: ["false", "true"]
         default: "false"
@@ -133,7 +71,8 @@ jobs:
           from zoneinfo import ZoneInfo
           import os
 
-          now = datetime.now(ZoneInfo('America/New_York'))
+          ny = ZoneInfo("America/New_York")
+          now = datetime.now(tz=ny)
           should_run = (now.hour == 6 and 5 <= now.minute < 15)
 
           out = os.environ.get("GITHUB_OUTPUT")
@@ -141,7 +80,6 @@ jobs:
               with open(out, "a", encoding="utf-8") as f:
                   f.write(f"run={'true' if should_run else 'false'}\n")
           else:
-              # Shouldn't happen in Actions, but makes local runs less confusing.
               print("WARNING: GITHUB_OUTPUT not set; cannot emit step output.")
 
           print("NY time:", now.isoformat())
@@ -157,29 +95,33 @@ jobs:
           # Kalshi auth (required for trade-api/v2)
           KALSHI_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
-          # Optional override; if omitted we fall back to the documented base host and ensure /trade-api/v2 exists
+          # Official base host default; override via repo var if you ever need to.
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
           SPORT_KEYS: ${{ github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
+
           TOP_N: ${{ github.event.inputs.top_n || '25' }}
           MIN_EDGE: ${{ github.event.inputs.min_edge || '0.03' }}
-          MIN_BOOKS: ${{ github.event.inputs.min_books || '3' }}
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
+          KALSHI_DEBUG_WIDE_SCAN: ${{ github.event.inputs.debug_wide_scan || 'false' }}
 
-          KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
-          KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
-          KALSHI_GAME_LOOKAHEAD_HOURS: ${{ github.event.inputs.game_lookahead_hours || '24' }}
-          KALSHI_MIN_VOLUME: ${{ github.event.inputs.min_volume || '1000' }}
-          KALSHI_USE_ORDERBOOK: ${{ github.event.inputs.use_orderbook || 'true' }}
-          # Avoid paging through historical markets by bounding the close window.
-          KALSHI_MIN_CLOSE_BUFFER_HOURS: "0"
-          KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
-          KALSHI_SERIES_CATEGORY: ${{ github.event.inputs.series_category || 'Sports' }}
-          # Only ML / spread / totals; avoid tennis/golf “MATCH/SET/DISTANCE” rabbit holes.
-          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'strict' && '(MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' || github.event.inputs.series_filter_preset == 'lenient' && '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' || github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_include_regex || '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' }}
-          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ github.event.inputs.series_filter_preset == 'custom' && github.event.inputs.series_exclude_regex || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE|ATP|WTA|TENNIS|GOLF)' }}
-          KALSHI_MVE_FILTER: ${{ github.event.inputs.mve_filter || 'all' }}
-          KALSHI_MAX_SERIES_TICKERS: ${{ github.event.inputs.max_series_tickers || '60' }}
+          # One-time tuning knobs (set via repo Variables if you want; otherwise defaults apply)
+          MIN_BOOKS: ${{ vars.KALSHI_MIN_BOOKS || '3' }}
+          KALSHI_LOOKAHEAD_HOURS: ${{ vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
+          KALSHI_GAME_LOOKAHEAD_HOURS: ${{ vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
+          KALSHI_BUY_FEE_CENTS: ${{ vars.KALSHI_BUY_FEE_CENTS || '2' }}
+          KALSHI_MIN_VOLUME: ${{ vars.KALSHI_MIN_VOLUME || '1000' }}
+          KALSHI_USE_ORDERBOOK: ${{ vars.KALSHI_USE_ORDERBOOK || 'true' }}
+          KALSHI_ORDERBOOK_MAX_CALLS: ${{ vars.KALSHI_ORDERBOOK_MAX_CALLS || '300' }}
+          KALSHI_SERIES_MIN_SCORE: ${{ vars.KALSHI_SERIES_MIN_SCORE || '8' }}
+          KALSHI_MAX_SERIES_TICKERS: ${{ vars.KALSHI_MAX_SERIES_TICKERS || '60' }}
+          KALSHI_MVE_FILTER: ${{ vars.KALSHI_MVE_FILTER || 'all' }}
+          KALSHI_SERIES_TICKERS: ${{ vars.KALSHI_SERIES_TICKERS || '' }}
+          KALSHI_SERIES_CATEGORY: ${{ vars.KALSHI_SERIES_CATEGORY || 'Sports' }}
+          KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ vars.KALSHI_SPORTS_SERIES_INCLUDE_REGEX || '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ vars.KALSHI_SPORTS_SERIES_EXCLUDE_REGEX || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE|ATP|WTA|TENNIS|GOLF|MATCH\\s*BET)' }}
+          KALSHI_MIN_CLOSE_BUFFER_HOURS: ${{ vars.KALSHI_MIN_CLOSE_BUFFER_HOURS || '0' }}
+
           # Ping Discord on manual runs even if 0 plays (so you know the job ran)
           ALWAYS_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
 
