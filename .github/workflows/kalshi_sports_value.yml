@@ -50,6 +50,21 @@ on:
         type: choice
         options: ["0", "1", "2", "3", "5"]
         default: "3"
+      game_lookahead_hours:
+        description: "Only consider games starting within this many hours (reduces scan size)"
+        type: choice
+        options: ["12", "24", "36", "48"]
+        default: "24"
+      min_volume:
+        description: "Skip Kalshi markets with volume below this threshold (e.g., 1000)"
+        type: choice
+        options: ["0", "250", "500", "1000", "2000", "5000"]
+        default: "1000"
+      use_orderbook:
+        description: "If true, fallback to orderbook when snapshot asks are missing"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
       series_tickers:
         description: "Optional: comma-separated Kalshi series tickers (overrides auto-discovery)"
         required: false
@@ -153,6 +168,9 @@ jobs:
 
           KALSHI_LOOKAHEAD_HOURS: ${{ github.event.inputs.lookahead_hours || '72' }}
           KALSHI_BUY_FEE_CENTS: ${{ github.event.inputs.buy_fee_cents || '3' }}
+          KALSHI_GAME_LOOKAHEAD_HOURS: ${{ github.event.inputs.game_lookahead_hours || '24' }}
+          KALSHI_MIN_VOLUME: ${{ github.event.inputs.min_volume || '1000' }}
+          KALSHI_USE_ORDERBOOK: ${{ github.event.inputs.use_orderbook || 'true' }}
           # Avoid paging through historical markets by bounding the close window.
           KALSHI_MIN_CLOSE_BUFFER_HOURS: "0"
           KALSHI_SERIES_TICKERS: ${{ github.event.inputs.series_tickers || '' }}
