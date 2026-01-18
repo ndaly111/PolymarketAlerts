@@ -4,7 +4,7 @@ Compares Kalshi *lines* (moneyline, spread, total) vs sportsbook consensus from 
 
 Key behavior:
 - We consider both opening sides: BUY YES or BUY NO.
-- Opening a position on Kalshi has a flat per-contract fee (default +3 cents).
+- Opening a position on Kalshi has a flat per-contract fee (default +2 cents).
   We incorporate that by adding +fee_cents to the Kalshi buy price before converting to probability.
 
 This scanner is intentionally separate from the Polymarket workflows.
@@ -18,6 +18,7 @@ import json
 import os
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -53,7 +54,7 @@ def env_int(name: str, default: int) -> int:
     if v is None or not str(v).strip():
         return default
     try:
-        return int(str(v).strip())
+        return int(str(v).strip().replace(",", "").replace("_", ""))
     except Exception:
         return default
 
@@ -905,7 +906,8 @@ def scan() -> int:
     # Output directory (create immediately so artifacts always have *something* if we can write it)
     outdir = env_str("OUTDIR", "out")
     os.makedirs(outdir, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+    now_dt_utc = datetime.now(timezone.utc)
+    stamp = now_dt_utc.strftime("%Y%m%d_%H%M%SZ")
 
     debug_max = env_int("KALSHI_DEBUG_MAX", 50)  # keep artifacts small; bump if needed
 
@@ -918,7 +920,9 @@ def scan() -> int:
     use_orderbook = env_bool("KALSHI_USE_ORDERBOOK", True)
     orderbook_max_calls = env_int("KALSHI_ORDERBOOK_MAX_CALLS", 300)
     orderbook_calls = 0
-    now_ts = int(time.time())
+    now_ts = int(now_dt_utc.timestamp())
+    time_time_ts = int(time.time())
+    clock_skew_seconds = time_time_ts - now_ts
     max_close_ts = now_ts + lookahead_hours * 3600
     min_close_buffer_hours = env_int("KALSHI_MIN_CLOSE_BUFFER_HOURS", 0)
     min_close_ts = now_ts - max(0, min_close_buffer_hours) * 3600
@@ -942,6 +946,9 @@ def scan() -> int:
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
+        "now_ts": now_ts,
+        "time_time_ts": time_time_ts,
+        "clock_skew_seconds": clock_skew_seconds,
         "fee_cents": fee_cents,
         "lookahead_hours": lookahead_hours,
         "game_lookahead_hours": game_lookahead_hours,
@@ -1186,6 +1193,9 @@ def scan() -> int:
     debug_unmatched: List[Dict[str, Any]] = []
     debug_candidates: List[Dict[str, Any]] = []
     debug_series_counts: List[Dict[str, Any]] = []
+    drops = Counter()
+    markets_fetched_total = 0
+    markets_seen_total = 0
     series_errors = 0
 
     for st in series:
@@ -1193,7 +1203,7 @@ def scan() -> int:
             markets = list_markets_for_series(
                 session,
                 st,
-                status="" if debug_mode else "open",
+                status="",
                 min_close_ts=min_close_ts_effective,
                 max_close_ts=max_close_ts_effective,
                 mve_filter=mve_filter,
@@ -1205,6 +1215,7 @@ def scan() -> int:
             continue
 
         raw_count = len(markets)
+        markets_fetched_total += raw_count
         # If the API didn't enforce open-only (or doesn't like combining filters),
         # enforce it here without dropping markets that omit 'status'.
         filtered: List[Dict[str, Any]] = []
@@ -1217,7 +1228,7 @@ def scan() -> int:
                     continue
             filtered.append(m)
         markets = filtered
-        if debug_mode and len(debug_series_counts) < debug_max:
+        if len(debug_series_counts) < debug_max:
             debug_series_counts.append(
                 {
                     "series_ticker": st,
@@ -1227,6 +1238,7 @@ def scan() -> int:
             )
 
         for m in markets:
+            markets_seen_total += 1
             market_ticker = str(m.get("ticker") or "")
             if not market_ticker:
                 continue
@@ -1258,10 +1270,12 @@ def scan() -> int:
             if vol is None:
                 vol = -1
             if min_volume_effective > 0 and vol < min_volume_effective:
+                drops["volume_below_min"] += 1
                 continue
 
             lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
             if lt is None:
+                drops["line_type_unknown"] += 1
                 if debug_mode and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -1280,6 +1294,7 @@ def scan() -> int:
             # Parse the YES proposition from subtitle (preferred) else title.
             line = parse_line_from_subtitle(lt, yes_sub) or parse_line_from_subtitle(lt, market_title)
             if not line:
+                drops["line_parse_failed"] += 1
                 if debug_mode and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -1325,6 +1340,7 @@ def scan() -> int:
             if not matchup:
                 matchup = derive_matchup_from_subtitles(lt, yes_sub, no_sub)
             if not matchup:
+                drops["matchup_parse_failed"] += 1
                 if debug_mode and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -1347,6 +1363,7 @@ def scan() -> int:
             match_threshold = 0.0 if debug_mode else 1.30
             odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
             if not odds_event:
+                drops["odds_match_failed"] += 1
                 if len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -1408,29 +1425,30 @@ def scan() -> int:
                     odds_event,
                     min_score=min_map,
                 )
-                if not team_for_books:
-                    if debug_mode and len(debug_candidates) < debug_max:
-                        debug_candidates.append(
-                            {
-                                "reason": "team_map_failed",
-                                "series_ticker": st,
-                                "event_title": event_title or "",
-                                "market_title": market_title,
-                                "market_ticker": market_ticker,
-                                "line_type": lt,
-                                "parsed_line": line,
-                                "matchup": {"a": team_a, "b": team_b},
-                                "team_guess": line.get("team"),
-                                "team_map_score": team_map_score,
-                                "odds_event": {
-                                    "home_team": odds_event.get("home_team"),
-                                    "away_team": odds_event.get("away_team"),
-                                    "sport_key": odds_event.get("sport_key"),
-                                    "commence_time": odds_event.get("commence_time"),
-                                    "id": odds_event.get("id"),
-                                },
-                            }
-                        )
+            if not team_for_books:
+                drops["team_map_failed"] += 1
+                if debug_mode and len(debug_candidates) < debug_max:
+                    debug_candidates.append(
+                        {
+                            "reason": "team_map_failed",
+                            "series_ticker": st,
+                            "event_title": event_title or "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "line_type": lt,
+                            "parsed_line": line,
+                            "matchup": {"a": team_a, "b": team_b},
+                            "team_guess": line.get("team"),
+                            "team_map_score": team_map_score,
+                            "odds_event": {
+                                "home_team": odds_event.get("home_team"),
+                                "away_team": odds_event.get("away_team"),
+                                "sport_key": odds_event.get("sport_key"),
+                                "commence_time": odds_event.get("commence_time"),
+                                "id": odds_event.get("id"),
+                            },
+                        }
+                    )
                     continue
 
             if lt == "h2h":
@@ -1451,6 +1469,7 @@ def scan() -> int:
                 )
 
             if not fair_yes:
+                drops["fair_prob_unavailable"] += 1
                 if debug_mode and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
@@ -1478,6 +1497,7 @@ def scan() -> int:
             fair_prob_yes = float(fair_yes["fair_prob"])
             books_used = int(fair_yes.get("books_used") or 0)
             if books_used < min_books_effective:
+                drops["books_below_min"] += 1
                 continue
 
             # Kalshi buy prices (asks)
@@ -1509,6 +1529,7 @@ def scan() -> int:
                             }
                         )
             if yes_buy is None and no_buy is None:
+                drops["no_prices"] += 1
                 continue
 
             # apply fee to opening cost
@@ -1543,6 +1564,7 @@ def scan() -> int:
                 continue
 
             if (not debug_mode) and best_edge < min_edge:
+                drops["edge_below_min"] += 1
                 continue
 
             if len(debug_matched) < debug_max:
@@ -1637,17 +1659,22 @@ def scan() -> int:
     if debug_mode:
         _write_jsonl(candidates_path, debug_candidates)
         _copy_text(candidates_path, candidates_latest)
-        _write_json(series_counts_path, debug_series_counts)
-        _copy_text(series_counts_path, series_counts_latest)
+    _write_json(series_counts_path, debug_series_counts)
+    _copy_text(series_counts_path, series_counts_latest)
+
+    run_meta["series_errors"] = series_errors
+    run_meta["markets_fetched_total"] = markets_fetched_total
+    run_meta["markets_seen_total"] = markets_seen_total
+    run_meta["drop_counts"] = dict(drops)
 
     run_meta["status"] = "ok"
     run_meta["rows_written"] = len(rows)
     run_meta["orderbook_calls"] = orderbook_calls
     run_meta["debug_matched_rows"] = len(debug_matched)
     run_meta["debug_unmatched_rows"] = len(debug_unmatched)
+    run_meta["debug_series_count_rows"] = len(debug_series_counts)
     if debug_mode:
         run_meta["debug_candidates_rows"] = len(debug_candidates)
-        run_meta["debug_series_count_rows"] = len(debug_series_counts)
     _write_json(meta_path, run_meta)
     _copy_text(meta_path, meta_latest)
 
