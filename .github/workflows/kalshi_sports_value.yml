@@ -56,11 +56,11 @@ on:
         required: false
         default: "3"
       game_lookahead_hours:
-        description: "Only consider games starting within N hours"
+        description: "Only consider games starting within N hours (set 0 to disable)"
         required: false
         default: "24"
       lookahead_hours:
-        description: "Kalshi market close-time lookahead window in hours"
+        description: "Kalshi market close-time lookahead window in hours (set 0 to disable)"
         required: false
         default: "72"
       buy_fee_cents:
@@ -74,6 +74,12 @@ on:
         default: "false"
       debug_wide_scan:
         description: "DEBUG only: remove close-window bounds (can be very slow)"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      no_filters:
+        description: "Disable most filters / widen windows (debugging: get anything to show)"
+        required: false
         type: choice
         options: ["false", "true"]
         default: "false"
@@ -136,8 +142,9 @@ jobs:
 
           TOP_N: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.top_n) || vars.KALSHI_TOP_N || '25' }}
           MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.03' }}
-          DEBUG_MODE: ${{ github.event.inputs.debug_mode || 'false' }}
-          KALSHI_DEBUG_WIDE_SCAN: ${{ github.event.inputs.debug_wide_scan || 'false' }}
+          DEBUG_MODE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.debug_mode) || 'false' }}
+          KALSHI_DEBUG_WIDE_SCAN: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.debug_wide_scan) || 'false' }}
+          KALSHI_NO_FILTERS: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.no_filters) || vars.KALSHI_NO_FILTERS || 'false' }}
 
           # Allow per-run overrides (workflow_dispatch); otherwise use repo Variables/defaults
           MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '3' }}

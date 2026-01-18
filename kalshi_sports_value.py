@@ -112,6 +112,28 @@ def iso_to_ts(value: str) -> Optional[int]:
     return int(dt.timestamp()) if dt else None
 
 
+def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
+    """Return market close time (unix seconds) if present.
+
+    Kalshi endpoints may return either:
+      - close_time: ISO8601 string
+      - close_ts: integer unix seconds
+    We support both, and fall back to None if unavailable.
+    """
+    try:
+        if "close_ts" in market and market["close_ts"] is not None:
+            return int(market["close_ts"])
+    except Exception:
+        pass
+    try:
+        if "close_time" in market and market["close_time"]:
+            ts = iso_to_ts(str(market["close_time"]))
+            return int(ts) if ts is not None else None
+    except Exception:
+        pass
+    return None
+
+
 # -----------------------------
 # Kalshi client
 # -----------------------------
@@ -1121,7 +1143,6 @@ def scan() -> int:
     if volume_missing_policy not in ("include", "exclude"):
         # Defensive: treat unknown values as include
         volume_missing_policy = "include"
-    include_unknown_volume = volume_missing_policy != "exclude"
     master_debug = env_bool("MASTER_DEBUG", False) or env_bool("KALSHI_MASTER_DEBUG", False)
     master_debug_max = env_int("MASTER_DEBUG_MAX", 250)
     master_debug_max_kb = env_int("MASTER_DEBUG_MAX_KB", 512)
@@ -1138,19 +1159,25 @@ def scan() -> int:
 
     min_edge = env_float("MIN_EDGE", 0.03)
     top_n = env_int("TOP_N", 25)
+    no_filters = env_bool("KALSHI_NO_FILTERS", False) or env_bool("NO_FILTERS", False)
     debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
     debug_wide_scan = env_bool("KALSHI_DEBUG_WIDE_SCAN", False)
+    debug_artifacts = debug_mode or env_bool("KALSHI_DEBUG_ARTIFACTS", False) or no_filters
+    debug_loose = debug_mode or no_filters
+    debug_log = debug_mode or debug_artifacts
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
-    min_books_effective = 1 if debug_mode else min_books
-    min_volume_effective = 0 if debug_mode else min_volume
-    if debug_mode and debug_wide_scan:
+    include_unknown_volume = True if no_filters else (volume_missing_policy != "exclude")
+    min_books_effective = 1 if (debug_mode or no_filters) else min_books
+    min_volume_effective = 0 if (debug_mode or no_filters) else min_volume
+    if no_filters or debug_wide_scan or lookahead_hours <= 0:
         max_close_ts_effective = None
         min_close_ts_effective = None
     else:
         max_close_ts_effective = max_close_ts
         min_close_ts_effective = min_close_ts
+    close_window_enabled = (min_close_ts_effective is not None) or (max_close_ts_effective is not None)
 
     run_meta: Dict[str, Any] = {
         "stamp_utc": stamp,
@@ -1172,9 +1199,14 @@ def scan() -> int:
         "top_n": top_n,
         "debug_mode": debug_mode,
         "debug_wide_scan": debug_wide_scan,
+        "no_filters": no_filters,
+        "debug_artifacts": debug_artifacts,
+        "debug_loose": debug_loose,
+        "debug_log": debug_log,
         "min_close_buffer_hours": min_close_buffer_hours,
         "min_close_ts": min_close_ts_effective,
         "max_close_ts": max_close_ts_effective,
+        "close_window_enabled": close_window_enabled,
         "min_books": min_books,
         "min_books_effective": min_books_effective,
         "odds_regions": odds_regions,
@@ -1200,6 +1232,9 @@ def scan() -> int:
         "KALSHI_SPORTS_SERIES_EXCLUDE_REGEX",
         r"(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\s*\d)",
     )
+    if no_filters:
+        include_pat = r".*"
+        exclude_pat = r"^$"
     include_re = re.compile(include_pat, re.IGNORECASE)
     exclude_re = re.compile(exclude_pat, re.IGNORECASE)
 
@@ -1219,7 +1254,11 @@ def scan() -> int:
         print("No sportsbook events returned from The Odds API (check THE_ODDS_API / quota).")
         return 2
 
-    max_game_ts = now_ts + int(game_lookahead_hours * 3600)
+    max_game_ts: Optional[int]
+    if no_filters or game_lookahead_hours <= 0:
+        max_game_ts = None
+    else:
+        max_game_ts = now_ts + int(game_lookahead_hours * 3600)
     filtered_events = []
     for ev in odds_events:
         commence_time = str(ev.get("commence_time") or "")
@@ -1228,7 +1267,7 @@ def scan() -> int:
             continue
         if ct <= now_ts:
             continue
-        if ct > max_game_ts:
+        if max_game_ts is not None and ct > max_game_ts:
             continue
         filtered_events.append(ev)
     odds_events = filtered_events
@@ -1241,12 +1280,11 @@ def scan() -> int:
         webhook = env_str("DISCORD_WEBHOOK_URL", "")
         always_notify = env_bool("ALWAYS_NOTIFY", False)
         if webhook and always_notify:
-            post_discord(
-                webhook,
-                (
-                    f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
-                ),
-            )
+            if max_game_ts is None:
+                msg = "**Kalshi value**: no sportsbook games starting in the future."
+            else:
+                msg = f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
+            post_discord(webhook, msg)
         return 0
 
     # Fail fast if Kalshi auth isn't present (trade-api/v2 requires signed requests).
@@ -1346,6 +1384,8 @@ def scan() -> int:
         sport_words = _sport_words_from_sport_keys(sport_keys)
         team_tokens = _team_tokens_from_odds_events(odds_events)
         series_min_score = env_int("KALSHI_SERIES_MIN_SCORE", 8)
+        if no_filters:
+            series_min_score = -999
         run_meta["series_league_tokens"] = league_tokens
         run_meta["series_sport_words"] = sport_words
         run_meta["series_team_tokens_count"] = len(team_tokens)
@@ -1435,12 +1475,13 @@ def scan() -> int:
 
     for st in series:
         try:
+            print(f"Fetching markets for series={st} (close_window_enabled={close_window_enabled})")
             markets = list_markets_for_series(
                 session,
                 st,
                 status="",
-                min_close_ts=min_close_ts_effective,
-                max_close_ts=max_close_ts_effective,
+                min_close_ts=None,
+                max_close_ts=None,
                 mve_filter=mve_filter,
             )
         except Exception as exc:
@@ -1456,19 +1497,40 @@ def scan() -> int:
         filtered: List[Dict[str, Any]] = []
         for m in markets:
             s = str(m.get("status") or "").strip().lower()
-            if not debug_mode:
+            if not (debug_mode or no_filters):
                 if s in ("closed", "settled"):
                     continue
                 if s and s not in ("open", "paused", "active"):
                     continue
             filtered.append(m)
         markets = filtered
+        status_filtered_count = len(markets)
+
+        if close_window_enabled:
+            close_filtered: List[Dict[str, Any]] = []
+            for m in markets:
+                cts = market_close_ts(m)
+                if cts is None:
+                    drops["close_time_missing"] += 1
+                    close_filtered.append(m)
+                    continue
+                if min_close_ts_effective is not None and cts < min_close_ts_effective:
+                    drops["close_time_before_min"] += 1
+                    continue
+                if max_close_ts_effective is not None and cts > max_close_ts_effective:
+                    drops["close_time_after_max"] += 1
+                    continue
+                close_filtered.append(m)
+            markets = close_filtered
+        close_window_count = len(markets)
+
         if len(debug_series_counts) < debug_max:
             debug_series_counts.append(
                 {
                     "series_ticker": st,
                     "raw_count": raw_count,
-                    "open_count": len(markets),
+                    "status_filtered_count": status_filtered_count,
+                    "close_window_count": close_window_count,
                 }
             )
 
@@ -1514,7 +1576,7 @@ def scan() -> int:
             lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
             if lt is None:
                 drops["line_type_unknown"] += 1
-                if debug_mode and len(debug_unmatched) < debug_max:
+                if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
                             "reason": "unknown_line_type",
@@ -1533,7 +1595,7 @@ def scan() -> int:
             line = parse_line_from_subtitle(lt, yes_sub) or parse_line_from_subtitle(lt, market_title)
             if not line:
                 drops["line_parse_failed"] += 1
-                if debug_mode and len(debug_unmatched) < debug_max:
+                if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
                             "reason": "line_parse_failed",
@@ -1579,7 +1641,7 @@ def scan() -> int:
                 matchup = derive_matchup_from_subtitles(lt, yes_sub, no_sub)
             if not matchup:
                 drops["matchup_parse_failed"] += 1
-                if debug_mode and len(debug_unmatched) < debug_max:
+                if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
                             "reason": "matchup_parse_failed",
@@ -1598,11 +1660,11 @@ def scan() -> int:
 
             team_a, team_b = matchup
             ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
-            match_threshold = 0.0 if debug_mode else 1.30
+            match_threshold = 0.0 if debug_loose else 1.30
             odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
             if not odds_event:
                 drops["odds_match_failed"] += 1
-                if len(debug_unmatched) < debug_max:
+                if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
                             "series_ticker": st,
@@ -1627,7 +1689,7 @@ def scan() -> int:
                             "kalshi_market": m,
                         }
                     )
-                if debug_mode and len(debug_candidates) < debug_max:
+                if debug_log and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
                             "reason": "odds_event_match_failed",
@@ -1657,7 +1719,7 @@ def scan() -> int:
             team_for_books = str(line.get("team") or "")
             team_map_score = None
             if lt in ("h2h", "spread"):
-                min_map = 0.55 if debug_mode else 0.72
+                min_map = 0.55 if debug_loose else 0.72
                 team_for_books, team_map_score = map_team_to_event_team(
                     team_for_books,
                     odds_event,
@@ -1665,7 +1727,7 @@ def scan() -> int:
                 )
             if not team_for_books:
                 drops["team_map_failed"] += 1
-                if debug_mode and len(debug_candidates) < debug_max:
+                if debug_log and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
                             "reason": "team_map_failed",
@@ -1708,7 +1770,7 @@ def scan() -> int:
 
             if not fair_yes:
                 drops["fair_prob_unavailable"] += 1
-                if debug_mode and len(debug_candidates) < debug_max:
+                if debug_log and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
                             "reason": "fair_prob_unavailable",
@@ -1744,7 +1806,7 @@ def scan() -> int:
             # In normal mode, use it as a fallback when snapshot asks are missing.
             want_orderbook = False
             if use_orderbook and market_ticker:
-                want_orderbook = debug_mode or (yes_buy is None or no_buy is None)
+                want_orderbook = (debug_mode or no_filters) or (yes_buy is None or no_buy is None)
 
             if want_orderbook and orderbook_calls < orderbook_max_calls:
                 try:
@@ -1755,7 +1817,7 @@ def scan() -> int:
                     if ob_no_buy is not None:
                         no_buy = ob_no_buy
                 except Exception as exc:
-                    if debug_mode and len(debug_unmatched) < debug_max:
+                    if debug_log and len(debug_unmatched) < debug_max:
                         debug_unmatched.append(
                             {
                                 "reason": "orderbook_error",
@@ -1801,7 +1863,7 @@ def scan() -> int:
             if best_side is None or best_all_in is None or best_fair_side is None:
                 continue
 
-            if (not debug_mode) and best_edge < min_edge:
+            if (not debug_mode) and (not no_filters) and best_edge < min_edge:
                 drops["edge_below_min"] += 1
                 continue
 
@@ -1894,7 +1956,7 @@ def scan() -> int:
     _write_jsonl(unmatched_path, debug_unmatched)
     _copy_text(matched_path, matched_latest)
     _copy_text(unmatched_path, unmatched_latest)
-    if debug_mode:
+    if debug_artifacts:
         _write_jsonl(candidates_path, debug_candidates)
         _copy_text(candidates_path, candidates_latest)
     _write_json(series_counts_path, debug_series_counts)
@@ -1911,7 +1973,7 @@ def scan() -> int:
     run_meta["debug_matched_rows"] = len(debug_matched)
     run_meta["debug_unmatched_rows"] = len(debug_unmatched)
     run_meta["debug_series_count_rows"] = len(debug_series_counts)
-    if debug_mode:
+    if debug_artifacts:
         run_meta["debug_candidates_rows"] = len(debug_candidates)
     _write_json(meta_path, run_meta)
     _copy_text(meta_path, meta_latest)
