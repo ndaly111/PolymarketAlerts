@@ -33,6 +33,11 @@ on:
         description: "Minimum edge (probability points; 0.03 = 3pp)"
         required: false
         default: "0.03"
+      min_volume:
+        description: "Minimum Kalshi volume to include (0 disables volume filter)"
+        type: choice
+        options: ["0", "250", "500", "1000", "2000", "5000"]
+        default: "1000"
       debug_mode:
         description: "Debug: write extra artifacts and skip Discord"
         type: choice
@@ -110,7 +115,8 @@ jobs:
           KALSHI_LOOKAHEAD_HOURS: ${{ vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
           KALSHI_GAME_LOOKAHEAD_HOURS: ${{ vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
           KALSHI_BUY_FEE_CENTS: ${{ vars.KALSHI_BUY_FEE_CENTS || '2' }}
-          KALSHI_MIN_VOLUME: ${{ vars.KALSHI_MIN_VOLUME || '1000' }}
+          # Allow per-run override via workflow input; fallback to repo Variable; final fallback to 1000
+          KALSHI_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || vars.KALSHI_MIN_VOLUME || '1000' }}
           KALSHI_USE_ORDERBOOK: ${{ vars.KALSHI_USE_ORDERBOOK || 'true' }}
           KALSHI_ORDERBOOK_MAX_CALLS: ${{ vars.KALSHI_ORDERBOOK_MAX_CALLS || '300' }}
           KALSHI_SERIES_MIN_SCORE: ${{ vars.KALSHI_SERIES_MIN_SCORE || '8' }}
