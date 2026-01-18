@@ -20,6 +20,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -86,6 +87,27 @@ def env_bool(name: str, default: bool = False) -> bool:
     if s in ("0", "false", "f", "no", "n", "off", ""):
         return False
     return default
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    s = str(value).strip()
+    # Odds API commonly uses trailing 'Z' to mean UTC
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def iso_to_ts(value: str) -> Optional[int]:
+    dt = _parse_iso(value)
+    return int(dt.timestamp()) if dt else None
 
 
 # -----------------------------
@@ -417,17 +439,92 @@ def best_buy_probs(market: Dict[str, Any]) -> Tuple[Optional[float], Optional[fl
     """
     yes_ask = cents_to_prob(market.get("yes_ask"))
     no_ask = cents_to_prob(market.get("no_ask"))
+    # Newer API responses may provide *_dollars instead of cent fields.
+    if yes_ask is None:
+        yes_ask = _price_to_prob(market.get("yes_ask_dollars"))
+    if no_ask is None:
+        no_ask = _price_to_prob(market.get("no_ask_dollars"))
 
     if yes_ask is None:
         no_bid = cents_to_prob(market.get("no_bid"))
+        if no_bid is None:
+            no_bid = _price_to_prob(market.get("no_bid_dollars"))
         if no_bid is not None:
             yes_ask = max(0.0, 1.0 - no_bid)
 
     if no_ask is None:
         yes_bid = cents_to_prob(market.get("yes_bid"))
+        if yes_bid is None:
+            yes_bid = _price_to_prob(market.get("yes_bid_dollars"))
         if yes_bid is not None:
             no_ask = max(0.0, 1.0 - yes_bid)
 
+    return yes_ask, no_ask
+
+
+def _price_to_prob(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        # Kalshi orderbook_fp uses dollars like "0.1500" for 15c (15%).
+        if isinstance(x, str):
+            v = float(x)
+        else:
+            v = float(x)
+        if v > 1.0:
+            # Sometimes APIs return cents; treat >1 as cents.
+            v = v / 100.0
+        return max(0.0, min(1.0, v))
+    except Exception:
+        return None
+
+
+def best_buy_probs_from_orderbook(session: requests.Session, market_ticker: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Derive best-buy YES and NO probabilities from the CLOB (orderbook).
+    On Kalshi, the orderbook is bids for YES and bids for NO. Best-buy price for:
+      - YES is 1 - (best NO bid)
+      - NO  is 1 - (best YES bid)
+    """
+    ob = kalshi_get(session, f"/markets/{market_ticker}/orderbook", params={"depth": 1})
+
+    # Prefer floating-point orderbook if present.
+    fp = (ob or {}).get("orderbook_fp") or {}
+    yes_levels = fp.get("yes_dollars") or []
+    no_levels = fp.get("no_dollars") or []
+
+    # Fallback to raw orderbook.
+    if not yes_levels and not no_levels:
+        raw = (ob or {}).get("orderbook") or {}
+        # Some responses include *_dollars inside `orderbook`
+        yes_levels = raw.get("yes_dollars") or raw.get("yes") or []
+        no_levels = raw.get("no_dollars") or raw.get("no") or []
+
+    def best_bid(levels: Any) -> Optional[float]:
+        """
+        Robust: docs show price levels are ordered, but we don't assume direction.
+        We take the max price level as the best bid.
+        """
+        best: Optional[float] = None
+        if not levels:
+            return None
+        for lvl in levels:
+            p = None
+            if isinstance(lvl, dict):
+                p = _price_to_prob(lvl.get("price") or lvl.get("p"))
+            elif isinstance(lvl, (list, tuple)) and len(lvl) >= 1:
+                p = _price_to_prob(lvl[0])
+            if p is None:
+                continue
+            if best is None or p > best:
+                best = p
+        return best
+
+    yes_bid = best_bid(yes_levels)
+    no_bid = best_bid(no_levels)
+
+    yes_ask = (max(0.0, min(1.0, 1.0 - no_bid))) if no_bid is not None else None
+    no_ask = (max(0.0, min(1.0, 1.0 - yes_bid))) if yes_bid is not None else None
     return yes_ask, no_ask
 
 
@@ -629,6 +726,8 @@ class Row:
     market_title: str
     line_type: str
     line_label: str
+    commence_time_iso: str
+    kalshi_volume: int
     books_used: int
     url: str
 
@@ -648,6 +747,8 @@ def to_dict(r: Row) -> Dict[str, Any]:
         "market_title": r.market_title,
         "line_type": r.line_type,
         "line_label": r.line_label,
+        "commence_time_iso": r.commence_time_iso,
+        "kalshi_volume": r.kalshi_volume,
         "books_used": r.books_used,
         "url": r.url,
     }
@@ -667,6 +768,8 @@ FIELDNAMES = [
     "market_title",
     "line_type",
     "line_label",
+    "commence_time_iso",
+    "kalshi_volume",
     "books_used",
     "url",
 ]
@@ -708,6 +811,9 @@ def scan() -> int:
     fee_prob = fee_cents / 100.0
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
+    game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
+    min_volume = env_int("KALSHI_MIN_VOLUME", 1000)
+    use_orderbook = env_bool("KALSHI_USE_ORDERBOOK", True)
     now_ts = int(time.time())
     max_close_ts = now_ts + lookahead_hours * 3600
     min_close_buffer_hours = env_int("KALSHI_MIN_CLOSE_BUFFER_HOURS", 0)
@@ -728,6 +834,9 @@ def scan() -> int:
         "stamp_utc": stamp,
         "fee_cents": fee_cents,
         "lookahead_hours": lookahead_hours,
+        "game_lookahead_hours": game_lookahead_hours,
+        "min_volume": min_volume,
+        "use_orderbook": use_orderbook,
         "min_edge": min_edge,
         "top_n": top_n,
         "debug_mode": debug_mode,
@@ -776,6 +885,36 @@ def scan() -> int:
         _copy_text(meta_path, meta_latest)
         print("No sportsbook events returned from The Odds API (check THE_ODDS_API / quota).")
         return 2
+
+    max_game_ts = now_ts + int(game_lookahead_hours * 3600)
+    filtered_events = []
+    for ev in odds_events:
+        commence_time = str(ev.get("commence_time") or "")
+        ct = iso_to_ts(commence_time)
+        if ct is None:
+            continue
+        if ct <= now_ts:
+            continue
+        if ct > max_game_ts:
+            continue
+        filtered_events.append(ev)
+    odds_events = filtered_events
+
+    if not odds_events:
+        run_meta["status"] = "error_no_odds_events_in_window"
+        _write_json(meta_path, run_meta)
+        _copy_text(meta_path, meta_latest)
+        print("No sportsbook events within the lookahead window after filtering.")
+        webhook = env_str("DISCORD_WEBHOOK_URL", "")
+        always_notify = env_bool("ALWAYS_NOTIFY", False)
+        if webhook and always_notify:
+            post_discord(
+                webhook,
+                (
+                    f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
+                ),
+            )
+        return 0
 
     # Fail fast if Kalshi auth isn't present (trade-api/v2 requires signed requests).
     has_key_id = bool((os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip())
@@ -982,6 +1121,19 @@ def scan() -> int:
                 or ""
             )
             subtitle = str(m.get("subtitle") or "").strip()
+            raw_vol = (
+                m.get("volume")
+                or m.get("volume_24h")
+                or m.get("volume_fp")
+                or m.get("volume_24h_fp")
+                or 0
+            )
+            try:
+                vol = int(float(str(raw_vol).replace(",", "")))
+            except Exception:
+                vol = 0
+            if not debug_mode and vol < min_volume:
+                continue
 
             lt = infer_line_type(st, market_ticker, market_title) or infer_line_type_from_subtitles(yes_sub, no_sub)
             if lt is None:
@@ -1019,24 +1171,26 @@ def scan() -> int:
                     )
                 continue
 
-            # Resolve event title (to get matchup) - prefer subtitle if present.
-            event_title = subtitle
+            # Resolve event title (to get matchup).
+            # Only trust subtitle if it parses as a matchup; otherwise fetch the event title.
+            event_title = ""
+            if subtitle and parse_matchup(subtitle):
+                event_title = subtitle
             if event_ticker:
-                if event_title and not event_title_cache.get(event_ticker):
-                    event_title_cache[event_ticker] = event_title
+                cached_title = event_title_cache.get(event_ticker, "")
+                if not event_title and cached_title:
+                    event_title = cached_title
                 if not event_title:
-                    cached_title = event_title_cache.get(event_ticker, "")
-                    if cached_title:
-                        event_title = cached_title
-                    else:
-                        ev = get_event(session, event_ticker)
-                        fetched_title = ""
-                        if ev and isinstance(ev, dict):
-                            eobj = ev.get("event") if "event" in ev else ev
-                            fetched_title = str((eobj or {}).get("title") or "")
-                        if fetched_title:
-                            event_title = fetched_title
+                    ev = get_event(session, event_ticker)
+                    fetched_title = ""
+                    if ev and isinstance(ev, dict):
+                        eobj = ev.get("event") if "event" in ev else ev
+                        fetched_title = str((eobj or {}).get("title") or "")
+                    if fetched_title:
                         event_title_cache[event_ticker] = fetched_title
+                        event_title = fetched_title
+                elif event_title and not cached_title:
+                    event_title_cache[event_ticker] = event_title
 
             if not event_title:
                 # Some responses include nested event dict
@@ -1201,6 +1355,27 @@ def scan() -> int:
 
             # Kalshi buy prices (asks)
             yes_buy, no_buy = best_buy_probs(m)
+            # If snapshot prices are missing (or even if present), optionally refine via orderbook.
+            # IMPORTANT: do this BEFORE bailing out, since newer APIs may omit yes_ask/no_ask cent fields.
+            if use_orderbook and market_ticker and (yes_buy is None or no_buy is None):
+                try:
+                    ob_yes_buy, ob_no_buy = best_buy_probs_from_orderbook(session, market_ticker)
+                    if ob_yes_buy is not None:
+                        yes_buy = ob_yes_buy
+                    if ob_no_buy is not None:
+                        no_buy = ob_no_buy
+                except Exception as exc:
+                    if debug_mode and len(debug_unmatched) < debug_max:
+                        debug_unmatched.append(
+                            {
+                                "reason": "orderbook_error",
+                                "series_ticker": st,
+                                "event_title": event_title or "",
+                                "market_title": market_title,
+                                "market_ticker": market_ticker,
+                                "error": str(exc),
+                            }
+                        )
             if yes_buy is None and no_buy is None:
                 continue
 
@@ -1285,6 +1460,8 @@ def scan() -> int:
                     market_title=market_title,
                     line_type=lt,
                     line_label=str(line.get("label") or ""),
+                    commence_time_iso=str(odds_event.get("commence_time") or ""),
+                    kalshi_volume=vol,
                     books_used=books_used,
                     url=kalshi_market_url(market_ticker),
                 )
@@ -1355,19 +1532,66 @@ def scan() -> int:
         if not rows:
             post_discord(
                 webhook,
-                f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, lookahead {lookahead_hours}h).",
+                (
+                    f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
+                    f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, vol≥{min_volume})."
+                ),
             )
             return 0
+
+        def fmt_start(iso: str) -> str:
+            dt = _parse_iso(iso)
+            if not dt:
+                return ""
+            et = dt.astimezone(ZoneInfo("America/New_York"))
+            return et.strftime("%b %d %I:%M %p ET")
+
+        grouped: Dict[Tuple[str, str], List[Row]] = {}
+        for r in rows:
+            grouped.setdefault((r.event_title, r.commence_time_iso), []).append(r)
+
         lines: List[str] = []
-        lines.append(f"**Kalshi value ({len(rows)} plays, min {min_edge*100:.1f}pp, fee +{fee_cents}¢)**")
-        for i, r in enumerate(rows[: min(10, len(rows))], start=1):
-            all_in_c = int(round(r.all_in_buy_prob * 100))
-            fair_pct = r.fair_prob_side * 100.0
-            edge_pp = r.edge * 100.0
-            desc = (f"{r.line_type.upper()} {r.line_label}").strip()
-            lines.append(
-                f"{i}. {r.event_title} — {desc} | BUY {r.side_to_buy} {all_in_c}¢ | fair {fair_pct:.1f}% | +{edge_pp:.1f}pp | {r.url}"
+        lines.append(
+            (
+                f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, "
+                f"games ≤{game_lookahead_hours}h, vol≥{min_volume})."
             )
+        )
+
+        game_items = sorted(
+            grouped.items(),
+            key=lambda kv: max(x.edge for x in kv[1]),
+            reverse=True,
+        )
+        # Keep Discord payload readable and non-truncating
+        max_len = 1850
+        cur_len = sum(len(x) + 1 for x in lines)
+        for (title, iso), items in game_items:
+            items.sort(key=lambda x: x.edge, reverse=True)
+            start = fmt_start(iso)
+            header = f"\n**{title}** — {start}" if start else f"\n**{title}**"
+            if cur_len + len(header) + 1 > max_len:
+                break
+            lines.append(header)
+            cur_len += len(header) + 1
+            for it in items:
+                buy_cents = int(round(it.all_in_buy_prob * 100))
+                fair_cents = int(round(it.fair_prob_side * 100))
+                line1 = (
+                    f"- {it.line_type.upper()} {it.line_label}: buy {it.side_to_buy} @{buy_cents}¢ "
+                    f"vs fair {fair_cents}¢ → **+{it.edge*100:.1f}pp** | vol {it.kalshi_volume} | "
+                    f"books {it.books_used}"
+                )
+                line2 = f"  {it.url}"
+                if cur_len + len(line1) + len(line2) + 2 > max_len:
+                    break
+                lines.append(line1)
+                cur_len += len(line1) + 1
+                lines.append(line2)
+                cur_len += len(line2) + 1
+
+        if cur_len <= max_len - 80:
+            lines.append("\n*(If this looks cut short, see workflow artifacts for the full CSV/JSON.)*")
 
         post_discord(webhook, "\n".join(lines))
     elif webhook and not rows:
