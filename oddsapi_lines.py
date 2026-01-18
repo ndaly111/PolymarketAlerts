@@ -27,7 +27,9 @@ def american_to_prob(odds: int) -> float:
     return 100.0 / (odds + 100.0)
 
 
-def normalize_team_name(s: str) -> str:
+def normalize_team_name(s: Optional[str]) -> str:
+    if not s:
+        return ""
     return (
         s.lower()
         .replace("&", "and")
