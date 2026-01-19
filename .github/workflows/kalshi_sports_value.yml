@@ -34,9 +34,14 @@ on:
         required: false
         default: "0.03"
       min_volume:
-        description: "Minimum Kalshi volume to include (0 disables volume filter)"
+        description: "Minimum Kalshi volume to include (ignored when volume_filter=false)"
         required: false
         default: "1000"
+      volume_filter:
+        description: "Enable volume filter (min_volume). If false, ignores min_volume."
+        type: choice
+        options: ["true", "false"]
+        default: "true"
       master_debug:
         description: "MASTER DEBUG: save raw Kalshi API request/response artifacts (secrets redacted)"
         type: choice
@@ -60,13 +65,13 @@ on:
         required: false
         default: "24"
       lookahead_hours:
-        description: "Kalshi market close-time lookahead window in hours (set 0 to disable)"
+        description: "Kalshi game-start lookahead window in hours (keep aligned with game_lookahead_hours)"
         required: false
-        default: "72"
+        default: "24"
       buy_fee_cents:
-        description: "Kalshi buy fee in cents per contract (e.g., 2)"
+        description: "Buy fee override in cents (0 = Kalshi schedule)"
         required: false
-        default: "2"
+        default: "0"
       debug_mode:
         description: "Debug: write extra artifacts and skip Discord"
         type: choice
@@ -78,7 +83,7 @@ on:
         options: ["false", "true"]
         default: "false"
       no_filters:
-        description: "Disable most filters / widen windows (debugging: get anything to show)"
+        description: "Disable edge threshold only (still respects windows/books/volume)"
         required: false
         type: choice
         options: ["false", "true"]
@@ -138,7 +143,7 @@ jobs:
           # Official base host default; override via repo var if you ever need to.
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
-          SPORT_KEYS: ${{ github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
+          SPORT_KEYS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event_name == 'workflow_dispatch' && github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || vars.KALSHI_SPORT_KEYS || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
 
           TOP_N: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.top_n) || vars.KALSHI_TOP_N || '25' }}
           MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.03' }}
@@ -148,11 +153,11 @@ jobs:
 
           # Allow per-run overrides (workflow_dispatch); otherwise use repo Variables/defaults
           MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '3' }}
-          KALSHI_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lookahead_hours || vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
+          KALSHI_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lookahead_hours || vars.KALSHI_LOOKAHEAD_HOURS || '24' }}
           KALSHI_GAME_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.game_lookahead_hours || vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
-          KALSHI_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_fee_cents || vars.KALSHI_BUY_FEE_CENTS || '2' }}
-          KALSHI_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || vars.KALSHI_MIN_VOLUME || '1000' }}
-          KALSHI_VOLUME_MISSING_POLICY: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.volume_missing_policy) || vars.KALSHI_VOLUME_MISSING_POLICY || 'include' }}
+          KALSHI_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_fee_cents || vars.KALSHI_BUY_FEE_CENTS || '0' }}
+          KALSHI_MIN_VOLUME: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.volume_filter == 'false') && '0' || (github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume) || vars.KALSHI_MIN_VOLUME || '1000' }}
+          KALSHI_VOLUME_MISSING_POLICY: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.volume_filter == 'false') && 'include' || (github.event_name == 'workflow_dispatch' && github.event.inputs.volume_missing_policy) || vars.KALSHI_VOLUME_MISSING_POLICY || 'include' }}
           MASTER_DEBUG: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.master_debug) || vars.KALSHI_MASTER_DEBUG || 'false' }}
           MASTER_DEBUG_MAX: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.master_debug_max) || vars.KALSHI_MASTER_DEBUG_MAX || '250' }}
           # Optional: cap each saved response size (KB). Set as a repo var if you want.
