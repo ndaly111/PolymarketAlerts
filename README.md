@@ -70,11 +70,25 @@ This repo now includes a **separate** workflow and script to scan Kalshi sports 
 
 It compares Kalshi prices vs sportsbook consensus (The Odds API), calculates a no-vig fair probability, and reports the biggest gaps.
 
-### Important: +3¢ Kalshi opening fee
+### Important: Kalshi opening fee
 
-Kalshi charges a flat fee when you **open** (buy) a contract. The scanner accounts for this by adding `KALSHI_BUY_FEE_CENTS` (default **3**) to the **YES or NO** buy price before computing edge.
+Kalshi charges a taker fee based on price and rounded up to the nearest cent. By default `KALSHI_BUY_FEE_CENTS=0` to use the schedule; set a positive value to force a fixed per-contract fee override.
 
-Example: if a contract is listed at **72¢**, the scanner treats it as **75¢ all-in** when evaluating value.
+Example: if a contract is listed at **72¢**, the scanner adds the schedule fee (or your override) to compute the all-in price before evaluating value.
+
+### Matching Kalshi games to Odds API events
+
+The scanner matches Kalshi markets to The Odds API by (1) normalized team-name similarity and (2) game start time proximity.
+If matching is too strict/loose for a league, you can set:
+- `KALSHI_EVENT_TIME_TOLERANCE_HOURS` (int, default 36): max allowed start-time difference when selecting the best Odds API event.
+- `KALSHI_MIN_TEAM_MATCH_SCORE` (float, default 1.30): minimum combined team similarity score.
+- `KALSHI_MIN_TEAM_NAME_SCORE` (float, default 0.65): minimum per-team similarity score.
+
+### Volume filter toggle (manual runs)
+
+The workflow has a `volume_filter` input:
+- `true` (default): enforce `min_volume`
+- `false`: ignores `min_volume` by setting `KALSHI_MIN_VOLUME=0` and forces `KALSHI_VOLUME_MISSING_POLICY=include`
 
 ### Run in GitHub Actions
 
@@ -88,5 +102,6 @@ Secrets used:
 
 Optional:
 - `KALSHI_BASE` (repo variable recommended): Kalshi trade API base URL. If you set only the host, the script will append `/trade-api/v2`.
+- `KALSHI_SPORT_KEYS` (repo variable): default Odds API sport keys for scheduled runs.
 
 Manual inputs let you change sport keys, edge thresholds, lookahead window, fee cents, and (optionally) the Kalshi series tickers.

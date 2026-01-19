@@ -4,8 +4,8 @@ Compares Kalshi *lines* (moneyline, spread, total) vs sportsbook consensus from 
 
 Key behavior:
 - We consider both opening sides: BUY YES or BUY NO.
-- Opening a position on Kalshi has a flat per-contract fee (default +2 cents).
-  We incorporate that by adding +fee_cents to the Kalshi buy price before converting to probability.
+- Opening a position on Kalshi includes a taker fee based on price, unless overridden.
+  We incorporate that by adding the fee (fixed or schedule-based) to the Kalshi buy price before converting to probability.
 
 This scanner is intentionally separate from the Polymarket workflows.
 """
@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import base64
 import csv
+import math
 import itertools
 import json
 import os
 import re
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -35,7 +36,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from oddsapi_lines import (
-    build_event_index,
     env_min_books,
     env_sport_keys,
     fair_prob_h2h,
@@ -112,6 +112,25 @@ def iso_to_ts(value: str) -> Optional[int]:
     return int(dt.timestamp()) if dt else None
 
 
+def _epochish_to_ts(value: Any) -> Optional[int]:
+    """Convert epoch seconds or milliseconds (or ISO string) to unix seconds."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        x = float(value)
+        if x <= 0:
+            return None
+        if x >= 1e11:
+            return int(x // 1000)
+        return int(x)
+    s = str(value).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return _epochish_to_ts(int(s))
+    return iso_to_ts(s)
+
+
 def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
     """Return market close time (unix seconds) if present.
 
@@ -122,13 +141,12 @@ def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
     """
     try:
         if "close_ts" in market and market["close_ts"] is not None:
-            return int(market["close_ts"])
+            return _epochish_to_ts(market["close_ts"])
     except Exception:
         pass
     try:
         if "close_time" in market and market["close_time"]:
-            ts = iso_to_ts(str(market["close_time"]))
-            return int(ts) if ts is not None else None
+            return _epochish_to_ts(market["close_time"])
     except Exception:
         pass
     return None
@@ -842,6 +860,7 @@ class Row:
     fee_cents: int
     edge: float
     side_to_buy: str
+    buy_prob_side: float
     all_in_buy_prob: float
     fair_prob_side: float
     fair_prob_yes: float
@@ -863,6 +882,7 @@ def to_dict(r: Row) -> Dict[str, Any]:
         "fee_cents": r.fee_cents,
         "edge": r.edge,
         "side_to_buy": r.side_to_buy,
+        "buy_prob_side": r.buy_prob_side,
         "all_in_buy_prob": r.all_in_buy_prob,
         "fair_prob_side": r.fair_prob_side,
         "fair_prob_yes": r.fair_prob_yes,
@@ -884,6 +904,7 @@ FIELDNAMES = [
     "fee_cents",
     "edge",
     "side_to_buy",
+    "buy_prob_side",
     "all_in_buy_prob",
     "fair_prob_side",
     "fair_prob_yes",
@@ -925,27 +946,48 @@ def _copy_text(src: str, dst: str) -> None:
         pass
 
 
+
+def kalshi_fee_cents(price_prob: float, contracts: int = 1, fee_multiplier: float = 0.07) -> int:
+    """
+    Kalshi taker fee schedule (Binary Event Contracts):
+      fee = roundup(theta * C * P * (1 - P)) [rounded up to nearest cent]
+    """
+    c = int(contracts)
+    if c <= 0:
+        return 0
+    p = float(price_prob)
+    if p <= 0.0 or p >= 1.0:
+        return 0
+    theta = float(fee_multiplier)
+    if theta <= 0:
+        return 0
+    fee_dollars = theta * c * p * (1.0 - p)
+    return int(math.ceil(fee_dollars * 100.0 - 1e-12))
+
+
+
 def _redact_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     """Remove/replace sensitive headers before writing artifacts."""
     if not headers:
         return {}
-    redacted_keys = {
+    redact_tokens = (
         "authorization",
         "cookie",
         "set-cookie",
-        "x-api-key",
-        "apikey",
         "api-key",
+        "apikey",
+        "token",
+        "secret",
         "signature",
-        "x-signature",
-        "kalshi-key-id",
-        "kalshi-timestamp",
-        "kalshi-signature",
-    }
+        "sig",
+        "private",
+        "kalshi",
+        "bearer",
+    )
     out: Dict[str, Any] = {}
     for k, v in headers.items():
         lk = str(k).lower()
-        if lk in redacted_keys:
+        if any(token in lk for token in redact_tokens):
             out[k] = "REDACTED"
         else:
             out[k] = v
@@ -1021,14 +1063,24 @@ def _attach_master_debug(
     }
 
     def hook(resp: requests.Response, *args: Any, **kwargs: Any) -> requests.Response:
+        try:
+            req = resp.request
+            safe_url = _redact_url(getattr(req, "url", "") or "")
+            try:
+                host = (urlparse(safe_url).netloc or "").lower()
+                if "kalshi.com" not in host:
+                    return resp
+            except Exception:
+                return resp
+        except Exception:
+            return resp
+
         n = next(counter)
         if n > max_requests:
             stats["skipped_over_max"] += 1
             return resp
 
         try:
-            req = resp.request
-            safe_url = _redact_url(getattr(req, "url", "") or "")
             stem = _safe_stem_from_url(safe_url)
             base = f"{n:04d}_{stem}"
 
@@ -1132,11 +1184,10 @@ def scan() -> int:
     stamp = now_dt_utc.strftime("%Y%m%d_%H%M%SZ")
 
     debug_max = env_int("KALSHI_DEBUG_MAX", 50)  # keep artifacts small; bump if needed
+    fee_cents_override = max(0, env_int("KALSHI_BUY_FEE_CENTS", 0))
+    fee_multiplier = env_float("KALSHI_FEE_MULTIPLIER", 0.07)
 
-    fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 2)
-    fee_prob = fee_cents / 100.0
-
-    lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
+    lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 24)
     game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
     min_volume = env_int("KALSHI_MIN_VOLUME", 1000)
     volume_missing_policy = env_str("KALSHI_VOLUME_MISSING_POLICY", "include").strip().lower()
@@ -1149,6 +1200,10 @@ def scan() -> int:
     use_orderbook = env_bool("KALSHI_USE_ORDERBOOK", True)
     orderbook_max_calls = env_int("KALSHI_ORDERBOOK_MAX_CALLS", 300)
     orderbook_calls = 0
+    event_time_tolerance_hours = env_int("KALSHI_EVENT_TIME_TOLERANCE_HOURS", 36)
+    event_time_tolerance_sec = max(0, event_time_tolerance_hours) * 3600
+    min_team_match_score = env_float("KALSHI_MIN_TEAM_MATCH_SCORE", 1.30)
+    min_team_name_score = env_float("KALSHI_MIN_TEAM_NAME_SCORE", 0.65)
     now_ts = int(now_dt_utc.timestamp())
     time_time_ts = int(time.time())
     clock_skew_seconds = time_time_ts - now_ts
@@ -1162,16 +1217,16 @@ def scan() -> int:
     no_filters = env_bool("KALSHI_NO_FILTERS", False) or env_bool("NO_FILTERS", False)
     debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
     debug_wide_scan = env_bool("KALSHI_DEBUG_WIDE_SCAN", False)
-    debug_artifacts = debug_mode or env_bool("KALSHI_DEBUG_ARTIFACTS", False) or no_filters
-    debug_loose = debug_mode or no_filters
+    debug_artifacts = debug_mode or env_bool("KALSHI_DEBUG_ARTIFACTS", False)
+    debug_loose = debug_mode
     debug_log = debug_mode or debug_artifacts
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
-    include_unknown_volume = True if no_filters else (volume_missing_policy != "exclude")
-    min_books_effective = 1 if (debug_mode or no_filters) else min_books
-    min_volume_effective = 0 if (debug_mode or no_filters) else min_volume
-    if no_filters or debug_wide_scan or lookahead_hours <= 0:
+    include_unknown_volume = (volume_missing_policy != "exclude")
+    min_books_effective = 1 if debug_mode else min_books
+    min_volume_effective = 0 if debug_mode else min_volume
+    if debug_wide_scan or lookahead_hours <= 0:
         max_close_ts_effective = None
         min_close_ts_effective = None
     else:
@@ -1184,7 +1239,9 @@ def scan() -> int:
         "now_ts": now_ts,
         "time_time_ts": time_time_ts,
         "clock_skew_seconds": clock_skew_seconds,
-        "fee_cents": fee_cents,
+        "fee_cents_override": fee_cents_override,
+        "fee_mode": ("fixed" if fee_cents_override > 0 else "kalshi_schedule"),
+        "fee_multiplier": fee_multiplier,
         "lookahead_hours": lookahead_hours,
         "game_lookahead_hours": game_lookahead_hours,
         "min_volume": min_volume,
@@ -1214,6 +1271,9 @@ def scan() -> int:
         "kalshi_base": _kalshi_base_url(),
         "mve_filter": mve_filter,
         "orderbook_max_calls": orderbook_max_calls,
+        "event_time_tolerance_hours": event_time_tolerance_hours,
+        "min_team_match_score": min_team_match_score,
+        "min_team_name_score": min_team_name_score,
         "status": "starting",
     }
 
@@ -1232,9 +1292,6 @@ def scan() -> int:
         "KALSHI_SPORTS_SERIES_EXCLUDE_REGEX",
         r"(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\s*\d)",
     )
-    if no_filters:
-        include_pat = r".*"
-        exclude_pat = r"^$"
     include_re = re.compile(include_pat, re.IGNORECASE)
     exclude_re = re.compile(exclude_pat, re.IGNORECASE)
 
@@ -1255,7 +1312,7 @@ def scan() -> int:
         return 2
 
     max_game_ts: Optional[int]
-    if no_filters or game_lookahead_hours <= 0:
+    if game_lookahead_hours <= 0:
         max_game_ts = None
     else:
         max_game_ts = now_ts + int(game_lookahead_hours * 3600)
@@ -1286,6 +1343,71 @@ def scan() -> int:
                 msg = f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
             post_discord(webhook, msg)
         return 0
+
+    # Align Kalshi market window with sportsbook window to avoid scanning markets
+    # that we can never match (because we didn't fetch those games from Odds API).
+    if (max_game_ts is not None) and (max_close_ts_effective is not None):
+        max_close_ts_effective = min(
+            int(max_close_ts_effective),
+            int(max_game_ts + event_time_tolerance_sec),
+        )
+        run_meta["max_close_ts"] = max_close_ts_effective
+
+    odds_by_day: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for ev in odds_events:
+        ts = iso_to_ts(str(ev.get("commence_time") or ""))
+        if ts is None:
+            continue
+        odds_by_day[ts // 86400].append(ev)
+
+    def _time_score(kalshi_ts: int, odds_ts: int, tol_sec: int) -> float:
+        if tol_sec <= 0:
+            return 0.0
+        delta = abs(int(kalshi_ts) - int(odds_ts))
+        if delta >= tol_sec:
+            return 0.0
+        return 1.0 - (delta / tol_sec)
+
+    def rank_odds_candidates(
+        team_a: str, team_b: str, kalshi_ts: int, tol_sec: int, top_k: int = 5
+    ) -> List[Tuple[float, Dict[str, Any]]]:
+        day = kalshi_ts // 86400
+        day_span = 1
+        if tol_sec and tol_sec > 0:
+            day_span = max(1, int(math.ceil(tol_sec / 86400.0)))
+        ev_candidates: List[Dict[str, Any]] = []
+        for d in range(-day_span, day_span + 1):
+            ev_candidates.extend(odds_by_day.get(day + d, []))
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for ev in ev_candidates:
+            odds_ts = iso_to_ts(str(ev.get("commence_time") or ""))
+            if odds_ts is None:
+                continue
+            if tol_sec > 0 and abs(int(odds_ts) - int(kalshi_ts)) > tol_sec:
+                continue
+            home = ev.get("home_team")
+            away = ev.get("away_team")
+            if not home or not away:
+                continue
+            s1_a = name_similarity(team_a, str(home))
+            s1_b = name_similarity(team_b, str(away))
+            s2_a = name_similarity(team_a, str(away))
+            s2_b = name_similarity(team_b, str(home))
+            pair_scores: List[float] = []
+            if debug_mode or min(s1_a, s1_b) >= min_team_name_score:
+                pair_scores.append(s1_a + s1_b)
+            if debug_mode or min(s2_a, s2_b) >= min_team_name_score:
+                pair_scores.append(s2_a + s2_b)
+            if not pair_scores:
+                continue
+            team_score = max(pair_scores)
+            if team_score < min_team_match_score and not debug_mode:
+                continue
+            time_score = _time_score(kalshi_ts, odds_ts, tol_sec)
+            score = team_score + (0.25 * time_score)
+            scored.append((float(score), ev))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[: max(1, int(top_k))]
 
     # Fail fast if Kalshi auth isn't present (trade-api/v2 requires signed requests).
     has_key_id = bool((os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip())
@@ -1384,8 +1506,6 @@ def scan() -> int:
         sport_words = _sport_words_from_sport_keys(sport_keys)
         team_tokens = _team_tokens_from_odds_events(odds_events)
         series_min_score = env_int("KALSHI_SERIES_MIN_SCORE", 8)
-        if no_filters:
-            series_min_score = -999
         run_meta["series_league_tokens"] = league_tokens
         run_meta["series_sport_words"] = sport_words
         run_meta["series_team_tokens_count"] = len(team_tokens)
@@ -1457,10 +1577,82 @@ def scan() -> int:
 
     run_meta["series_count"] = len(series)
     run_meta["status"] = "running"
-    print(f"Using {len(series)} Kalshi series tickers. Lookahead: {lookahead_hours}h. Fee: +{fee_cents}c")
+    if fee_cents_override > 0:
+        fee_msg = f"+{fee_cents_override}c"
+    else:
+        fee_msg = "Kalshi schedule"
+    print(f"Using {len(series)} Kalshi series tickers. Lookahead: {lookahead_hours}h. Fee: {fee_msg}")
 
-    # Cache event titles by ticker (avoid repeated calls)
-    event_title_cache: Dict[str, str] = {}
+    # Cache event info by ticker (avoid repeated calls)
+    event_info_cache: Dict[str, Dict[str, Any]] = {}
+
+    def get_kalshi_event_info(event_ticker: str) -> Dict[str, Any]:
+        if not event_ticker:
+            return {"title": "", "start_ts": None, "start_raw": ""}
+        cached = event_info_cache.get(event_ticker)
+        if cached is not None:
+            return cached
+
+        try:
+            ev = get_event(session, event_ticker)
+        except Exception:
+            ev = None
+        title = ""
+        start_raw = ""
+        if ev and isinstance(ev, dict):
+            eobj = ev.get("event") if "event" in ev else ev
+            if isinstance(eobj, dict):
+                title = str(eobj.get("title") or "")
+                start_raw = (
+                    eobj.get("start_time")
+                    or eobj.get("startTime")
+                    or eobj.get("scheduled_start_time")
+                    or eobj.get("scheduledStartTime")
+                    or ""
+                )
+        start_ts = _epochish_to_ts(start_raw)
+        info = {"title": title, "start_ts": start_ts, "start_raw": str(start_raw or "")}
+        event_info_cache[event_ticker] = info
+        return info
+
+    def market_match_start_ts(market: Dict[str, Any]) -> Optional[int]:
+        for src in (
+            market,
+            market.get("event") if isinstance(market.get("event"), dict) else None,
+        ):
+            if not isinstance(src, dict):
+                continue
+            for k in (
+                "start_ts",
+                "start_time",
+                "startTime",
+                "commence_time",
+                "commenceTime",
+                "scheduled_start_time",
+                "scheduledStartTime",
+            ):
+                if k in src and src.get(k):
+                    ts = _epochish_to_ts(src.get(k))
+                    if ts is not None:
+                        return int(ts)
+
+        event_ticker = str(market.get("event_ticker") or market.get("eventTicker") or "").strip()
+        if event_ticker:
+            info = get_kalshi_event_info(event_ticker)
+            if info.get("start_ts") is not None:
+                return int(info["start_ts"])
+        return None
+
+    def market_window_ts(market: Dict[str, Any]) -> Optional[int]:
+        """
+        Timestamp used ONLY for the scan window filter.
+        Prefer real game start time; if missing, fall back to close time so we still
+        enforce the scan window and avoid processing tons of far-out markets.
+        """
+        ts = market_match_start_ts(market)
+        if ts is not None:
+            return ts
+        return market_close_ts(market)
 
     rows: List[Row] = []
 
@@ -1497,7 +1689,7 @@ def scan() -> int:
         filtered: List[Dict[str, Any]] = []
         for m in markets:
             s = str(m.get("status") or "").strip().lower()
-            if not (debug_mode or no_filters):
+            if not debug_mode:
                 if s in ("closed", "settled"):
                     continue
                 if s and s not in ("open", "paused", "active"):
@@ -1509,16 +1701,16 @@ def scan() -> int:
         if close_window_enabled:
             close_filtered: List[Dict[str, Any]] = []
             for m in markets:
-                cts = market_close_ts(m)
+                cts = market_window_ts(m)
                 if cts is None:
-                    drops["close_time_missing"] += 1
+                    drops["window_time_missing"] += 1
                     close_filtered.append(m)
                     continue
                 if min_close_ts_effective is not None and cts < min_close_ts_effective:
-                    drops["close_time_before_min"] += 1
+                    drops["window_time_before_min"] += 1
                     continue
                 if max_close_ts_effective is not None and cts > max_close_ts_effective:
-                    drops["close_time_after_max"] += 1
+                    drops["window_time_after_max"] += 1
                     continue
                 close_filtered.append(m)
             markets = close_filtered
@@ -1540,7 +1732,7 @@ def scan() -> int:
             if not market_ticker:
                 continue
 
-            event_ticker = str(m.get("event_ticker") or "")
+            event_ticker = str(m.get("event_ticker") or m.get("eventTicker") or "")
             market_title = str(m.get("title") or "")
             yes_sub = str(
                 m.get("yes_sub_title")
@@ -1616,21 +1808,11 @@ def scan() -> int:
             event_title = ""
             if subtitle and parse_matchup(subtitle):
                 event_title = subtitle
-            if event_ticker:
-                cached_title = event_title_cache.get(event_ticker, "")
+            if event_ticker and not event_title:
+                info = get_kalshi_event_info(event_ticker)
+                cached_title = str(info.get("title") or "")
                 if not event_title and cached_title:
                     event_title = cached_title
-                if not event_title:
-                    ev = get_event(session, event_ticker)
-                    fetched_title = ""
-                    if ev and isinstance(ev, dict):
-                        eobj = ev.get("event") if "event" in ev else ev
-                        fetched_title = str((eobj or {}).get("title") or "")
-                    if fetched_title:
-                        event_title_cache[event_ticker] = fetched_title
-                        event_title = fetched_title
-                elif event_title and not cached_title:
-                    event_title_cache[event_ticker] = event_title
 
             if not event_title:
                 # Some responses include nested event dict
@@ -1659,8 +1841,31 @@ def scan() -> int:
                 continue
 
             team_a, team_b = matchup
-            ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
-            match_threshold = 0.0 if debug_loose else 1.30
+            kalshi_ts = market_match_start_ts(m)
+            if kalshi_ts is None:
+                kalshi_ts = market_close_ts(m)
+            if kalshi_ts is None:
+                drops["match_start_time_missing"] += 1
+                if debug_log and len(debug_unmatched) < debug_max:
+                    debug_unmatched.append(
+                        {
+                            "reason": "match_start_time_missing",
+                            "line_type": lt,
+                            "series_ticker": st,
+                            "event_title": event_title or "",
+                            "market_title": market_title,
+                            "market_ticker": market_ticker,
+                            "subtitle": subtitle,
+                            "yes_sub_title": yes_sub,
+                            "no_sub_title": no_sub,
+                            "parsed_line": line,
+                            "matchup": {"a": team_a, "b": team_b},
+                            "kalshi_market": m,
+                        }
+                    )
+                continue
+            ranked = rank_odds_candidates(team_a, team_b, kalshi_ts, event_time_tolerance_sec, top_k=5)
+            match_threshold = 0.0 if debug_loose else min_team_match_score
             odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
             if not odds_event:
                 drops["odds_match_failed"] += 1
@@ -1683,6 +1888,14 @@ def scan() -> int:
                                     "home_team": e.get("home_team"),
                                     "away_team": e.get("away_team"),
                                     "id": e.get("id"),
+                                    "time_diff_seconds": (
+                                        None
+                                        if iso_to_ts(str(e.get("commence_time") or "")) is None
+                                        else abs(
+                                            int(iso_to_ts(str(e.get("commence_time") or "")) or 0)
+                                            - int(kalshi_ts)
+                                        )
+                                    ),
                                 }
                                 for (s, e) in ranked
                             ],
@@ -1708,6 +1921,14 @@ def scan() -> int:
                                     "home_team": e.get("home_team"),
                                     "away_team": e.get("away_team"),
                                     "id": e.get("id"),
+                                    "time_diff_seconds": (
+                                        None
+                                        if iso_to_ts(str(e.get("commence_time") or "")) is None
+                                        else abs(
+                                            int(iso_to_ts(str(e.get("commence_time") or "")) or 0)
+                                            - int(kalshi_ts)
+                                        )
+                                    ),
                                 }
                                 for (s, e) in ranked
                             ],
@@ -1804,9 +2025,11 @@ def scan() -> int:
             yes_buy, no_buy = best_buy_probs(m)
             # In debug, always use the orderbook for pricing.
             # In normal mode, use it as a fallback when snapshot asks are missing.
-            want_orderbook = False
-            if use_orderbook and market_ticker:
-                want_orderbook = (debug_mode or no_filters) or (yes_buy is None or no_buy is None)
+            want_orderbook = bool(
+                use_orderbook
+                and market_ticker
+                and (debug_mode or (yes_buy is None or no_buy is None))
+            )
 
             if want_orderbook and orderbook_calls < orderbook_max_calls:
                 try:
@@ -1831,10 +2054,31 @@ def scan() -> int:
             if yes_buy is None and no_buy is None:
                 drops["no_prices"] += 1
                 continue
-
             # apply fee to opening cost
-            all_in_yes = None if yes_buy is None else min(1.0, yes_buy + fee_prob)
-            all_in_no = None if no_buy is None else min(1.0, no_buy + fee_prob)
+            all_in_yes = None
+            all_in_no = None
+            fee_yes_cents = None
+            fee_no_cents = None
+            if yes_buy is not None:
+                yes_buy_cents = int(math.floor(yes_buy * 100 + 0.5))
+                p_yes = yes_buy_cents / 100.0
+                fee_yes_cents = (
+                    fee_cents_override
+                    if fee_cents_override > 0
+                    else kalshi_fee_cents(p_yes, 1, fee_multiplier)
+                )
+                all_in_yes_cents = min(100, yes_buy_cents + int(fee_yes_cents))
+                all_in_yes = all_in_yes_cents / 100.0
+            if no_buy is not None:
+                no_buy_cents = int(math.floor(no_buy * 100 + 0.5))
+                p_no = no_buy_cents / 100.0
+                fee_no_cents = (
+                    fee_cents_override
+                    if fee_cents_override > 0
+                    else kalshi_fee_cents(p_no, 1, fee_multiplier)
+                )
+                all_in_no_cents = min(100, no_buy_cents + int(fee_no_cents))
+                all_in_no = all_in_no_cents / 100.0
 
             fair_no = 1.0 - fair_prob_yes
 
@@ -1843,6 +2087,7 @@ def scan() -> int:
             best_edge = -1e9
             best_all_in = None
             best_fair_side = None
+            best_fee_cents = None
 
             if all_in_yes is not None:
                 e = fair_prob_yes - all_in_yes
@@ -1851,6 +2096,7 @@ def scan() -> int:
                     best_side = "YES"
                     best_all_in = all_in_yes
                     best_fair_side = fair_prob_yes
+                    best_fee_cents = fee_yes_cents
 
             if all_in_no is not None:
                 e = fair_no - all_in_no
@@ -1859,8 +2105,18 @@ def scan() -> int:
                     best_side = "NO"
                     best_all_in = all_in_no
                     best_fair_side = fair_no
+                    best_fee_cents = fee_no_cents
 
             if best_side is None or best_all_in is None or best_fair_side is None:
+                continue
+
+            if best_fee_cents is None:
+                drops["no_prices"] += 1
+                continue
+
+            buy_prob_side = yes_buy if best_side == "YES" else no_buy
+            if buy_prob_side is None:
+                drops["no_prices"] += 1
                 continue
 
             if (not debug_mode) and (not no_filters) and best_edge < min_edge:
@@ -1887,7 +2143,9 @@ def scan() -> int:
                         "kalshi_buy": {
                             "yes_buy_prob": yes_buy,
                             "no_buy_prob": no_buy,
-                            "fee_cents": fee_cents,
+                            "fee_cents_override": fee_cents_override,
+                            "fee_yes_cents": fee_yes_cents,
+                            "fee_no_cents": fee_no_cents,
                             "all_in_yes": all_in_yes,
                             "all_in_no": all_in_no,
                         },
@@ -1901,9 +2159,10 @@ def scan() -> int:
 
             rows.append(
                 Row(
-                    fee_cents=fee_cents,
+                    fee_cents=int(best_fee_cents),
                     edge=float(best_edge),
                     side_to_buy=best_side,
+                    buy_prob_side=float(buy_prob_side),
                     all_in_buy_prob=float(best_all_in),
                     fair_prob_side=float(best_fair_side),
                     fair_prob_yes=float(fair_prob_yes),
@@ -1989,6 +2248,10 @@ def scan() -> int:
     if debug_mode:
         print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
     elif webhook and (rows or always_notify):
+        if fee_cents_override > 0:
+            fee_hdr = f"fee +{fee_cents_override}¢"
+        else:
+            fee_hdr = "fee per schedule"
         if not rows:
             vol_note = f"vol≥{min_volume}"
             if min_volume_effective > 0 and include_unknown_volume:
@@ -1999,7 +2262,7 @@ def scan() -> int:
                 webhook,
                 (
                     f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
-                    f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, {vol_note})."
+                    f"{fee_hdr}, games ≤{game_lookahead_hours}h, {vol_note})."
                 ),
             )
             return 0
@@ -2018,8 +2281,8 @@ def scan() -> int:
         lines: List[str] = []
         lines.append(
             (
-                f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, "
-                f"games ≤{game_lookahead_hours}h, vol≥{min_volume})."
+                f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, {fee_hdr}, "
+                f"games ≤{game_lookahead_hours}h, vol≥{min_volume_effective}, books≥{min_books_effective})."
             )
         )
 
@@ -2040,12 +2303,13 @@ def scan() -> int:
             lines.append(header)
             cur_len += len(header) + 1
             for it in items:
-                buy_cents = int(round(it.all_in_buy_prob * 100))
-                fair_cents = int(round(it.fair_prob_side * 100))
+                buy_cents = int(math.floor(it.buy_prob_side * 100 + 0.5))
+                all_in_cents = int(math.floor(it.all_in_buy_prob * 100 + 0.5))
+                fair_cents = int(math.floor(it.fair_prob_side * 100 + 0.5))
                 line1 = (
                     f"- {it.line_type.upper()} {it.line_label}: buy {it.side_to_buy} @{buy_cents}¢ "
-                    f"vs fair {fair_cents}¢ → **+{it.edge*100:.1f}pp** | vol {it.kalshi_volume} | "
-                    f"books {it.books_used}"
+                    f"(+{it.fee_cents}¢ fee → {all_in_cents}¢ all-in) vs fair {fair_cents}¢ → **+{it.edge*100:.1f}pp** | "
+                    f"vol {it.kalshi_volume} | books {it.books_used}"
                 )
                 line2 = f"  {it.url}"
                 if cur_len + len(line1) + len(line2) + 2 > max_len:
@@ -2065,7 +2329,9 @@ def scan() -> int:
     # Print top results for logs
     for r in rows[: min(10, len(rows))]:
         print(
-            f"{r.edge*100:6.2f}pp | BUY {r.side_to_buy:>3} | all-in {r.all_in_buy_prob*100:5.1f}c | fair {r.fair_prob_side*100:5.1f}% | {r.line_type:>6} | {r.event_title} | {r.line_label}"
+            f"{r.edge*100:6.2f}pp | BUY {r.side_to_buy:>3} | buy {r.buy_prob_side*100:5.1f}c "
+            f"(all-in {r.all_in_buy_prob*100:5.1f}c) | fair {r.fair_prob_side*100:5.1f}% | "
+            f"{r.line_type:>6} | {r.event_title} | {r.line_label}"
         )
 
     return 0
