@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
@@ -109,12 +110,20 @@ def _extract_book_h2h(event: Dict[str, Any]) -> List[Tuple[str, int, int]]:
         m = _extract_market(book, "h2h")
         if not m:
             continue
-        prices = {o.get("name"): o.get("price") for o in (m.get("outcomes") or [])}
-        if home not in prices or away not in prices:
+        # Be tolerant of naming differences (esp. DraftKings abbreviations) by matching normalized names.
+        prices: Dict[str, Any] = {}
+        for o in (m.get("outcomes") or []):
+            n = o.get("name")
+            if n is None:
+                continue
+            prices[normalize_team_name(str(n))] = o.get("price")
+        hn = normalize_team_name(str(home))
+        an = normalize_team_name(str(away))
+        if hn not in prices or an not in prices:
             continue
         try:
-            ho = int(prices[home])
-            ao = int(prices[away])
+            ho = int(prices[hn])
+            ao = int(prices[an])
         except Exception:
             continue
         if ho == 0 or ao == 0:
@@ -197,13 +206,15 @@ def _extract_book_spread_at_point(event: Dict[str, Any], point: float) -> List[T
                     pr_i = int(price)
                 except Exception:
                     continue
-                prices[str(name)] = (p_f, pr_i)
+                prices[normalize_team_name(str(name))] = (p_f, pr_i)
 
-            if home not in prices or away not in prices:
+            hn = normalize_team_name(str(home))
+            an = normalize_team_name(str(away))
+            if hn not in prices or an not in prices:
                 continue
 
-            home_point, home_odds = prices[home]
-            away_point, away_odds = prices[away]
+            home_point, home_odds = prices[hn]
+            away_point, away_odds = prices[an]
 
             # exact line match: require the specific point for the relevant side
             if float(home_point) != float(point) and float(away_point) != float(point):
@@ -298,9 +309,9 @@ def _extract_book_total_at_point(event: Dict[str, Any], point: float) -> List[Tu
                     continue
                 if p_f != float(point):
                     continue
-                if name == "over":
+                if name.startswith("over"):
                     over = pr_i
-                elif name == "under":
+                elif name.startswith("under"):
                     under = pr_i
 
             if over is None or under is None:
@@ -366,18 +377,53 @@ def build_event_index(events: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dic
     return idx
 
 
+def _redact_oddsapi_key(text: str) -> str:
+    # requests exceptions can include the full URL (including apiKey=...).
+    return re.sub(r"(apiKey=)[^&\s]+", r"\1***", str(text))
+
+
 def fetch_all_sports_events(
     sport_keys: List[str],
     markets: str = "h2h,spreads,totals",
     regions: str = "us",
 ) -> List[Dict[str, Any]]:
     all_events: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    debug_enabled = (
+        os.getenv("ODDSAPI_DEBUG")
+        or os.getenv("DEBUG_MODE")
+        or os.getenv("MASTER_DEBUG")
+    )
     for sk in sport_keys:
         try:
             all_events.extend(fetch_events(sk, markets=markets, regions=regions))
-        except Exception:
+        except Exception as e:
+            # Keep it short (Actions logs), but avoid leaking api keys in exception strings.
+            err: Dict[str, Any] = {"sport_key": sk, "error_type": type(e).__name__}
+            msg = str(e)
+            if msg:
+                err["message"] = _redact_oddsapi_key(msg)[:200]
+
+            # requests will often wrap HTTP errors with response details
+            if debug_enabled:
+                try:
+                    if hasattr(e, "response") and getattr(e, "response") is not None:
+                        r = getattr(e, "response")
+                        err["status"] = getattr(r, "status_code", None)
+                        err["body_head"] = str(getattr(r, "text", ""))[:200]
+                except Exception:
+                    pass
+
+            errors.append(err)
             # keep going; one sport failing shouldn't kill the run
             continue
+
+    if not all_events and errors:
+        try:
+            print(f"Odds API: 0 events; sample error: {errors[0]}")
+        except Exception:
+            pass
     return all_events
 
 
