@@ -1374,12 +1374,35 @@ def scan() -> int:
     run_meta["sportsbook_source"] = sportsbook_source
 
     if not odds_events:
-        run_meta["status"] = "error_no_odds_events"
+        # Default behavior: skip (exit 0) if sportsbook odds are unavailable.
+        # Set FAIL_ON_NO_ODDS_EVENTS=1 to preserve the old hard-fail behavior.
+        fail_on_no_odds = env_bool("FAIL_ON_NO_ODDS_EVENTS", False)
+        run_meta["status"] = (
+            "error_no_odds_events" if fail_on_no_odds else "skipped_no_odds_events"
+        )
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
         print("No sportsbook events returned from The Odds API or DraftKings fallback.")
         print("Likely causes: quota exhausted, rate limits, invalid API key, or network failure.")
-        return 2
+
+        # Optional heads-up in Discord so you still know the run happened.
+        try:
+            webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+            if master_debug or debug_mode:
+                webhook = ""
+            if webhook:
+                post_discord(
+                    webhook,
+                    "⚠️ Kalshi value scan skipped — sportsbook odds unavailable.\n"
+                    "See workflow logs for upstream errors (Odds API quota / DK 403, etc.).\n"
+                    "Fix: add Odds API credits, reduce SPORT_KEYS/markets, or use a self-hosted "
+                    "runner for DK fallback.",
+                    "",
+                )
+        except Exception:
+            pass
+
+        return 2 if fail_on_no_odds else 0
 
     max_game_ts: Optional[int]
     if no_filters or game_lookahead_hours <= 0:
@@ -1400,19 +1423,26 @@ def scan() -> int:
     odds_events = filtered_events
 
     if not odds_events:
-        run_meta["status"] = "error_no_odds_events_in_window"
+        fail_on_no_odds = env_bool("FAIL_ON_NO_ODDS_EVENTS", False)
+        run_meta["status"] = (
+            "error_no_odds_events_in_window"
+            if fail_on_no_odds
+            else "skipped_no_odds_events_in_window"
+        )
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
         print("No sportsbook events within the lookahead window after filtering.")
         webhook = env_str("DISCORD_WEBHOOK_URL", "")
         always_notify = env_bool("ALWAYS_NOTIFY", False)
+        if master_debug or debug_mode:
+            webhook = ""
         if webhook and always_notify:
             if max_game_ts is None:
                 msg = "**Kalshi value**: no sportsbook games starting in the future."
             else:
                 msg = f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
             post_discord(webhook, msg)
-        return 0
+        return 2 if fail_on_no_odds else 0
 
     # Build a fast lookup index for ID-based matching (using the repo JSON mapping files).
     candidate_sports = sorted({s for s in (sport_prefix_from_odds_key(k) for k in sport_keys) if s})

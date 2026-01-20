@@ -72,6 +72,12 @@ on:
         type: choice
         options: ["false", "true"]
         default: "false"
+      fail_on_no_odds_events:
+        description: "Fail the job if sportsbook odds are unavailable (default: skip with a warning)"
+        required: false
+        type: choice
+        options: ["0", "1"]
+        default: "0"
       debug_wide_scan:
         description: "DEBUG only: remove close-window bounds (can be very slow)"
         type: choice
@@ -170,6 +176,10 @@ jobs:
 
           # Ping Discord on manual runs even if 0 plays (so you know the job ran)
           ALWAYS_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+
+          # If no sportsbook odds are available (Odds API quota exhausted, DK blocked, etc.),
+          # default is to skip with a warning (exit 0). Set to 1 to hard-fail.
+          FAIL_ON_NO_ODDS_EVENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fail_on_no_odds_events || vars.KALSHI_FAIL_ON_NO_ODDS_EVENTS || '0' }}
 
           OUTDIR: out
         run: |
