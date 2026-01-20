@@ -720,8 +720,6 @@ def kalshi_market_url(market_ticker: str) -> str:
 # without relying on fuzzy string similarity. We still keep the old fuzzy path as
 # a fallback when mapping data is missing/ambiguous.
 
-DEFAULT_SPORT_PREFIXES = ["nfl", "nba", "mlb", "nhl", "ncaab"]
-
 
 def build_odds_event_id_index(
     events: List[Dict[str, Any]],
@@ -1409,8 +1407,6 @@ def scan() -> int:
 
     # Build a fast lookup index for ID-based matching (using the repo JSON mapping files).
     candidate_sports = sorted({s for s in (sport_prefix_from_odds_key(k) for k in sport_keys) if s})
-    if not candidate_sports:
-        candidate_sports = list(DEFAULT_SPORT_PREFIXES)
     odds_event_id_index = build_odds_event_id_index(odds_events) if candidate_sports else {}
     odds_events_total = len(odds_events)
     odds_events_with_ids = sum(1 for ev in odds_events if all(odds_event_team_ids(ev)))
