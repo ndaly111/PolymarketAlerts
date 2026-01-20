@@ -233,7 +233,7 @@ def _find_game_lines_category_id(eventgroup_data: Dict[str, Any]) -> Optional[in
         if not isinstance(cat, dict):
             continue
         name = str(cat.get("name", "")).strip().lower()
-        if name == "game lines":
+        if "game lines" in name:
             cid = cat.get("offerCategoryId") or cat.get("id") or cat.get("categoryId")
             try:
                 return int(cid)
@@ -300,6 +300,10 @@ def fetch_draftkings_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
                 eid = int(ev.get("eventId"))
             except Exception:
                 continue
+            # Keep only OPEN events when status is present (avoid CLOSED/SUSPENDED noise).
+            st = str(ev.get("eventStatus") or "").strip().upper()
+            if st and st != "OPEN":
+                continue
             home, away = _pick_team_names(ev)
             ev_map[eid] = {
                 "id": f"dk_{eid}",
@@ -322,7 +326,7 @@ def fetch_draftkings_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
             if not isinstance(c, dict):
                 continue
             name = str(c.get("name", "")).strip().lower()
-            if name == "game lines":
+            if "game lines" in name:
                 game_lines_cat = c
                 break
     if game_lines_cat is None and isinstance(offer_categories2, list) and offer_categories2:

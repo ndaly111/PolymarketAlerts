@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
@@ -376,6 +377,11 @@ def build_event_index(events: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dic
     return idx
 
 
+def _redact_oddsapi_key(text: str) -> str:
+    # requests exceptions can include the full URL (including apiKey=...).
+    return re.sub(r"(apiKey=)[^&\s]+", r"\1***", str(text))
+
+
 def fetch_all_sports_events(
     sport_keys: List[str],
     markets: str = "h2h,spreads,totals",
@@ -393,11 +399,14 @@ def fetch_all_sports_events(
         try:
             all_events.extend(fetch_events(sk, markets=markets, regions=regions))
         except Exception as e:
-            if debug_enabled:
-                # Keep it short (Actions logs), but don’t silently swallow root causes.
-                err = {"sport_key": sk, "error": repr(e)}
+            # Keep it short (Actions logs), but avoid leaking api keys in exception strings.
+            err: Dict[str, Any] = {"sport_key": sk, "error_type": type(e).__name__}
+            msg = str(e)
+            if msg:
+                err["message"] = _redact_oddsapi_key(msg)[:200]
 
-                # requests will often wrap HTTP errors with response details
+            # requests will often wrap HTTP errors with response details
+            if debug_enabled:
                 try:
                     if hasattr(e, "response") and getattr(e, "response") is not None:
                         r = getattr(e, "response")
@@ -406,7 +415,7 @@ def fetch_all_sports_events(
                 except Exception:
                     pass
 
-                errors.append(err)
+            errors.append(err)
             # keep going; one sport failing shouldn't kill the run
             continue
 
