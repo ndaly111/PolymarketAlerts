@@ -36,7 +36,7 @@ on:
       min_volume:
         description: "Minimum Kalshi volume to include (0 disables volume filter)"
         required: false
-        default: "1000"
+        default: "0"
       master_debug:
         description: "MASTER DEBUG: save raw Kalshi API request/response artifacts (secrets redacted)"
         type: choice
