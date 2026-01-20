@@ -44,6 +44,11 @@ from oddsapi_lines import (
     fetch_all_sports_events,
     normalize_team_name,
 )
+from team_ids import (
+    kalshi_team_id,
+    odds_event_team_ids,
+    sport_prefix_from_odds_key,
+)
 
 
 # -----------------------------
@@ -440,13 +445,13 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
 
 
 def infer_line_type(series_ticker: str, market_ticker: str, market_title: str) -> Optional[str]:
-    hay = f"{series_ticker} {market_ticker} {market_title}".upper()
-    if "TOTAL" in hay:
+    raw = f"{series_ticker} {market_ticker} {market_title}".lower()
+    if "total" in raw or TOTAL_RE.search(raw):
         return "total"
-    if "SPREAD" in hay:
+    if "spread" in raw:
         return "spread"
     # Many moneyline series use GAME
-    if "GAME" in hay or "ML" in hay or "MONEY" in hay:
+    if "game" in raw or "moneyline" in raw or "money line" in raw or re.search(r"\bh2h\b", raw):
         return "h2h"
     return None
 
@@ -704,6 +709,120 @@ def map_team_to_event_team(
 
 def kalshi_market_url(market_ticker: str) -> str:
     return f"https://kalshi.com/markets/{str(market_ticker).lower()}"
+
+
+# -----------------------------
+# Team-ID matching helpers
+# -----------------------------
+
+# These functions use the repo-checked JSON mapping files (kalshi_team_cache.json
+# and theoddsapi_team_cache-2.json) to match Kalshi markets to Odds API events
+# without relying on fuzzy string similarity. We still keep the old fuzzy path as
+# a fallback when mapping data is missing/ambiguous.
+
+DEFAULT_SPORT_PREFIXES = ["nfl", "nba", "mlb", "nhl", "ncaab"]
+
+
+def build_odds_event_id_index(
+    events: List[Dict[str, Any]],
+) -> Dict[Tuple[str, frozenset], List[Dict[str, Any]]]:
+    """Index Odds API events by (sport_prefix, {home_id, away_id})."""
+    idx: Dict[Tuple[str, frozenset], List[Dict[str, Any]]] = {}
+    for e in events:
+        sport = sport_prefix_from_odds_key(str(e.get("sport_key") or ""))
+        if not sport:
+            continue
+        h_id, a_id = odds_event_team_ids(e)
+        if not h_id or not a_id:
+            continue
+        key = (sport, frozenset({h_id, a_id}))
+        idx.setdefault(key, []).append(e)
+    return idx
+
+
+def _ts_from_odds_event(event: Dict[str, Any]) -> Optional[float]:
+    try:
+        ct = event.get("commence_time")
+        if not ct:
+            return None
+        dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def match_odds_event_by_team_ids(
+    odds_id_index: Dict[Tuple[str, frozenset], List[Dict[str, Any]]],
+    candidate_sports: List[str],
+    team_a: str,
+    team_b: str,
+    close_ts: Optional[float] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], bool]:
+    """Try to match a Kalshi matchup to an Odds API event via team ids.
+
+    Returns (event, sport_prefix_used, skew_rejected).
+    """
+    best: Optional[Dict[str, Any]] = None
+    best_sport: Optional[str] = None
+    best_dt: Optional[float] = None
+
+    for sport in candidate_sports:
+        a_id = kalshi_team_id(sport, team_a)
+        b_id = kalshi_team_id(sport, team_b)
+        if not a_id or not b_id:
+            continue
+        key = (sport, frozenset({a_id, b_id}))
+        events = odds_id_index.get(key) or []
+        if not events:
+            continue
+
+        for e in events:
+            et = _ts_from_odds_event(e)
+            if close_ts is not None and et is not None:
+                dt = abs(float(et) - float(close_ts))
+            elif et is not None:
+                dt = float(et)
+            else:
+                dt = 0.0
+
+            if best_dt is None or dt < best_dt:
+                best = e
+                best_sport = sport
+                best_dt = dt
+
+    # Safety: if we had a Kalshi close time, don't accept an ID-match that's wildly far away.
+    if close_ts is not None and best is not None and best_dt is not None:
+        max_skew_hours = env_float("KALSHI_ID_MATCH_MAX_SKEW_HOURS", 12.0)
+        max_skew_s = float(max_skew_hours) * 3600.0
+        if max_skew_s > 0 and float(best_dt) > max_skew_s:
+            return None, None, True
+
+    return best, best_sport, False
+
+
+def infer_sport_prefixes_from_kalshi(
+    series_ticker: str,
+    series_title: str,
+    market_ticker: str,
+    event_title: str,
+    market_title: str,
+) -> List[str]:
+    hay = f"{series_ticker} {series_title} {market_ticker} {event_title} {market_title}".lower()
+    out: List[str] = []
+    if "mlb" in hay:
+        out.append("mlb")
+    if "nba" in hay:
+        out.append("nba")
+    if "nfl" in hay:
+        out.append("nfl")
+    if "nhl" in hay:
+        out.append("nhl")
+    if "ncaab" in hay or "cbb" in hay:
+        out.append("ncaab")
+    if "ncaaf" in hay or "cfb" in hay:
+        out.append("ncaaf")
+    return out
+
 
 def _league_tokens_from_sport_keys(sport_keys: List[str]) -> List[str]:
     """Best-effort mapping from Odds API sport keys -> league keywords likely to appear in Kalshi series."""
@@ -1252,6 +1371,7 @@ def scan() -> int:
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
         print("No sportsbook events returned from The Odds API (check THE_ODDS_API / quota).")
+        print("Likely causes: quota exhausted, 429 rate limit, invalid API key, or network failure.")
         return 2
 
     max_game_ts: Optional[int]
@@ -1286,6 +1406,22 @@ def scan() -> int:
                 msg = f"**Kalshi value**: no sportsbook games starting within {game_lookahead_hours}h."
             post_discord(webhook, msg)
         return 0
+
+    # Build a fast lookup index for ID-based matching (using the repo JSON mapping files).
+    candidate_sports = sorted({s for s in (sport_prefix_from_odds_key(k) for k in sport_keys) if s})
+    if not candidate_sports:
+        candidate_sports = list(DEFAULT_SPORT_PREFIXES)
+    odds_event_id_index = build_odds_event_id_index(odds_events) if candidate_sports else {}
+    odds_events_total = len(odds_events)
+    odds_events_with_ids = sum(1 for ev in odds_events if all(odds_event_team_ids(ev)))
+    run_meta["odds_events_total"] = odds_events_total
+    run_meta["odds_events_with_team_ids"] = odds_events_with_ids
+    run_meta["odds_event_id_index_pairs"] = len(odds_event_id_index)
+    print(
+        "[ID_MATCH] Odds events with team IDs: "
+        f"{odds_events_with_ids}/{odds_events_total} "
+        f"(pairs={len(odds_event_id_index)})"
+    )
 
     # Fail fast if Kalshi auth isn't present (trade-api/v2 requires signed requests).
     has_key_id = bool((os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip())
@@ -1322,6 +1458,7 @@ def scan() -> int:
         )
     series: List[str] = []
     discovered_series: List[Dict[str, Any]] = []
+    title_by_ticker: Dict[str, str] = {}
 
     if series_override:
         series = [s.strip() for s in series_override.split(",") if s.strip()]
@@ -1372,7 +1509,6 @@ def scan() -> int:
             deduped.append(t)
         series = deduped
     else:
-        title_by_ticker: Dict[str, str] = {}
         for s in discovered_series:
             t = str(s.get("ticker") or "").strip()
             if not t:
@@ -1472,6 +1608,9 @@ def scan() -> int:
     markets_fetched_total = 0
     markets_seen_total = 0
     series_errors = 0
+    match_id_ok = 0
+    match_id_skew_reject = 0
+    match_fuzzy_ok = 0
 
     for st in series:
         try:
@@ -1659,9 +1798,49 @@ def scan() -> int:
                 continue
 
             team_a, team_b = matchup
-            ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
-            match_threshold = 0.0 if debug_loose else 1.30
-            odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
+            close_ts = market_close_ts(m)
+            series_title = title_by_ticker.get(st, "")
+            sport_hint = infer_sport_prefixes_from_kalshi(
+                st,
+                series_title,
+                market_ticker,
+                event_title,
+                market_title,
+            )
+            sport_candidates = [p for p in sport_hint if p in candidate_sports] or candidate_sports
+
+            odds_event: Optional[Dict[str, Any]] = None
+            ranked = []
+            sport_prefix_used: Optional[str] = None
+
+            id_match_rejected = False
+            if odds_event_id_index and sport_candidates:
+                odds_event, sport_prefix_used, id_match_rejected = match_odds_event_by_team_ids(
+                    odds_event_id_index,
+                    sport_candidates,
+                    team_a,
+                    team_b,
+                    close_ts=close_ts,
+                )
+                if odds_event:
+                    match_id_ok += 1
+                elif id_match_rejected:
+                    match_id_skew_reject += 1
+
+            if not odds_event:
+                ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
+                match_threshold = 0.0 if debug_loose else 1.30
+                if not debug_loose and odds_event_id_index and sport_candidates:
+                    has_id_pair = any(
+                        kalshi_team_id(sport, team_a) and kalshi_team_id(sport, team_b)
+                        for sport in sport_candidates
+                    )
+                    if has_id_pair:
+                        match_threshold = 1.60
+                odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
+                if odds_event:
+                    sport_prefix_used = sport_prefix_from_odds_key(str(odds_event.get("sport_key") or ""))
+                    match_fuzzy_ok += 1
             if not odds_event:
                 drops["odds_match_failed"] += 1
                 if debug_log and len(debug_unmatched) < debug_max:
@@ -1719,12 +1898,25 @@ def scan() -> int:
             team_for_books = str(line.get("team") or "")
             team_map_score = None
             if lt in ("h2h", "spread"):
-                min_map = 0.55 if debug_loose else 0.72
-                team_for_books, team_map_score = map_team_to_event_team(
-                    team_for_books,
-                    odds_event,
-                    min_score=min_map,
-                )
+                mapped_by_id = False
+                if sport_prefix_used:
+                    line_team_id = kalshi_team_id(sport_prefix_used, team_for_books)
+                    home_id, away_id = odds_event_team_ids(odds_event)
+                    if line_team_id and home_id and away_id:
+                        if line_team_id == home_id:
+                            team_for_books = str(odds_event.get("home_team") or "")
+                            mapped_by_id = True
+                        elif line_team_id == away_id:
+                            team_for_books = str(odds_event.get("away_team") or "")
+                            mapped_by_id = True
+
+                if not mapped_by_id:
+                    min_map = 0.55 if debug_loose else 0.72
+                    team_for_books, team_map_score = map_team_to_event_team(
+                        team_for_books,
+                        odds_event,
+                        min_score=min_map,
+                    )
             if not team_for_books:
                 drops["team_map_failed"] += 1
                 if debug_log and len(debug_candidates) < debug_max:
@@ -1966,6 +2158,9 @@ def scan() -> int:
     run_meta["markets_fetched_total"] = markets_fetched_total
     run_meta["markets_seen_total"] = markets_seen_total
     run_meta["drop_counts"] = dict(drops)
+    run_meta["match_id_ok"] = match_id_ok
+    run_meta["match_id_skew_reject"] = match_id_skew_reject
+    run_meta["match_fuzzy_ok"] = match_fuzzy_ok
 
     run_meta["status"] = "ok"
     run_meta["rows_written"] = len(rows)
