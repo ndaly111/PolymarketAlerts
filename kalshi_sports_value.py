@@ -1369,6 +1369,7 @@ def scan() -> int:
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
         print("No sportsbook events returned from The Odds API (check THE_ODDS_API / quota).")
+        print("Likely causes: quota exhausted, 429 rate limit, invalid API key, or network failure.")
         return 2
 
     max_game_ts: Optional[int]
