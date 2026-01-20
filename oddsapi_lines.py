@@ -174,46 +174,54 @@ def _extract_book_spread_at_point(event: Dict[str, Any], point: float) -> List[T
     out: List[Tuple[str, int, int]] = []
 
     for book in event.get("bookmakers", []) or []:
-        m = _extract_market(book, "spreads")
-        if not m:
-            continue
-        outcomes = m.get("outcomes") or []
-        if len(outcomes) < 2:
-            continue
+        title = str(book.get("title") or book.get("key") or "")
+        found_for_book = False
 
-        # We expect both teams present; points can be home/away with opposite sign.
-        prices: Dict[str, Tuple[float, int]] = {}
-        for o in outcomes:
-            name = o.get("name")
-            p = o.get("point")
-            price = o.get("price")
-            if name is None or p is None or price is None:
+        for m in (book.get("markets") or []):
+            if m.get("key") != "spreads":
                 continue
-            try:
-                p_f = float(p)
-                pr_i = int(price)
-            except Exception:
+            outcomes = m.get("outcomes") or []
+            if len(outcomes) < 2:
                 continue
-            prices[str(name)] = (p_f, pr_i)
 
-        if home not in prices or away not in prices:
+            # We expect both teams present; points can be home/away with opposite sign.
+            prices: Dict[str, Tuple[float, int]] = {}
+            for o in outcomes:
+                name = o.get("name")
+                p = o.get("point")
+                price = o.get("price")
+                if name is None or p is None or price is None:
+                    continue
+                try:
+                    p_f = float(p)
+                    pr_i = int(price)
+                except Exception:
+                    continue
+                prices[str(name)] = (p_f, pr_i)
+
+            if home not in prices or away not in prices:
+                continue
+
+            home_point, home_odds = prices[home]
+            away_point, away_odds = prices[away]
+
+            # exact line match: require the specific point for the relevant side
+            if float(home_point) != float(point) and float(away_point) != float(point):
+                continue
+
+            # sanity: they should be opposite signs (allow 0)
+            if float(home_point) != -float(away_point) and not (float(home_point) == 0 and float(away_point) == 0):
+                continue
+
+            if home_odds == 0 or away_odds == 0:
+                continue
+
+            out.append((title, home_odds, away_odds))
+            found_for_book = True
+            break
+
+        if found_for_book:
             continue
-
-        home_point, home_odds = prices[home]
-        away_point, away_odds = prices[away]
-
-        # exact line match: require the specific point for the relevant side
-        if float(home_point) != float(point) and float(away_point) != float(point):
-            continue
-
-        # sanity: they should be opposite signs (allow 0)
-        if float(home_point) != -float(away_point) and not (float(home_point) == 0 and float(away_point) == 0):
-            continue
-
-        if home_odds == 0 or away_odds == 0:
-            continue
-
-        out.append((str(book.get("title") or book.get("key") or ""), home_odds, away_odds))
 
     return out
 
@@ -265,39 +273,47 @@ def _extract_book_total_at_point(event: Dict[str, Any], point: float) -> List[Tu
     out: List[Tuple[str, int, int]] = []
 
     for book in event.get("bookmakers", []) or []:
-        m = _extract_market(book, "totals")
-        if not m:
-            continue
-        outcomes = m.get("outcomes") or []
-        if len(outcomes) < 2:
-            continue
+        title = str(book.get("title") or book.get("key") or "")
+        found_for_book = False
 
-        over = None
-        under = None
-        for o in outcomes:
-            name = str(o.get("name") or "").lower()
-            p = o.get("point")
-            price = o.get("price")
-            if p is None or price is None:
+        for m in (book.get("markets") or []):
+            if m.get("key") != "totals":
                 continue
-            try:
-                p_f = float(p)
-                pr_i = int(price)
-            except Exception:
+            outcomes = m.get("outcomes") or []
+            if len(outcomes) < 2:
                 continue
-            if p_f != float(point):
-                continue
-            if name == "over":
-                over = pr_i
-            elif name == "under":
-                under = pr_i
 
-        if over is None or under is None:
-            continue
-        if over == 0 or under == 0:
-            continue
+            over = None
+            under = None
+            for o in outcomes:
+                name = str(o.get("name") or "").lower()
+                p = o.get("point")
+                price = o.get("price")
+                if p is None or price is None:
+                    continue
+                try:
+                    p_f = float(p)
+                    pr_i = int(price)
+                except Exception:
+                    continue
+                if p_f != float(point):
+                    continue
+                if name == "over":
+                    over = pr_i
+                elif name == "under":
+                    under = pr_i
 
-        out.append((str(book.get("title") or book.get("key") or ""), int(over), int(under)))
+            if over is None or under is None:
+                continue
+            if over == 0 or under == 0:
+                continue
+
+            out.append((title, int(over), int(under)))
+            found_for_book = True
+            break
+
+        if found_for_book:
+            continue
 
     return out
 
@@ -373,4 +389,4 @@ def env_sport_keys() -> List[str]:
 
 
 def env_min_books() -> int:
-    return _env_int("MIN_BOOKS", 3)
+    return _env_int("MIN_BOOKS", 1)

@@ -54,7 +54,7 @@ on:
       min_books:
         description: "Minimum sportsbook books required (1 disables this filter)"
         required: false
-        default: "3"
+        default: "1"
       game_lookahead_hours:
         description: "Only consider games starting within N hours (set 0 to disable)"
         required: false
@@ -147,7 +147,7 @@ jobs:
           KALSHI_NO_FILTERS: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.no_filters) || vars.KALSHI_NO_FILTERS || 'false' }}
 
           # Allow per-run overrides (workflow_dispatch); otherwise use repo Variables/defaults
-          MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '3' }}
+          MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '1' }}
           KALSHI_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.lookahead_hours || vars.KALSHI_LOOKAHEAD_HOURS || '72' }}
           KALSHI_GAME_LOOKAHEAD_HOURS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.game_lookahead_hours || vars.KALSHI_GAME_LOOKAHEAD_HOURS || '24' }}
           KALSHI_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.buy_fee_cents || vars.KALSHI_BUY_FEE_CENTS || '2' }}
