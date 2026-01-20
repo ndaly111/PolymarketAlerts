@@ -44,6 +44,7 @@ from oddsapi_lines import (
     fetch_all_sports_events,
     normalize_team_name,
 )
+from draftkings_lines import fetch_all_draftkings_events
 from team_ids import (
     kalshi_team_id,
     odds_event_team_ids,
@@ -1286,7 +1287,7 @@ def scan() -> int:
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
     include_unknown_volume = True if no_filters else (volume_missing_policy != "exclude")
-    min_books_effective = 1 if (debug_mode or no_filters) else min_books
+    min_books_effective = max(1, min_books)
     min_volume_effective = 0 if (debug_mode or no_filters) else min_volume
     if no_filters or debug_wide_scan or lookahead_hours <= 0:
         max_close_ts_effective = None
@@ -1362,14 +1363,22 @@ def scan() -> int:
 
     # Odds events (all at once)
     sport_keys = env_sport_keys()
+    sportsbook_source = "theoddsapi"
     odds_events = fetch_all_sports_events(sport_keys, markets="h2h,spreads,totals", regions=odds_regions)
+
+    if not odds_events:
+        print("Odds API returned no events — falling back to DraftKings API.")
+        sportsbook_source = "draftkings"
+        odds_events = fetch_all_draftkings_events(sport_keys)
+
+    run_meta["sportsbook_source"] = sportsbook_source
 
     if not odds_events:
         run_meta["status"] = "error_no_odds_events"
         _write_json(meta_path, run_meta)
         _copy_text(meta_path, meta_latest)
-        print("No sportsbook events returned from The Odds API (check THE_ODDS_API / quota).")
-        print("Likely causes: quota exhausted, 429 rate limit, invalid API key, or network failure.")
+        print("No sportsbook events returned from The Odds API or DraftKings fallback.")
+        print("Likely causes: quota exhausted, rate limits, invalid API key, or network failure.")
         return 2
 
     max_game_ts: Optional[int]
@@ -2180,6 +2189,11 @@ def scan() -> int:
     if debug_mode:
         print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
     elif webhook and (rows or always_notify):
+        header_line = (
+            f"**Kalshi value scanner**\n"
+            f"Source: `{sportsbook_source}` | min_books={min_books_effective}\n"
+            "Books shown per play reflect available lines\n"
+        )
         if not rows:
             vol_note = f"vol≥{min_volume}"
             if min_volume_effective > 0 and include_unknown_volume:
@@ -2189,6 +2203,7 @@ def scan() -> int:
             post_discord(
                 webhook,
                 (
+                    f"{header_line}\n"
                     f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
                     f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, {vol_note})."
                 ),
@@ -2207,6 +2222,7 @@ def scan() -> int:
             grouped.setdefault((r.event_title, r.commence_time_iso), []).append(r)
 
         lines: List[str] = []
+        lines.append(header_line)
         lines.append(
             (
                 f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, "
