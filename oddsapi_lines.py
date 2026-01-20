@@ -83,7 +83,13 @@ def fetch_events(
 
     # light throttle to avoid hammering API across multiple sports
     time.sleep(sleep_s)
-    return r.json()
+    data = r.json()
+    # Defensive: downstream matching expects sport_key on each event.
+    if isinstance(data, list):
+        for e in data:
+            if isinstance(e, dict) and "sport_key" not in e:
+                e["sport_key"] = sport_key
+    return data
 
 
 def _extract_market(book: Dict[str, Any], market_key: str) -> Optional[Dict[str, Any]]:
