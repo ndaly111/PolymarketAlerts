@@ -498,6 +498,17 @@ def cents_to_prob(cents: Optional[Any]) -> Optional[float]:
     return max(0.0, min(1.0, c / 100.0))
 
 
+def _has_real_bid(p: Optional[float]) -> bool:
+    """Return True only if a bid is meaningfully present.
+
+    We treat 0 as *no bid*; deriving an ask from a 0 bid yields a phantom 100¢ ask.
+    """
+    try:
+        return p is not None and float(p) > 0.0
+    except Exception:
+        return False
+
+
 def best_buy_probs(market: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
     """Return (yes_buy_prob, no_buy_prob) based on ask prices.
 
@@ -517,14 +528,14 @@ def best_buy_probs(market: Dict[str, Any]) -> Tuple[Optional[float], Optional[fl
         no_bid = cents_to_prob(market.get("no_bid"))
         if no_bid is None:
             no_bid = _price_to_prob(market.get("no_bid_dollars"))
-        if no_bid is not None:
+        if _has_real_bid(no_bid):
             yes_ask = max(0.0, 1.0 - no_bid)
 
     if no_ask is None:
         yes_bid = cents_to_prob(market.get("yes_bid"))
         if yes_bid is None:
             yes_bid = _price_to_prob(market.get("yes_bid_dollars"))
-        if yes_bid is not None:
+        if _has_real_bid(yes_bid):
             no_ask = max(0.0, 1.0 - yes_bid)
 
     return yes_ask, no_ask
@@ -582,7 +593,7 @@ def best_buy_probs_from_orderbook(session: requests.Session, market_ticker: str)
                 p = _price_to_prob(lvl.get("price") or lvl.get("p"))
             elif isinstance(lvl, (list, tuple)) and len(lvl) >= 1:
                 p = _price_to_prob(lvl[0])
-            if p is None:
+            if p is None or p <= 0.0:
                 continue
             if best is None or p > best:
                 best = p
@@ -591,8 +602,9 @@ def best_buy_probs_from_orderbook(session: requests.Session, market_ticker: str)
     yes_bid = best_bid(yes_levels)
     no_bid = best_bid(no_levels)
 
-    yes_ask = (max(0.0, min(1.0, 1.0 - no_bid))) if no_bid is not None else None
-    no_ask = (max(0.0, min(1.0, 1.0 - yes_bid))) if yes_bid is not None else None
+    # Only derive an ask if the opposing bid is real; otherwise treat as unknown.
+    yes_ask = (max(0.0, min(1.0, 1.0 - no_bid))) if _has_real_bid(no_bid) else None
+    no_ask = (max(0.0, min(1.0, 1.0 - yes_bid))) if _has_real_bid(yes_bid) else None
     return yes_ask, no_ask
 
 
@@ -1256,7 +1268,9 @@ def scan() -> int:
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
     game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
-    min_volume = env_int("KALSHI_MIN_VOLUME", 1000)
+    # IMPORTANT: Default min volume to 0. The GitHub workflow can (and should) set
+    # a higher value via repo Variables once the pipeline is producing valid matches.
+    min_volume = env_int("KALSHI_MIN_VOLUME", 0)
     volume_missing_policy = env_str("KALSHI_VOLUME_MISSING_POLICY", "include").strip().lower()
     if volume_missing_policy not in ("include", "exclude"):
         # Defensive: treat unknown values as include
@@ -1280,15 +1294,22 @@ def scan() -> int:
     no_filters = env_bool("KALSHI_NO_FILTERS", False) or env_bool("NO_FILTERS", False)
     debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
     debug_wide_scan = env_bool("KALSHI_DEBUG_WIDE_SCAN", False)
+    # Debug artifacts = extra JSONL context, but do NOT implicitly weaken matching.
     debug_artifacts = debug_mode or env_bool("KALSHI_DEBUG_ARTIFACTS", False) or no_filters
-    debug_loose = debug_mode or no_filters
+    # Only loosen matching if explicitly requested.
+    debug_loose = env_bool("KALSHI_DEBUG_LOOSE_MATCH", False)
     debug_log = debug_mode or debug_artifacts
+    debug_force_orderbook = env_bool("KALSHI_DEBUG_FORCE_ORDERBOOK", False)
+    # In DEBUG_MODE we want to *see* non-edge matches to validate matching/filtering.
+    debug_show_all = debug_mode or env_bool("KALSHI_DEBUG_SHOW_ALL", False)
+    match_max_time_skew_hours = env_int("KALSHI_MATCH_MAX_TIME_SKEW_HOURS", 12)
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
     include_unknown_volume = True if no_filters else (volume_missing_policy != "exclude")
     min_books_effective = max(1, min_books)
-    min_volume_effective = 0 if (debug_mode or no_filters) else min_volume
+    # DEBUG_MODE should still respect volume/time filters; it should only show non-edge matches.
+    min_volume_effective = 0 if no_filters else min_volume
     if no_filters or debug_wide_scan or lookahead_hours <= 0:
         max_close_ts_effective = None
         min_close_ts_effective = None
@@ -1320,6 +1341,9 @@ def scan() -> int:
         "no_filters": no_filters,
         "debug_artifacts": debug_artifacts,
         "debug_loose": debug_loose,
+        "debug_force_orderbook": debug_force_orderbook,
+        "debug_show_all": debug_show_all,
+        "match_max_time_skew_hours": match_max_time_skew_hours,
         "debug_log": debug_log,
         "min_close_buffer_hours": min_close_buffer_hours,
         "min_close_ts": min_close_ts_effective,
@@ -1863,7 +1887,15 @@ def scan() -> int:
                     match_id_skew_reject += 1
 
             if not odds_event:
-                ranked = rank_event_matches(odds_events, team_a, team_b, top_k=5)
+                # Constrain fuzzy matching to inferred sport candidates to avoid cross-sport/date matches.
+                scoped_events = odds_events
+                if sport_candidates:
+                    scoped_events = [
+                        e
+                        for e in odds_events
+                        if sport_prefix_from_odds_key(str(e.get("sport_key") or "")) in sport_candidates
+                    ]
+                ranked = rank_event_matches(scoped_events, team_a, team_b, top_k=5)
                 match_threshold = 0.0 if debug_loose else 1.30
                 if not debug_loose and odds_event_id_index and sport_candidates:
                     has_id_pair = any(
@@ -1874,8 +1906,35 @@ def scan() -> int:
                         match_threshold = 1.60
                 odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
                 if odds_event:
-                    sport_prefix_used = sport_prefix_from_odds_key(str(odds_event.get("sport_key") or ""))
-                    match_fuzzy_ok += 1
+                    # Reject fuzzy matches whose game time is wildly different than the Kalshi close time.
+                    # This prevents e.g. a "2025NOV" Kalshi market matching to a "today" Odds event.
+                    if close_ts is not None and match_max_time_skew_hours > 0:
+                        commence_ts = iso_to_ts(str(odds_event.get("commence_time") or ""))
+                        if commence_ts is not None:
+                            skew = abs(int(commence_ts) - int(close_ts))
+                            if skew > int(match_max_time_skew_hours * 3600):
+                                drops["odds_match_time_skew"] += 1
+                                if debug_log and len(debug_unmatched) < debug_max:
+                                    debug_unmatched.append(
+                                        {
+                                            "reason": "odds_event_time_skew_reject",
+                                            "series_ticker": st,
+                                            "market_ticker": market_ticker,
+                                            "kalshi_event_title": event_title or market_title,
+                                            "matchup": {"a": team_a, "b": team_b},
+                                            "close_ts": close_ts,
+                                            "odds_commence_time": odds_event.get("commence_time"),
+                                            "odds_sport_key": odds_event.get("sport_key"),
+                                            "odds_id": odds_event.get("id"),
+                                            "skew_seconds": skew,
+                                            "skew_hours": skew / 3600.0,
+                                            "max_skew_hours": match_max_time_skew_hours,
+                                        }
+                                    )
+                                odds_event = None
+                    if odds_event:
+                        sport_prefix_used = sport_prefix_from_odds_key(str(odds_event.get("sport_key") or ""))
+                        match_fuzzy_ok += 1
             if not odds_event:
                 drops["odds_match_failed"] += 1
                 if debug_log and len(debug_unmatched) < debug_max:
@@ -2029,11 +2088,13 @@ def scan() -> int:
 
             # Kalshi buy prices (asks)
             yes_buy, no_buy = best_buy_probs(m)
-            # In debug, always use the orderbook for pricing.
-            # In normal mode, use it as a fallback when snapshot asks are missing.
+            # Pricing:
+            # - In normal mode, use orderbook only as a fallback when snapshot asks are missing.
+            # - In DEBUG_MODE, do NOT automatically explode runtime by fetching every orderbook.
+            #   Enable KALSHI_DEBUG_FORCE_ORDERBOOK=1 when you explicitly want that behavior.
             want_orderbook = False
             if use_orderbook and market_ticker:
-                want_orderbook = (debug_mode or no_filters) or (yes_buy is None or no_buy is None)
+                want_orderbook = (yes_buy is None or no_buy is None) or (debug_force_orderbook and debug_mode)
 
             if want_orderbook and orderbook_calls < orderbook_max_calls:
                 try:
@@ -2090,7 +2151,9 @@ def scan() -> int:
             if best_side is None or best_all_in is None or best_fair_side is None:
                 continue
 
-            if (not debug_mode) and (not no_filters) and best_edge < min_edge:
+            # In DEBUG_MODE we want to keep *matched* games even if the edge is below MIN_EDGE,
+            # so we can validate matching + filtering correctness.
+            if (not debug_show_all) and (not no_filters) and best_edge < min_edge:
                 drops["edge_below_min"] += 1
                 continue
 
@@ -2149,12 +2212,19 @@ def scan() -> int:
             )
 
     rows.sort(key=lambda r: r.edge, reverse=True)
+    rows_all = list(rows)
     rows = rows[: max(1, top_n)]
 
     csv_path = os.path.join(outdir, f"kalshi_value_{stamp}.csv")
     json_path = os.path.join(outdir, f"kalshi_value_{stamp}.json")
     csv_latest = os.path.join(outdir, "kalshi_value_latest.csv")
     json_latest = os.path.join(outdir, "kalshi_value_latest.json")
+
+    # In debug/no-filter modes, also write untruncated outputs to validate matching/filters.
+    csv_all_path = os.path.join(outdir, f"kalshi_value_all_{stamp}.csv")
+    json_all_path = os.path.join(outdir, f"kalshi_value_all_{stamp}.json")
+    csv_all_latest = os.path.join(outdir, "kalshi_value_all_latest.csv")
+    json_all_latest = os.path.join(outdir, "kalshi_value_all_latest.json")
 
     matched_path = os.path.join(outdir, f"kalshi_debug_matched_{stamp}.jsonl")
     unmatched_path = os.path.join(outdir, f"kalshi_debug_unmatched_{stamp}.jsonl")
@@ -2178,6 +2248,17 @@ def scan() -> int:
     _copy_text(csv_path, csv_latest)
     _copy_text(json_path, json_latest)
 
+    if debug_show_all or no_filters:
+        with open(csv_all_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writeheader()
+            for r in rows_all:
+                w.writerow(to_dict(r))
+        with open(json_all_path, "w", encoding="utf-8") as f:
+            json.dump([to_dict(r) for r in rows_all], f, indent=2)
+        _copy_text(csv_all_path, csv_all_latest)
+        _copy_text(json_all_path, json_all_latest)
+
     # Debug bundles (these are the “files I’m looking for”)
     _write_jsonl(matched_path, debug_matched)
     _write_jsonl(unmatched_path, debug_unmatched)
@@ -2199,6 +2280,7 @@ def scan() -> int:
 
     run_meta["status"] = "ok"
     run_meta["rows_written"] = len(rows)
+    run_meta["rows_written_all"] = len(rows_all)
     run_meta["orderbook_calls"] = orderbook_calls
     run_meta["debug_matched_rows"] = len(debug_matched)
     run_meta["debug_unmatched_rows"] = len(debug_unmatched)
@@ -2213,11 +2295,35 @@ def scan() -> int:
     webhook = env_str("DISCORD_WEBHOOK_URL", "")
     always_notify = env_bool("ALWAYS_NOTIFY", False)
 
+    def _diag_summary() -> str:
+        # Keep this short; Discord truncates. The full meta JSON has everything.
+        dc = run_meta.get("drop_counts") or {}
+
+        def g(k: str) -> int:
+            try:
+                return int(dc.get(k) or 0)
+            except Exception:
+                return 0
+
+        parts = [
+            f"events={run_meta.get('odds_events_total', '?')}",
+            f"markets_seen={run_meta.get('markets_seen_total', '?')}",
+            f"id_ok={run_meta.get('match_id_ok', 0)}",
+            f"id_skew_rej={run_meta.get('match_id_skew_reject', 0)}",
+            f"fuzzy_ok={run_meta.get('match_fuzzy_ok', 0)}",
+            f"drop_odds_match={g('odds_match_failed')}",
+            f"drop_time_skew={g('odds_match_time_skew')}",
+            f"drop_fair={g('fair_prob_unavailable')}",
+            f"drop_books={g('books_below_min')}",
+            f"drop_edge={g('edge_below_min')}",
+        ]
+        return " | ".join(parts)
+
     # Discord notifications:
-    # - Never post in debug mode
-    # - Never post when there are no edges (rows will be empty in normal mode)
-    if debug_mode:
-        print("DEBUG_MODE=true: wrote outputs but skipping Discord post.")
+    # - Never post in DEBUG_MODE (validation runs)
+    # - Never post in NO_FILTERS / WIDE_SCAN modes (can include junk)
+    if debug_mode or no_filters or debug_wide_scan:
+        print("Debug/no-filter run: wrote outputs but skipping Discord post.")
     elif webhook and (rows or always_notify):
         header_line = (
             f"**Kalshi value scanner**\n"
@@ -2225,17 +2331,18 @@ def scan() -> int:
             "Books shown per play reflect available lines\n"
         )
         if not rows:
-            vol_note = f"vol≥{min_volume}"
+            vol_note = f"vol≥{min_volume_effective}"
             if min_volume_effective > 0 and include_unknown_volume:
                 vol_note = f"{vol_note} (unknown vol included)"
             elif min_volume_effective > 0 and not include_unknown_volume:
-                vol_note = f"{vol_note} (unknown vol dropped)"
+                vol_note = f"{vol_note} (unknown vol excluded)"
             post_discord(
                 webhook,
                 (
                     f"{header_line}\n"
                     f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
                     f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, {vol_note})."
+                    f"\n_{_diag_summary()}_"
                 ),
             )
             return 0
@@ -2256,7 +2363,7 @@ def scan() -> int:
         lines.append(
             (
                 f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, "
-                f"games ≤{game_lookahead_hours}h, vol≥{min_volume})."
+                f"games ≤{game_lookahead_hours}h, vol≥{min_volume_effective})."
             )
         )
 
@@ -2281,7 +2388,7 @@ def scan() -> int:
                 fair_cents = int(round(it.fair_prob_side * 100))
                 line1 = (
                     f"- {it.line_type.upper()} {it.line_label}: buy {it.side_to_buy} @{buy_cents}¢ "
-                    f"vs fair {fair_cents}¢ → **+{it.edge*100:.1f}pp** | vol {it.kalshi_volume} | "
+                    f"vs fair {fair_cents}¢ → **{it.edge*100:+.1f}pp** | vol {it.kalshi_volume} | "
                     f"books {it.books_used}"
                 )
                 line2 = f"  {it.url}"
