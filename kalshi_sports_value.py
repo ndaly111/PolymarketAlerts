@@ -119,21 +119,20 @@ def iso_to_ts(value: str) -> Optional[int]:
 
 
 def _normalize_epoch_seconds(value: Any) -> Optional[int]:
+    """Normalize epoch timestamps that may be seconds, ms, us, or ns into seconds."""
     if value is None:
         return None
     try:
         if isinstance(value, str) and ("T" in value or "Z" in value or "+" in value):
             return iso_to_ts(value)
-        v = float(value)
+        t = int(float(value))
     except Exception:
         return None
-    if v > 1e18:
-        v = v / 1e9
-    elif v > 1e15:
-        v = v / 1e6
-    elif v > 1e12:
-        v = v / 1e3
-    return int(v)
+    if t < 0:
+        return None
+    while t > 10_000_000_000:
+        t //= 1000
+    return t
 
 
 def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
@@ -513,6 +512,25 @@ def cents_to_prob(cents: Optional[Any]) -> Optional[float]:
         return None
     # Kalshi prices are in cents; clamp to [0, 1] to avoid weirdness if API ever returns >100.
     return max(0.0, min(1.0, c / 100.0))
+
+
+def _short_market_view(m: Dict[str, Any], close_ts: Optional[int] = None) -> Dict[str, Any]:
+    """Small, stable view of a market for pipeline artifacts."""
+    return {
+        "ticker": m.get("ticker") or m.get("market_ticker"),
+        "status": m.get("status"),
+        "close_time": m.get("close_time"),
+        "close_ts": close_ts if close_ts is not None else m.get("close_ts"),
+        "event_title": (m.get("event_title") or ""),
+        "title": (m.get("title") or m.get("market_title") or ""),
+        "yes_sub_title": m.get("yes_sub_title"),
+        "no_sub_title": m.get("no_sub_title"),
+        "volume": m.get("volume"),
+        "yes_ask": m.get("yes_ask"),
+        "no_ask": m.get("no_ask"),
+        "yes_bid": m.get("yes_bid"),
+        "no_bid": m.get("no_bid"),
+    }
 
 
 def _has_real_bid(p: Optional[float]) -> bool:
@@ -1271,6 +1289,23 @@ def _attach_master_debug(
     return stats
 
 
+def _stage_inc(stages: Dict[str, Any], name: str, n: int = 1) -> None:
+    s = stages.setdefault(name, {"count": 0})
+    try:
+        s["count"] = int(s.get("count") or 0) + int(n)
+    except Exception:
+        s["count"] = 0
+
+
+def _stage_sample(stages: Dict[str, Any], name: str, item: Any, limit: int = 20) -> None:
+    s = stages.setdefault(name, {"count": 0, "samples": []})
+    if "count" not in s:
+        s["count"] = 0
+    samples = s.setdefault("samples", [])
+    if isinstance(samples, list) and len(samples) < limit:
+        samples.append(item)
+
+
 def scan() -> int:
     # Output directory (create immediately so artifacts always have *something* if we can write it)
     outdir = env_str("OUTDIR", "out")
@@ -1279,6 +1314,9 @@ def scan() -> int:
     stamp = now_dt_utc.strftime("%Y%m%d_%H%M%SZ")
 
     debug_max = env_int("KALSHI_DEBUG_MAX", 50)  # keep artifacts small; bump if needed
+
+    pipeline_report_enabled = env_bool("KALSHI_PIPELINE_REPORT", False)
+    pipeline_stages: Dict[str, Any] = {}
 
     fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 2)
     fee_prob = fee_cents / 100.0
@@ -1320,6 +1358,9 @@ def scan() -> int:
     # In DEBUG_MODE we want to *see* non-edge matches to validate matching/filtering.
     debug_show_all = debug_mode or env_bool("KALSHI_DEBUG_SHOW_ALL", False)
     match_max_time_skew_hours = env_int("KALSHI_MATCH_MAX_TIME_SKEW_HOURS", 12)
+
+    # If debug/no-filter, automatically enable pipeline report unless explicitly disabled.
+    pipeline_report_enabled = pipeline_report_enabled or debug_mode or no_filters
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
@@ -1376,6 +1417,15 @@ def scan() -> int:
         "status": "starting",
     }
 
+    if pipeline_report_enabled:
+        pipeline_stages["config"] = {
+            "now_ts": now_ts,
+            "min_close_ts": min_close_ts_effective,
+            "max_close_ts": max_close_ts_effective,
+            "lookahead_hours": lookahead_hours,
+            "game_lookahead_hours": game_lookahead_hours,
+        }
+
     meta_path = os.path.join(outdir, f"kalshi_run_meta_{stamp}.json")
     meta_latest = os.path.join(outdir, "kalshi_run_meta_latest.json")
 
@@ -1413,6 +1463,22 @@ def scan() -> int:
         odds_events = fetch_all_draftkings_events(sport_keys)
 
     run_meta["sportsbook_source"] = sportsbook_source
+
+    if pipeline_report_enabled:
+        _stage_inc(pipeline_stages, "odds_ingest", len(odds_events or []))
+        for e in (odds_events or [])[:20]:
+            _stage_sample(
+                pipeline_stages,
+                "odds_ingest",
+                {
+                    "id": e.get("id"),
+                    "sport_key": e.get("sport_key"),
+                    "commence_time": e.get("commence_time"),
+                    "home_team": e.get("home_team"),
+                    "away_team": e.get("away_team"),
+                },
+                limit=20,
+            )
 
     if not odds_events:
         # Default behavior: skip (exit 0) if sportsbook odds are unavailable.
@@ -1631,6 +1697,16 @@ def scan() -> int:
             {"ticker": t, "title": title, "score": int(score)}
             for (score, t, title) in scored[: min(25, len(scored))]
         ]
+
+    if pipeline_report_enabled:
+        _stage_inc(pipeline_stages, "kalshi_series_selected", len(series or []))
+        for st in (series or [])[:20]:
+            _stage_sample(
+                pipeline_stages,
+                "kalshi_series_selected",
+                {"series_ticker": st},
+                limit=20,
+            )
     if not series:
         run_meta["status"] = "error_no_series"
 
@@ -1707,10 +1783,29 @@ def scan() -> int:
 
         raw_count = len(markets)
         markets_fetched_total += raw_count
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "kalshi_markets_ingest", raw_count)
+            for m in markets[:5]:
+                _stage_sample(
+                    pipeline_stages,
+                    "kalshi_markets_ingest",
+                    _short_market_view(m),
+                    limit=30,
+                )
         # If the API didn't enforce open-only (or doesn't like combining filters),
         # enforce it here without dropping markets that omit 'status'.
         filtered: List[Dict[str, Any]] = []
         for m in markets:
+            markets_seen_total += 1
+            if pipeline_report_enabled:
+                _stage_inc(pipeline_stages, "kalshi_markets_seen", 1)
+            if pipeline_report_enabled and markets_seen_total <= 30:
+                _stage_sample(
+                    pipeline_stages,
+                    "kalshi_markets_seen",
+                    _short_market_view(m),
+                    limit=30,
+                )
             s = str(m.get("status") or "").strip().lower()
             if not (debug_mode or no_filters):
                 if s in ("closed", "settled"):
@@ -1720,24 +1815,72 @@ def scan() -> int:
             filtered.append(m)
         markets = filtered
         status_filtered_count = len(markets)
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "status_pass", status_filtered_count)
 
         if close_window_enabled:
             close_filtered: List[Dict[str, Any]] = []
             for m in markets:
-                cts = market_close_ts(m)
+                cts_raw = m.get("close_ts") if m.get("close_ts") is not None else m.get("close_time")
+                cts = _normalize_epoch_seconds(cts_raw)
+                raw_i: Optional[int] = None
+                if cts_raw is not None:
+                    try:
+                        raw_i = int(float(cts_raw))
+                    except Exception:
+                        raw_i = None
+                if (
+                    pipeline_report_enabled
+                    and raw_i is not None
+                    and cts is not None
+                    and raw_i != int(cts)
+                ):
+                    _stage_inc(pipeline_stages, "timestamp_normalization", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "timestamp_normalization",
+                        {
+                            "close_ts_raw": raw_i,
+                            "close_ts_norm": int(cts),
+                            "close_time": m.get("close_time"),
+                        },
+                        limit=20,
+                    )
                 if cts is None:
                     drops["close_time_missing"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "close_time_missing", 1)
                     close_filtered.append(m)
                     continue
                 if min_close_ts_effective is not None and cts < min_close_ts_effective:
                     drops["close_time_before_min"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "drop_close_time_before_min", 1)
                     continue
                 if max_close_ts_effective is not None and cts > max_close_ts_effective:
                     drops["close_time_after_max"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "drop_close_time_after_max", 1)
+                        _stage_sample(
+                            pipeline_stages,
+                            "drop_close_time_after_max",
+                            {
+                                "market": _short_market_view(m, close_ts=cts),
+                                "close_ts": cts,
+                                "now_ts": now_ts,
+                                "max_close_ts": max_close_ts_effective,
+                                "delta_hours": (cts - now_ts) / 3600.0,
+                            },
+                            limit=20,
+                        )
                     continue
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "pass_close_window", 1)
                 close_filtered.append(m)
             markets = close_filtered
         close_window_count = len(markets)
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "close_window_pass", close_window_count)
 
         if len(debug_series_counts) < debug_max:
             debug_series_counts.append(
@@ -1750,7 +1893,6 @@ def scan() -> int:
             )
 
         for m in markets:
-            markets_seen_total += 1
             market_ticker = str(m.get("ticker") or "")
             if not market_ticker:
                 continue
@@ -1931,6 +2073,20 @@ def scan() -> int:
                             skew = abs(int(commence_ts) - int(close_ts))
                             if skew > int(match_max_time_skew_hours * 3600):
                                 drops["odds_match_time_skew"] += 1
+                                if pipeline_report_enabled:
+                                    _stage_inc(pipeline_stages, "drop_odds_match_time_skew", 1)
+                                    _stage_sample(
+                                        pipeline_stages,
+                                        "drop_odds_match_time_skew",
+                                        {
+                                            "market": _short_market_view(m),
+                                            "matchup": {"a": team_a, "b": team_b},
+                                            "close_ts": close_ts,
+                                            "odds_commence_time": odds_event.get("commence_time"),
+                                            "skew_seconds": skew,
+                                        },
+                                        limit=10,
+                                    )
                                 if debug_log and len(debug_unmatched) < debug_max:
                                     debug_unmatched.append(
                                         {
@@ -1954,6 +2110,18 @@ def scan() -> int:
                         match_fuzzy_ok += 1
             if not odds_event:
                 drops["odds_match_failed"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_odds_match_failed", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_odds_match_failed",
+                        {
+                            "market": _short_market_view(m),
+                            "matchup": {"a": team_a, "b": team_b},
+                            "line_type": lt,
+                        },
+                        limit=10,
+                    )
                 if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -2073,6 +2241,18 @@ def scan() -> int:
 
             if not fair_yes:
                 drops["fair_prob_unavailable"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_fair_prob_unavailable", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_fair_prob_unavailable",
+                        {
+                            "market": _short_market_view(m),
+                            "line_type": lt,
+                            "matchup": {"a": team_a, "b": team_b},
+                        },
+                        limit=10,
+                    )
                 if debug_log and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
@@ -2101,6 +2281,18 @@ def scan() -> int:
             books_used = int(fair_yes.get("books_used") or 0)
             if books_used < min_books_effective:
                 drops["books_below_min"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_books_below_min", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_books_below_min",
+                        {
+                            "market": _short_market_view(m),
+                            "books_used": books_used,
+                            "min_books": min_books_effective,
+                        },
+                        limit=10,
+                    )
                 continue
 
             # Kalshi buy prices (asks)
@@ -2172,6 +2364,18 @@ def scan() -> int:
             # so we can validate matching + filtering correctness.
             if (not debug_show_all) and (not no_filters) and best_edge < min_edge:
                 drops["edge_below_min"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_edge_below_min", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_edge_below_min",
+                        {
+                            "market": _short_market_view(m),
+                            "edge": float(best_edge),
+                            "min_edge": min_edge,
+                        },
+                        limit=10,
+                    )
                 continue
 
             if len(debug_matched) < debug_max:
@@ -2306,6 +2510,23 @@ def scan() -> int:
         run_meta["debug_candidates_rows"] = len(debug_candidates)
     _write_json(meta_path, run_meta)
     _copy_text(meta_path, meta_latest)
+
+    if pipeline_report_enabled:
+        pipe_path = os.path.join(outdir, f"kalshi_pipeline_report_{stamp}.json")
+        pipe_latest = os.path.join(outdir, "kalshi_pipeline_report_latest.json")
+        payload = {
+            "stamp_utc": stamp,
+            "run_meta_key_counts": {
+                "odds_events_total": run_meta.get("odds_events_total"),
+                "markets_fetched_total": run_meta.get("markets_fetched_total"),
+                "markets_seen_total": run_meta.get("markets_seen_total"),
+                "rows_written": run_meta.get("rows_written"),
+            },
+            "drop_counts": run_meta.get("drop_counts") or {},
+            "stages": pipeline_stages,
+        }
+        _write_json(pipe_path, payload)
+        _copy_text(pipe_path, pipe_latest)
 
     print(f"Wrote {len(rows)} rows to {csv_path} and {json_path}")
 
