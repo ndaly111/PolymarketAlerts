@@ -592,8 +592,6 @@ def _short_market_view(m: Dict[str, Any], close_ts: Optional[int] = None) -> Dic
         "status": m.get("status"),
         "close_time": m.get("close_time"),
         "close_ts": close_ts if close_ts is not None else m.get("close_ts"),
-        "expected_expiration_time": m.get("expected_expiration_time") or m.get("expectedExpirationTime"),
-        "expiration_time": m.get("expiration_time") or m.get("expirationTime"),
         "event_title": (m.get("event_title") or ""),
         "title": (m.get("title") or m.get("market_title") or ""),
         "yes_sub_title": m.get("yes_sub_title"),
@@ -1390,7 +1388,6 @@ def scan() -> int:
 
     pipeline_report_enabled = env_bool("KALSHI_PIPELINE_REPORT", False)
     pipeline_stages: Dict[str, Any] = {}
-    api_close_filter = env_bool("KALSHI_API_CLOSE_FILTER", False)
 
     fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 2)
     fee_prob = fee_cents / 100.0
@@ -1898,7 +1895,31 @@ def scan() -> int:
         if close_window_enabled:
             close_filtered: List[Dict[str, Any]] = []
             for m in markets:
-                cts = market_close_ts(m)
+                cts_raw = m.get("close_ts") if m.get("close_ts") is not None else m.get("close_time")
+                cts = _normalize_epoch_seconds(cts_raw)
+                raw_i: Optional[int] = None
+                if cts_raw is not None:
+                    try:
+                        raw_i = int(float(cts_raw))
+                    except Exception:
+                        raw_i = None
+                if (
+                    pipeline_report_enabled
+                    and raw_i is not None
+                    and cts is not None
+                    and raw_i != int(cts)
+                ):
+                    _stage_inc(pipeline_stages, "timestamp_normalization", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "timestamp_normalization",
+                        {
+                            "close_ts_raw": raw_i,
+                            "close_ts_norm": int(cts),
+                            "close_time": m.get("close_time"),
+                        },
+                        limit=20,
+                    )
                 if cts is None:
                     drops["close_time_missing"] += 1
                     if pipeline_report_enabled:
