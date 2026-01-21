@@ -1,4 +1,5 @@
 .state/
+cache/
 __pycache__/
 *.pyc
 reports/
