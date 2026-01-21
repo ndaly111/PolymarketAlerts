@@ -118,6 +118,24 @@ def iso_to_ts(value: str) -> Optional[int]:
     return int(dt.timestamp()) if dt else None
 
 
+def _normalize_epoch_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str) and ("T" in value or "Z" in value or "+" in value):
+            return iso_to_ts(value)
+        v = float(value)
+    except Exception:
+        return None
+    if v > 1e18:
+        v = v / 1e9
+    elif v > 1e15:
+        v = v / 1e6
+    elif v > 1e12:
+        v = v / 1e3
+    return int(v)
+
+
 def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
     """Return market close time (unix seconds) if present.
 
@@ -128,13 +146,12 @@ def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
     """
     try:
         if "close_ts" in market and market["close_ts"] is not None:
-            return int(market["close_ts"])
+            return _normalize_epoch_seconds(market["close_ts"])
     except Exception:
         pass
     try:
         if "close_time" in market and market["close_time"]:
-            ts = iso_to_ts(str(market["close_time"]))
-            return int(ts) if ts is not None else None
+            return _normalize_epoch_seconds(market["close_time"])
     except Exception:
         pass
     return None
