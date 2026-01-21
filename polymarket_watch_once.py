@@ -17,22 +17,25 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 DATA_API_BASE = "https://data-api.polymarket.com"
+GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 
 # Default target = Polymarket profile @0x8dxd (profile address)
 DEFAULT_TARGET_ADDRESS = "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"
 
 TARGET_ADDRESS = os.getenv("TARGET_ADDRESS", DEFAULT_TARGET_ADDRESS).strip()
+TARGET_USERNAME = os.getenv("TARGET_USERNAME", "").strip().lstrip("@")
 
 # IMPORTANT: This must come from GitHub Actions secret, not hardcoded.
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -45,8 +48,27 @@ STATE_FILE = Path(os.getenv("STATE_FILE", ".state/polymarket_state.json"))
 SEED_LIMIT = int(os.getenv("SEED_LIMIT", "50"))
 SEEN_CACHE_MAX = int(os.getenv("SEEN_CACHE_MAX", "2000"))
 
+# Polling behavior
+BATCH_LIMIT = int(os.getenv("BATCH_LIMIT", "100"))
+SLEEP_BETWEEN_PAGES = float(os.getenv("SLEEP_BETWEEN_PAGES", "0.5"))
+
 # Resync position sizes after processing trades (helps avoid drift).
-RESYNC_POSITIONS = os.getenv("RESYNC_POSITIONS", "1").strip() == "1"
+RESYNC_POSITIONS = os.getenv("RESYNC_POSITIONS", "true").lower() in ("1", "true", "yes", "y")
+
+# Optional: persist trade log for later display (JSONL)
+TRADE_LOG_FILE = os.getenv("TRADE_LOG_FILE", "").strip()
+MAX_TRADE_LOG_LINES = int(os.getenv("MAX_TRADE_LOG_LINES", "10000"))
+
+# Optional: emit quick reports (useful for GitHub Actions artifacts)
+REPORT_JSON = os.getenv("REPORT_JSON", "").strip()
+REPORT_HTML = os.getenv("REPORT_HTML", "").strip()
+REPORT_TAIL = int(os.getenv("REPORT_TAIL", "250"))
+
+# Which lifecycle events should trigger Discord alerts
+# - OPEN: first time a position becomes >0
+# - CLOSE: position goes to 0 from >0
+_aa = os.getenv("ALERT_ACTIONS", "OPEN,CLOSE")
+ALERT_ACTIONS = {s.strip().upper() for s in _aa.split(",") if s.strip()}
 
 
 def make_session() -> requests.Session:
@@ -68,6 +90,113 @@ def make_session() -> requests.Session:
 SESSION = make_session()
 
 
+def _ensure_parent_dir(path: str) -> None:
+    if not path:
+        return
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    if not path:
+        return
+    _ensure_parent_dir(path)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _read_jsonl_tail(path: str, n: int) -> List[Dict[str, Any]]:
+    if not path or not Path(path).exists() or n <= 0:
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    out: List[Dict[str, Any]] = []
+    for line in lines[-n:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _trim_jsonl(path: str, max_lines: int) -> None:
+    if not path or max_lines <= 0:
+        return
+    p = Path(path)
+    if not p.exists():
+        return
+    with open(p, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    if len(lines) <= max_lines:
+        return
+    keep = lines[-max_lines:]
+    with open(p, "w", encoding="utf-8") as f:
+        f.writelines(keep)
+
+
+def _get_json_base(base: str, path: str, params: Dict[str, Any]) -> Any:
+    url = f"{base.rstrip('/')}{path}"
+    print(f"[fetch] GET {url} params={params}")
+    r = SESSION.get(url, params=params, timeout=25)
+    if r.status_code >= 400:
+        raise RuntimeError(f"HTTP {r.status_code} from API {path}: {r.text[:300]}")
+    return r.json()
+
+
+def resolve_username_to_wallet(username: str) -> Optional[str]:
+    """
+    Resolve a Polymarket username -> proxy wallet address using Gamma's public-search endpoint.
+    If resolution isn't unique, returns None.
+    """
+    u = username.strip().lstrip("@")
+    if not u:
+        return None
+    try:
+        data = _get_json_base(
+            GAMMA_API_BASE,
+            "/public-search",
+            {"q": u, "search_profiles": "true", "limit_per_type": 10},
+        )
+    except Exception as exc:
+        print(f"[resolve] Failed to resolve @{u}: {exc}")
+        return None
+
+    profiles = data.get("profiles") or []
+    if not isinstance(profiles, list):
+        profiles = []
+
+    def match(profile: Dict[str, Any]) -> bool:
+        name = str(profile.get("name", "") or "").strip().lstrip("@").lower()
+        pseudonym = str(profile.get("pseudonym", "") or "").strip().lstrip("@").lower()
+        return name == u.lower() or pseudonym == u.lower()
+
+    for profile in profiles:
+        if isinstance(profile, dict) and match(profile):
+            wallet = str(profile.get("proxyWallet", "") or "").strip()
+            return wallet or None
+
+    if len(profiles) == 1 and isinstance(profiles[0], dict):
+        wallet = str(profiles[0].get("proxyWallet", "") or "").strip()
+        return wallet or None
+
+    print(f"[resolve] Could not uniquely resolve @{u}. Profiles returned={len(profiles)}")
+    return None
+
+
+def resolve_target_address() -> str:
+    if TARGET_USERNAME:
+        wallet = resolve_username_to_wallet(TARGET_USERNAME)
+        if wallet:
+            return wallet
+        print(
+            f"[resolve] Falling back to TARGET_ADDRESS because @{TARGET_USERNAME} could not be resolved."
+        )
+    return TARGET_ADDRESS
+
+
 def unix_to_dt(ts: int) -> datetime:
     # Handle seconds or ms defensively.
     if ts > 1_000_000_000_000:
@@ -76,12 +205,7 @@ def unix_to_dt(ts: int) -> datetime:
 
 
 def get_json(path: str, params: Dict[str, Any]) -> Any:
-    url = f"{DATA_API_BASE}{path}"
-    print(f"[fetch] GET {url} params={params}")
-    r = SESSION.get(url, params=params, timeout=25)
-    if r.status_code >= 400:
-        raise RuntimeError(f"HTTP {r.status_code} from Data API {path}: {r.text[:300]}")
-    return r.json()
+    return _get_json_base(DATA_API_BASE, path, params)
 
 
 def fetch_activity(
@@ -181,7 +305,7 @@ def post_discord(text: str) -> None:
         raise RuntimeError(f"Discord webhook returned HTTP {resp.status_code}: {resp.text[:200]}")
 
 
-def seed_state(state: State) -> None:
+def seed_state(state: State, target_address: str) -> None:
     """
     First run: record recent trades so we don't spam history, and snapshot positions.
     No alerts on seed run.
@@ -190,7 +314,7 @@ def seed_state(state: State) -> None:
         f"[seed] No prior state found. Seeding from recent activity (limit={SEED_LIMIT}) and snapshotting positions."
     )
     recent = fetch_activity(
-        TARGET_ADDRESS,
+        target_address,
         start=None,
         limit=SEED_LIMIT,
         offset=0,
@@ -202,7 +326,7 @@ def seed_state(state: State) -> None:
 
     # Snapshot current positions so OPEN/CLOSE begins from a sane baseline.
     try:
-        positions = fetch_positions(TARGET_ADDRESS)
+        positions = fetch_positions(target_address)
         print(f"[seed] Snapshot positions: {len(positions)} entries.")
         state.pos_sizes = {}
         for p in positions:
@@ -218,27 +342,31 @@ def seed_state(state: State) -> None:
 
 
 def run_once() -> None:
+    target_address = resolve_target_address()
+    who = f"@{TARGET_USERNAME}" if TARGET_USERNAME else target_address
+
     state = State.load(STATE_FILE)
     print(
-        f"[run] Starting watch for {TARGET_ADDRESS}. State file: {STATE_FILE} (last_ts={state.last_ts})."
+        f"[run] Starting watch for {who} ({target_address}). State file: {STATE_FILE} (last_ts={state.last_ts})."
     )
 
     # Seed and exit on first run
     if state.last_ts == 0:
-        seed_state(state)
+        seed_state(state, target_address)
         return
 
     seen = set(state.seen_keys)
     max_ts_seen = state.last_ts
 
-    limit = 500
+    limit = BATCH_LIMIT
     offset = 0
 
     total_processed = 0
     total_alerts = 0
+    opened_positions_run: List[Dict[str, Any]] = []
     while True:
         batch = fetch_activity(
-            TARGET_ADDRESS,
+            target_address,
             start=state.last_ts,
             limit=limit,
             offset=offset,
@@ -260,10 +388,9 @@ def run_once() -> None:
 
             seen.add(k)
             state.seen_keys.append(k)
-            total_processed += 1
-
             condition_id = str(evt.get("conditionId", "")).strip()
             outcome_index = int(evt.get("outcomeIndex", -1))
+            outcome_index_str = str(evt.get("outcomeIndex", "")).strip()
             pk = position_key(condition_id, outcome_index)
 
             side = str(evt.get("side", "")).upper().strip()
@@ -277,66 +404,187 @@ def run_once() -> None:
             except (InvalidOperation, ValueError):
                 before = Decimal(0)
             after = before
-            label = None
+            action = "UNKNOWN"
+            alert_label: Optional[str] = None
 
             if side == "BUY":
                 after = before + size_tokens
-                if before == 0 and after > 0:
-                    label = "OPEN"
+                action = "OPEN" if (before == 0 and after > 0) else "ADD"
+                if action == "OPEN":
+                    alert_label = "OPEN"
             elif side == "SELL":
                 after = max(before - size_tokens, Decimal(0))
-                if before > 0 and after == 0:
-                    label = "CLOSE"
+                action = "CLOSE" if (before > 0 and after == 0) else "REDUCE"
+                if action == "CLOSE":
+                    alert_label = "CLOSE"
 
             state.pos_sizes[pk] = format(after, "f")
 
-            if label:
-                title = str(evt.get("title", "(unknown market)")).strip()
-                outcome = str(evt.get("outcome", "")).strip()
+            title = str(evt.get("title", "(unknown market)")).strip()
+            outcome = str(evt.get("outcome", "")).strip()
 
-                usdc = evt.get("usdcSize", None)
+            usdc = evt.get("usdcSize", None)
+            try:
+                price = Decimal(str(evt.get("price", 0.0) or 0.0))
+            except (InvalidOperation, ValueError):
+                price = Decimal(0)
+            if usdc is not None:
                 try:
-                    price = Decimal(str(evt.get("price", 0.0) or 0.0))
+                    usdc_amt = float(Decimal(str(usdc)))
                 except (InvalidOperation, ValueError):
-                    price = Decimal(0)
-                if usdc is not None:
-                    try:
-                        usdc_amt = float(Decimal(str(usdc)))
-                    except (InvalidOperation, ValueError):
-                        usdc_amt = float(size_tokens * price)
-                else:
                     usdc_amt = float(size_tokens * price)
+            else:
+                usdc_amt = float(size_tokens * price)
 
-                when = unix_to_dt(ts).strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "unknown time"
-                tx = str(evt.get("transactionHash", "")).strip()
-                tx_url = f"https://polygonscan.com/tx/{tx}" if tx else ""
+            when_utc = unix_to_dt(ts).strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "unknown time"
+            tx = str(evt.get("transactionHash", "")).strip()
+            tx_url = f"https://polygonscan.com/tx/{tx}" if tx else ""
+
+            if action == "OPEN":
+                opened_positions_run.append(
+                    {
+                        "when_utc": when_utc,
+                        "timestamp": ts,
+                        "action": "OPEN",
+                        "side": side,
+                        "conditionId": condition_id,
+                        "outcomeIndex": outcome_index_str,
+                        "outcome": outcome,
+                        "title": title,
+                        "size": str(size_tokens),
+                        "usdcSize": usdc_amt,
+                        "before": str(before),
+                        "after": str(after),
+                        "tx": tx,
+                        "tx_url": tx_url,
+                        "event_key": k,
+                    }
+                )
+
+            if TRADE_LOG_FILE:
+                _append_jsonl(
+                    TRADE_LOG_FILE,
+                    {
+                        "when_utc": when_utc,
+                        "timestamp": ts,
+                        "address": target_address,
+                        "username": TARGET_USERNAME,
+                        "action": action,
+                        "side": side,
+                        "conditionId": condition_id,
+                        "outcomeIndex": outcome_index_str,
+                        "outcome": outcome,
+                        "title": title,
+                        "size": str(size_tokens),
+                        "usdcSize": usdc_amt,
+                        "before": str(before),
+                        "after": str(after),
+                        "price": str(price),
+                        "tx": tx,
+                        "tx_url": tx_url,
+                        "event_key": k,
+                    },
+                )
+
+            if alert_label and alert_label in ALERT_ACTIONS:
+                when = when_utc
 
                 shares_str = f"{size_tokens.quantize(Decimal('0.0001')):,}"
                 before_str = f"{before.quantize(Decimal('0.0001')):,}"
                 after_str = f"{after.quantize(Decimal('0.0001')):,}"
                 msg = (
-                    f"**{label}** — {side} {outcome}\n"
+                    f"**{alert_label}** — {side} {outcome}\n"
                     f"{title}\n"
                     f"{when}\n"
                     f"Amount: **${usdc_amt:,.2f}** | Shares: {shares_str}\n"
-                    f"Position: {before_str} → {after_str}\n"
+                    f"Position: {before_str} → **{after_str}**\n"
                     f"{tx_url}"
                 )
                 print(
-                    f"[alert] {label} {side} outcome={outcome} shares={shares_str} amount=${usdc_amt:,.2f}."
+                    f"[alert] {alert_label} {side} outcome={outcome} shares={shares_str} amount=${usdc_amt:,.2f}."
                 )
                 post_discord(msg)
                 total_alerts += 1
 
+            total_processed += 1
+
         if len(batch) < limit:
             break
         offset += limit
+        time.sleep(SLEEP_BETWEEN_PAGES)
 
     state.last_ts = max_ts_seen
 
+    if TRADE_LOG_FILE:
+        _trim_jsonl(TRADE_LOG_FILE, MAX_TRADE_LOG_LINES)
+
+    if REPORT_JSON or REPORT_HTML:
+        report_obj = {
+            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "target": {"username": TARGET_USERNAME or None, "address": target_address},
+            "opened_positions": opened_positions_run,
+        }
+
+        if REPORT_JSON:
+            _ensure_parent_dir(REPORT_JSON)
+            Path(REPORT_JSON).write_text(json.dumps(report_obj, indent=2), encoding="utf-8")
+
+        if REPORT_HTML:
+            tail = _read_jsonl_tail(TRADE_LOG_FILE, REPORT_TAIL) if TRADE_LOG_FILE else []
+            html_parts = [
+                "<html><head><meta charset='utf-8'><title>Polymarket Watch</title></head><body>",
+                f"<h2>Polymarket Watch — {who}</h2>",
+                f"<p>Generated: {report_obj['generated_at_utc']}</p>",
+                "<h3>Newly opened positions (since last run)</h3>",
+            ]
+
+            if opened_positions_run:
+                html_parts.append("<ul>")
+                for op in opened_positions_run:
+                    tx = (op.get("tx") or "").strip()
+                    tx_url = f"https://polygonscan.com/tx/{tx}" if tx else ""
+                    tx_link = f"<a href=\"{tx_url}\">tx</a>" if tx_url else ""
+                    html_parts.append(
+                        f"<li><b>{op.get('outcome','')}</b> — {op.get('title','')} "
+                        f"({op.get('when_utc','')}) {tx_link}</li>"
+                    )
+                html_parts.append("</ul>")
+            else:
+                html_parts.append("<p><i>No new opens in this run.</i></p>")
+
+            html_parts.append("<h3>Recent trades (tail)</h3>")
+            if tail:
+                html_parts.append("<table border='1' cellspacing='0' cellpadding='4'>")
+                html_parts.append(
+                    "<tr><th>When (UTC)</th><th>Action</th><th>Outcome</th><th>Title</th>"
+                    "<th>Shares</th><th>USDC</th><th>Tx</th></tr>"
+                )
+                for trade in tail:
+                    tx = (trade.get("tx") or "").strip()
+                    tx_url = f"https://polygonscan.com/tx/{tx}" if tx else ""
+                    tx_link = f"<a href=\"{tx_url}\">link</a>" if tx_url else ""
+                    html_parts.append(
+                        "<tr>"
+                        f"<td>{trade.get('when_utc','')}</td>"
+                        f"<td>{trade.get('action','')}</td>"
+                        f"<td>{trade.get('outcome','')}</td>"
+                        f"<td>{trade.get('title','')}</td>"
+                        f"<td>{trade.get('size','')}</td>"
+                        f"<td>{trade.get('usdcSize','')}</td>"
+                        f"<td>{tx_link}</td>"
+                        "</tr>"
+                    )
+                html_parts.append("</table>")
+            else:
+                html_parts.append("<p><i>No trade log available (set TRADE_LOG_FILE).</i></p>")
+
+            html_parts.append("</body></html>")
+            _ensure_parent_dir(REPORT_HTML)
+            Path(REPORT_HTML).write_text("\n".join(html_parts), encoding="utf-8")
+
     if RESYNC_POSITIONS:
         try:
-            positions = fetch_positions(TARGET_ADDRESS)
+            positions = fetch_positions(target_address)
             print(f"[resync] Positions resynced: {len(positions)} entries.")
             new_map: Dict[str, str] = {}
             for p in positions:

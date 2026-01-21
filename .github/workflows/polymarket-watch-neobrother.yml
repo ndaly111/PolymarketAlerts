@@ -1,0 +1,66 @@
+name: Polymarket Watch (neobrother)
+
+on:
+  schedule:
+    # every 15 minutes
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: polymarket-watch-neobrother
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restore watcher cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            cache/neobrother_state.json
+            cache/neobrother_trades.jsonl
+          key: polymarket-watch-neobrother-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            polymarket-watch-neobrother-${{ runner.os }}-
+
+      - name: Run watcher
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TARGET_USERNAME: neobrother
+          # Keep neobrother's watcher state separate from other watchers
+          STATE_FILE: cache/neobrother_state.json
+          # Persist newly observed trades so we can display them elsewhere
+          TRADE_LOG_FILE: cache/neobrother_trades.jsonl
+          # Only alert on newly opened positions ("newly owned")
+          ALERT_ACTIONS: OPEN
+          # Optional artifacts for quick viewing
+          REPORT_JSON: reports/neobrother_latest.json
+          REPORT_HTML: reports/neobrother_latest.html
+          REPORT_TAIL: "250"
+          MAX_TRADE_LOG_LINES: "10000"
+        run: |
+          python polymarket_watch_once.py
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neobrother-polymarket-watch
+          path: |
+            reports/neobrother_latest.json
+            reports/neobrother_latest.html
+          if-no-files-found: ignore
