@@ -47,7 +47,12 @@ jobs:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
           WEATHER_SNAPSHOT_MINUTE_MAX: "25"
         run: |
-          python -m weather.scripts.collect_forecast_snapshot
+          ARGS=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual runs should be able to write snapshots anytime.
+            ARGS+=(--no-gate)
+          fi
+          python -m weather.scripts.collect_forecast_snapshot "${ARGS[@]}"
 
       - name: Commit changes (if any)
         run: |

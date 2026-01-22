@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backfill forecast_snapshots using Open-Meteo archived (past days) forecast data.
+Backfill forecast_snapshots using Open-Meteo Historical Forecast API (proxy forecasts).
 
 What it does:
 - Pulls hourly temperature forecast series for a date range.
@@ -10,6 +10,11 @@ What it does:
 Notes / Caveats:
 - This is not guaranteed to match Apple Weather / NWS issuance timing.
 - It *does* give you consistent historical forecast data so you can start modeling now.
+
+IMPORTANT:
+- Open-Meteo Historical Forecast API is a proxy source and does not guarantee
+  "forecast-as-of {snapshot_hour_local}". Treat these rows as proxies and do
+  not mix them with true forecast sources (e.g., NWS).
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 import requests
@@ -75,29 +80,24 @@ def chunk_date_ranges(start: date, end: date, *, max_days: int) -> List[Tuple[st
     return ranges
 
 
-def fetch_open_meteo_hourly_temp(
-    city: City,
-    start_date: str,
-    end_date: str,
-    session: requests.Session,
-    past_days: int,
+def _merge_hourly_maps(
+    left: Dict[str, Dict[str, float]],
+    right: Dict[str, Dict[str, float]],
 ) -> Dict[str, Dict[str, float]]:
-    """
-    Returns {date_local: {hour_iso_local: temp_f}}.
-    """
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": city.lat,
-        "longitude": city.lon,
-        "start_date": start_date,
-        "end_date": end_date,
-        "hourly": "temperature_2m",
-        "temperature_unit": "fahrenheit",
-        "timezone": city.tz,
-        # Critical: include past days so we can backfill now.
-        # Open-Meteo describes this as archived forecasts for previous days.
-        "past_days": int(past_days),
+    """Merge {date_local: {hour_iso_local: temp_f}} maps (right overwrites left)."""
+    out: Dict[str, Dict[str, float]] = {
+        date_key: dict(hour_map) for date_key, hour_map in (left or {}).items()
     }
+    for date_key, hour_map in (right or {}).items():
+        out.setdefault(date_key, {}).update(hour_map or {})
+    return out
+
+
+def _fetch_open_meteo(
+    url: str,
+    params: Dict[str, Any],
+    session: requests.Session,
+) -> Tuple[Dict[str, Dict[str, float]], str]:
     resp = session.get(url, params=params, timeout=45)
     resp.raise_for_status()
     data = resp.json()
@@ -113,7 +113,58 @@ def fetch_open_meteo_hourly_temp(
         # t is in local timezone already because we set timezone=city.tz
         d = str(t).split("T", 1)[0]
         out.setdefault(d, {})[str(t)] = float(v)
-    return out
+    return out, resp.url
+
+
+def fetch_open_meteo_hourly_temp(
+    city: City,
+    start_date: str,
+    end_date: str,
+    session: requests.Session,
+) -> Tuple[Dict[str, Dict[str, float]], str]:
+    """
+    Returns {date_local: {hour_iso_local: temp_f}}.
+    """
+    start_dt = date.fromisoformat(start_date)
+    end_dt = date.fromisoformat(end_date)
+    today_local = datetime.now(tz=ZoneInfo(city.tz)).date()
+
+    base_params = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "timezone": city.tz,
+    }
+
+    if end_dt < today_local:
+        url = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+        params = {**base_params, "start_date": start_date, "end_date": end_date}
+        return _fetch_open_meteo(url, params, session)
+
+    if start_dt >= today_local:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {**base_params, "start_date": start_date, "end_date": end_date}
+        return _fetch_open_meteo(url, params, session)
+
+    yesterday = today_local - timedelta(days=1)
+    url_hist = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+    params_hist = {
+        **base_params,
+        "start_date": start_date,
+        "end_date": yesterday.isoformat(),
+    }
+    hist, hist_url = _fetch_open_meteo(url_hist, params_hist, session)
+
+    url_fcst = "https://api.open-meteo.com/v1/forecast"
+    params_fcst = {
+        **base_params,
+        "start_date": today_local.isoformat(),
+        "end_date": end_date,
+    }
+    fcst, fcst_url = _fetch_open_meteo(url_fcst, params_fcst, session)
+
+    return _merge_hourly_maps(hist, fcst), f"{hist_url} | {fcst_url}"
 
 
 def main() -> int:
@@ -124,12 +175,6 @@ def main() -> int:
     p.add_argument("--start-date", required=True, help="YYYY-MM-DD")
     p.add_argument("--end-date", required=True, help="YYYY-MM-DD")
     p.add_argument("--snapshot-hour-local", type=int, default=5)
-    p.add_argument(
-        "--past-days",
-        type=int,
-        default=92,
-        help="How many days of archived forecast history to request from Open-Meteo.",
-    )
     p.add_argument("--sleep", type=float, default=0.25, help="Delay between API calls")
     p.add_argument("--max-days-per-call", type=int, default=31)
     p.add_argument(
@@ -164,21 +209,13 @@ def main() -> int:
 
     for c in cities:
         for s, e in chunk_date_ranges(start, end, max_days=int(args.max_days_per_call)):
-            mapping = fetch_open_meteo_hourly_temp(
+            mapping, request_url = fetch_open_meteo_hourly_temp(
                 c,
                 s,
                 e,
                 session,
-                past_days=int(args.past_days),
             )
             fetched_at_utc = datetime.now(tz=ZoneInfo("UTC")).isoformat()
-            forecast_url = (
-                "https://api.open-meteo.com/v1/forecast"
-                f"?latitude={c.lat}&longitude={c.lon}"
-                f"&start_date={s}&end_date={e}"
-                "&hourly=temperature_2m&temperature_unit=fahrenheit"
-                f"&timezone={c.tz}&past_days={int(args.past_days)}"
-            )
 
             for d_local, hours in mapping.items():
                 if d_local < s or d_local > e:
@@ -195,11 +232,12 @@ def main() -> int:
                     snapshot_hour_local=int(args.snapshot_hour_local),
                     snapshot_tz=c.tz,
                     forecast_high_f=high_f,
-                    source="open-meteo-archived",
-                    points_url=forecast_url,
-                    forecast_url=forecast_url,
+                    source="open-meteo-proxy-hourly-max",
+                    points_url=request_url,
+                    forecast_url=request_url,
                     qc_flags=[
                         "backfilled_forecast_archived",
+                        "open_meteo_proxy",
                         "snapshot_hour_label_only",
                     ],
                     raw={
