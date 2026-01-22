@@ -1,0 +1,88 @@
+name: Weather - Backfill Forecast Snapshots (Open-Meteo Archived)
+
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "Optional city_key filter (blank = all)"
+        required: false
+        default: ""
+      start_date:
+        description: "Start date (YYYY-MM-DD)"
+        required: true
+      end_date:
+        description: "End date (YYYY-MM-DD)"
+        required: true
+      snapshot_hour_local:
+        description: "Snapshot hour local to label rows (e.g., 5)"
+        required: false
+        default: "5"
+      past_days:
+        description: "Archived forecast history window for Open-Meteo (days)"
+        required: false
+        default: "92"
+      commit_results:
+        description: "Commit updated weather.db to repo"
+        type: choice
+        required: false
+        default: "false"
+        options: ["false", "true"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-backfill-forecast
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r weather/requirements.txt
+
+      - name: Backfill forecast snapshots (Open-Meteo archived)
+        run: |
+          ARGS=()
+          if [[ -n "${{ github.event.inputs.city }}" ]]; then
+            ARGS+=(--city "${{ github.event.inputs.city }}")
+          fi
+          ARGS+=(--start-date "${{ github.event.inputs.start_date }}")
+          ARGS+=(--end-date "${{ github.event.inputs.end_date }}")
+          ARGS+=(--snapshot-hour-local "${{ github.event.inputs.snapshot_hour_local }}")
+          ARGS+=(--past-days "${{ github.event.inputs.past_days }}")
+          python -m weather.scripts.backfill_forecast_open_meteo "${ARGS[@]}"
+
+      - name: Upload updated DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-db-after-forecast-backfill
+          path: weather/data/weather.db
+
+      - name: Commit changes (optional)
+        if: github.event.inputs.commit_results == 'true'
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data/weather.db
+            git commit -m "weather: backfill forecast snapshots (open-meteo archived)"
+            git push
+          else
+            echo "No changes to commit."
+          fi
