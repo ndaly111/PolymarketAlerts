@@ -10,6 +10,14 @@ on:
         description: "forecast_snapshots.source to build models from"
         required: false
         default: "nws_hourly_max"
+      gaussian_mix:
+        description: "0..1. Mix weight for Gaussian-smoothed PMF of forecast error (0 disables)."
+        required: false
+        default: "0"
+      gaussian_support_std:
+        description: "How many std devs to include in Gaussian PMF support (e.g., 4)."
+        required: false
+        default: "4"
 
 permissions:
   contents: write
@@ -23,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
+      WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
+      WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,7 +54,12 @@ jobs:
         env:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          ARGS=(--min-samples 10 --forecast-source "$FORECAST_SOURCE")
+          ARGS=(
+            --min-samples 10
+            --forecast-source "$FORECAST_SOURCE"
+            --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX"
+            --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD"
+          )
           python -m weather.scripts.build_error_models "${ARGS[@]}"
 
       - name: Commit changes (if any)
