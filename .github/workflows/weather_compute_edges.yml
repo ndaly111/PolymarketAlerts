@@ -18,6 +18,26 @@ on:
         description: "Minimum EV ($/contract) to keep"
         required: false
         default: "0.02"
+      min_q:
+        description: "Drop markets where model q is in tails: q < min_q or q > (1-min_q). Default 0.05 => drop <5% and >95%."
+        required: false
+        default: "0.05"
+      tail_mass:
+        description: "Defines model support interval for dropping strikes outside support (e.g., 0.05 keeps central 95%)."
+        required: false
+        default: "0.05"
+      min_volume:
+        description: "Minimum Kalshi volume to include (0 disables)"
+        required: false
+        default: "0"
+      min_open_interest:
+        description: "Minimum Kalshi open interest to include (0 disables)"
+        required: false
+        default: "0"
+      max_spread_cents:
+        description: "Maximum bid/ask spread in cents for the side we would buy (blank disables). Requires bid+ask present for that side."
+        required: false
+        default: ""
       top_n:
         description: "Top N per city to keep"
         required: false
@@ -37,6 +57,11 @@ jobs:
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
       WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
       WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
+      WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
+      WEATHER_TAIL_MASS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tail_mass || '0.05' }}
+      WEATHER_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || '0' }}
+      WEATHER_MIN_OPEN_INTEREST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_open_interest || '0' }}
+      WEATHER_MAX_SPREAD_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_spread_cents || '' }}
       WEATHER_TOP_N: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.top_n || '25' }}
     steps:
       - uses: actions/checkout@v4
@@ -52,7 +77,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Compute edges (fees + YES/NO)
         run: |
@@ -60,6 +85,11 @@ jobs:
             --forecast-source "$FORECAST_SOURCE" \
             --fee-cents "$WEATHER_BUY_FEE_CENTS" \
             --min-ev "$WEATHER_MIN_EV" \
+            --min-q "$WEATHER_MIN_Q" \
+            --tail-mass "$WEATHER_TAIL_MASS" \
+            --min-volume "$WEATHER_MIN_VOLUME" \
+            --min-open-interest "$WEATHER_MIN_OPEN_INTEREST" \
+            --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
             --top-n "$WEATHER_TOP_N" \
             --require-ask
 

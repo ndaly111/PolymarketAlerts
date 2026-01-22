@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import yaml
@@ -49,6 +49,122 @@ class City:
 
 def _now_utc() -> datetime:
     return datetime.now(tz=ZoneInfo("UTC"))
+
+def _to_int(x: Any, default: int = 0) -> int:
+    try:
+        if x is None:
+            return default
+        return int(x)
+    except Exception:
+        return default
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(x)))
+
+def _central_support_interval(pmf: Dict[int, float], tail_mass: float) -> Tuple[int, int]:
+    """Return (lo, hi) temperature bounds that contain ~1 - tail_mass of PMF mass.
+
+    We implement a simple central interval by removing tail_mass/2 from each tail.
+    """
+    if not pmf:
+        return (0, 0)
+    tail = max(0.0, min(0.49, float(tail_mass) / 2.0))
+    items = sorted((int(k), float(v)) for k, v in pmf.items())
+    total = sum(v for _, v in items)
+    if total <= 0:
+        ks = [k for k, _ in items]
+        return (min(ks), max(ks))
+
+    # normalize defensively
+    items = [(k, v / total) for k, v in items]
+
+    c = 0.0
+    lo = items[0][0]
+    for k, v in items:
+        c += v
+        if c >= tail:
+            lo = k
+            break
+
+    c = 0.0
+    hi = items[-1][0]
+    for k, v in reversed(items):
+        c += v
+        if c >= tail:
+            hi = k
+            break
+
+    if lo > hi:
+        lo, hi = hi, lo
+    return lo, hi
+
+def _spread_cents_for_side(row: Dict[str, Any], side: str) -> Optional[int]:
+    """Return bid/ask spread in cents for YES or NO. None if bid or ask missing."""
+    side = (side or "").upper().strip()
+    if side == "YES":
+        bid = row.get("yes_bid")
+        ask = row.get("yes_ask")
+    else:
+        bid = row.get("no_bid")
+        ask = row.get("no_ask")
+    try:
+        if bid is None or ask is None:
+            return None
+        b = int(bid)
+        a = int(ask)
+        if b < 0 or a < 0:
+            return None
+        return a - b
+    except Exception:
+        return None
+
+def _strike_overlaps_support(spec_kind: str, a: int, b: Optional[int], support_lo: int, support_hi: int) -> bool:
+    """
+    Return True if the strike definition has non-trivial overlap with the model support interval.
+
+    This implements the blueprint idea of ignoring "weird" strikes that are outside PMF support,
+    rather than filtering on event probability q.
+    """
+    k = (spec_kind or "").strip().lower()
+
+    # Common aliases / defensive normalization (depends on parse_event_spec_from_title implementation)
+    if k in ("gte", "geq", "≥"):
+        k = "ge"
+    elif k in ("lte", "leq", "≤"):
+        k = "le"
+    elif k in ("range", "in", "within", "between_inclusive"):
+        k = "between"
+    elif k in ("eq", "=", "=="):
+        k = "exact"
+    elif k in ("above",):
+        k = "gt"
+    elif k in ("below",):
+        k = "lt"
+
+    # Normalize support bounds
+    lo = int(min(support_lo, support_hi))
+    hi = int(max(support_lo, support_hi))
+
+    if k == "exact":
+        return lo <= int(a) <= hi
+
+    if k == "between" and b is not None:
+        left = int(min(a, b))
+        right = int(max(a, b))
+        return not (right < lo or left > hi)  # interval intersection
+
+    # Semi-infinite strikes:
+    if k in ("ge",):  # TMAX >= a
+        return int(a) <= hi
+    if k in ("gt",):  # TMAX > a
+        return int(a) < hi
+    if k in ("le",):  # TMAX <= a
+        return int(a) >= lo
+    if k in ("lt",):  # TMAX < a
+        return int(a) > lo
+
+    # Unknown kind: be conservative and drop
+    return False
 
 
 def load_cities(config_path: Path) -> List[City]:
@@ -103,6 +219,15 @@ def main() -> int:
     p.add_argument("--fee-cents", default=os.getenv("WEATHER_BUY_FEE_CENTS", "2"))
     p.add_argument("--top-n", default=os.getenv("WEATHER_TOP_N", "25"))
     p.add_argument("--min-ev", default=os.getenv("WEATHER_MIN_EV", "0.02"))
+    p.add_argument(
+        "--min-q",
+        default=os.getenv("WEATHER_MIN_Q", "0.05"),
+        help="Drop markets where q < min_q or q > (1-min_q). Default 0.05 => drop <5% and >95%.",
+    )
+    p.add_argument("--tail-mass", default=os.getenv("WEATHER_TAIL_MASS", "0.05"))
+    p.add_argument("--min-volume", default=os.getenv("WEATHER_MIN_VOLUME", "0"))
+    p.add_argument("--min-open-interest", default=os.getenv("WEATHER_MIN_OPEN_INTEREST", "0"))
+    p.add_argument("--max-spread-cents", default=os.getenv("WEATHER_MAX_SPREAD_CENTS", ""))
     p.add_argument("--require-ask", action="store_true")
     args = p.parse_args()
 
@@ -112,6 +237,18 @@ def main() -> int:
 
     top_n = int(str(args.top_n).strip())
     min_ev = float(str(args.min_ev).strip())
+    min_q = _clamp(float(str(args.min_q).strip()), 0.0, 0.49)
+    tail_mass = _clamp(float(str(args.tail_mass).strip()), 0.0, 0.98)
+    min_volume = int(str(args.min_volume).strip())
+    min_open_interest = int(str(args.min_open_interest).strip())
+    max_spread_raw = str(args.max_spread_cents).strip()
+    max_spread_cents: Optional[int] = None
+    if max_spread_raw != "":
+        try:
+            max_spread_cents = int(max_spread_raw)
+        except Exception:
+            # Treat invalid input as disabled rather than failing the run.
+            max_spread_cents = None
 
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
@@ -137,6 +274,10 @@ def main() -> int:
                 pmf[int(k)] = float(v)
             except Exception:
                 continue
+        support_lo, support_hi = _central_support_interval(pmf, tail_mass=tail_mass)
+        tail_prob_min = max(0.0, min(0.49, tail_mass / 2.0))  # metadata only
+        q_lo = float(min_q)
+        q_hi = float(1.0 - min_q)
 
         snap_time = db_lib.fetch_latest_kalshi_weather_snapshot_time(
             db_path,
@@ -158,9 +299,32 @@ def main() -> int:
             continue
 
         scored: List[Dict[str, Any]] = []
-        drops = {"no_title": 0, "unparsed": 0, "no_prices": 0, "no_positive_ev": 0}
+        drops = {
+            "no_title": 0,
+            "unparsed": 0,
+            "no_prices": 0,
+            "no_positive_ev": 0,
+            # strike doesn't overlap modeled support interval (blueprint "weird strikes outside PMF support")
+            "outside_support": 0,
+            # model probability in tails (q < 5% or q > 95% by default)
+            "q_tail": 0,
+            "min_volume": 0,
+            "min_open_interest": 0,
+            "max_spread_missing": 0,
+            "max_spread_too_wide": 0,
+        }
 
         for row in markets:
+            # liquidity filters (raw markets)
+            vol = _to_int(row.get("volume"), default=0)
+            oi = _to_int(row.get("open_interest"), default=0)
+            if min_volume > 0 and vol < min_volume:
+                drops["min_volume"] += 1
+                continue
+            if min_open_interest > 0 and oi < min_open_interest:
+                drops["min_open_interest"] += 1
+                continue
+
             raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
             title = _market_title_from_raw(raw)
             if not title:
@@ -173,6 +337,15 @@ def main() -> int:
                 continue
 
             q = prob_event(pmf, spec)
+            # Guardrail: ignore strikes that do not overlap modeled support (per blueprint).
+            if not _strike_overlaps_support(spec.kind, spec.a, spec.b, support_lo, support_hi):
+                drops["outside_support"] += 1
+                continue
+            # Hard tail cutoff: ignore events with <5% chance (or >95% on the other tail).
+            if float(q) < q_lo or float(q) > q_hi:
+                drops["q_tail"] += 1
+                continue
+
             p_yes, p_no = best_buy_prices_from_snapshot_row(row)
 
             if args.require_ask and (p_yes is None and p_no is None):
@@ -201,6 +374,16 @@ def main() -> int:
                 drops["no_prices"] += 1
                 continue
 
+            # spread filter applied to chosen side (requires bid + ask on that side)
+            if max_spread_cents is not None:
+                sp = _spread_cents_for_side(row, best_side)
+                if sp is None:
+                    drops["max_spread_missing"] += 1
+                    continue
+                if sp > max_spread_cents:
+                    drops["max_spread_too_wide"] += 1
+                    continue
+
             if best_ev < min_ev:
                 drops["no_positive_ev"] += 1
                 continue
@@ -218,7 +401,7 @@ def main() -> int:
                         "fee_open": fee_open,
                         "ev": best_ev,
                     },
-                    "liquidity": {"volume": row.get("volume"), "open_interest": row.get("open_interest")},
+                    "liquidity": {"volume": vol, "open_interest": oi, "support_lo": support_lo, "support_hi": support_hi},
                     "snapshot": {
                         "snapshot_time_utc": row.get("snapshot_time_utc"),
                         "series_ticker": row.get("series_ticker"),
@@ -239,6 +422,18 @@ def main() -> int:
             "forecast_source": str(args.forecast_source),
             "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
             "kalshi_snapshot_time_utc": snap_time,
+            "filters": {
+                "min_ev": min_ev,
+                "min_q": min_q,
+                "q_interval": [q_lo, q_hi],
+                "tail_mass": tail_mass,
+                # retained for reference/debugging; filtering includes both support-overlap and q-tail cutoff
+                "tail_prob_min": tail_prob_min,
+                "support_interval_f": [support_lo, support_hi],
+                "min_volume": min_volume,
+                "min_open_interest": min_open_interest,
+                "max_spread_cents": max_spread_cents,
+            },
             "drops": drops,
             "candidates": scored,
         }
@@ -273,7 +468,7 @@ def main() -> int:
         md_lines = [
             f"# Weather edges — {target_date} ({src})",
             "",
-            f"Fee (open): {fee_cents}¢ (${fee_open:.2f}) | min EV: {min_ev:.2f} | top_n per city: {top_n}",
+            f"Fee (open): {fee_cents}¢ (${fee_open:.2f}) | min EV: {min_ev:.2f} | min_q: {min_q:.2f} | tail_mass: {tail_mass:.2f} | min_vol: {min_volume} | min_oi: {min_open_interest} | max_spread_cents: {max_spread_cents} | top_n per city: {top_n}",
             "",
             "| City | Side | EV ($/contract) | Price | q(model) | Market |",
             "|---|---|---:|---:|---:|---|",
