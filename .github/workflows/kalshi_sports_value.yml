@@ -7,6 +7,12 @@ on:
     - cron: "5 11 * * *"  # 6:05 AM EST
   workflow_dispatch:
     inputs:
+      mode:
+        description: "Run mode"
+        required: false
+        type: choice
+        options: ["prod", "debug", "wide"]
+        default: "prod"
       sport_preset:
         description: "Sports preset (Odds API sport keys)"
         type: choice
@@ -67,28 +73,12 @@ on:
         description: "Kalshi buy fee in cents per contract (e.g., 2)"
         required: false
         default: "2"
-      debug_mode:
-        description: "Debug: write extra artifacts and skip Discord"
-        type: choice
-        options: ["false", "true"]
-        default: "false"
       fail_on_no_odds_events:
         description: "Fail the job if sportsbook odds are unavailable (default: skip with a warning)"
         required: false
         type: choice
         options: ["0", "1"]
         default: "0"
-      debug_wide_scan:
-        description: "DEBUG only: remove close-window bounds (can be very slow)"
-        type: choice
-        options: ["false", "true"]
-        default: "false"
-      no_filters:
-        description: "Disable most filters / widen windows (debugging: get anything to show)"
-        required: false
-        type: choice
-        options: ["false", "true"]
-        default: "false"
 
 jobs:
   scan:
@@ -148,9 +138,14 @@ jobs:
 
           TOP_N: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.top_n) || vars.KALSHI_TOP_N || '25' }}
           MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.03' }}
-          DEBUG_MODE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.debug_mode) || 'false' }}
-          KALSHI_DEBUG_WIDE_SCAN: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.debug_wide_scan) || 'false' }}
-          KALSHI_NO_FILTERS: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.no_filters) || vars.KALSHI_NO_FILTERS || 'false' }}
+          # Single-mode debug control:
+          # - prod  => normal behavior
+          # - debug => keep filters, but show/debug more
+          # - wide  => debug + widen scan (optionally disables some gating)
+          KALSHI_MODE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.mode) || 'prod' }}
+          DEBUG_MODE: ${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.mode) || 'prod') != 'prod' && 'true' || 'false' }}
+          KALSHI_DEBUG_WIDE_SCAN: ${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.mode) || 'prod') == 'wide' && 'true' || 'false' }}
+          KALSHI_NO_FILTERS: ${{ ((github.event_name == 'workflow_dispatch' && github.event.inputs.mode) || 'prod') == 'wide' && 'true' || (vars.KALSHI_NO_FILTERS || 'false') }}
 
           # Allow per-run overrides (workflow_dispatch); otherwise use repo Variables/defaults
           MIN_BOOKS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_books || vars.KALSHI_MIN_BOOKS || '1' }}
