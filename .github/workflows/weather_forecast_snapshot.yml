@@ -47,7 +47,7 @@ jobs:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
           WEATHER_SNAPSHOT_MINUTE_MAX: "25"
         run: |
-          python weather/scripts/collect_forecast_snapshot.py
+          python -m weather.scripts.collect_forecast_snapshot
 
       - name: Commit changes (if any)
         run: |

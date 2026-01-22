@@ -1,31 +1,28 @@
-name: Weather - Collect Observed (CLI)
+name: Weather - Compute Fair Prices
 
 on:
   schedule:
-    # Run daily after CLI daily climate reports are typically available.
-    # Wide UTC window makes this robust across ET/CT/PT and DST.
-    - cron: "40 08 * * *"
+    # After the snapshot window (09:05..16:05 UTC) so all cities have a chance to write.
+    - cron: "35 16 * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: weather-cli-observed
+  group: weather-compute-fair-prices
   cancel-in-progress: false
 
 jobs:
-  collect:
+  compute:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -34,9 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
 
-      - name: Collect observed highs (CLI)
+      - name: Compute fair price artifacts
+        env:
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          python -m weather.scripts.collect_cli_observed --max-versions 25
+          python -m weather.scripts.compute_fair_prices
 
       - name: Commit changes (if any)
         run: |
@@ -44,8 +43,8 @@ jobs:
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data
-            git commit -m "weather: add observed CLI row(s)"
+            git add weather/outputs/fair_prices
+            git commit -m "weather: update fair price artifacts"
             git push
           else
             echo "No changes to commit."
