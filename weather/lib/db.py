@@ -289,6 +289,77 @@ def insert_kalshi_weather_market_snapshot(
             ),
         )
 
+
+def fetch_latest_kalshi_weather_snapshot_time(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+) -> Optional[str]:
+    """Return latest snapshot_time_utc for a given city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT snapshot_time_utc
+            FROM kalshi_weather_market_snapshots
+            WHERE city_key = ? AND target_date_local = ?
+            ORDER BY snapshot_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local),
+        ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def fetch_kalshi_weather_markets_at_snapshot(
+    db_path: Path,
+    *,
+    snapshot_time_utc: str,
+    city_key: str,
+    target_date_local: str,
+) -> Iterable[Dict[str, Any]]:
+    """Fetch all Kalshi weather markets for a city/date at a specific snapshot time."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              snapshot_time_utc, city_key, target_date_local, series_ticker, event_ticker, market_ticker,
+              status, yes_bid, yes_ask, no_bid, no_ask, volume, open_interest, raw_json
+            FROM kalshi_weather_market_snapshots
+            WHERE snapshot_time_utc = ? AND city_key = ? AND target_date_local = ?
+            ORDER BY market_ticker ASC;
+            """,
+            (snapshot_time_utc, city_key, target_date_local),
+        ).fetchall()
+
+    out: list[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            raw = json.loads(r[13]) if r[13] else {}
+        except Exception:
+            raw = {}
+        out.append(
+            {
+                "snapshot_time_utc": r[0],
+                "city_key": r[1],
+                "target_date_local": r[2],
+                "series_ticker": r[3],
+                "event_ticker": r[4],
+                "market_ticker": r[5],
+                "status": r[6],
+                "yes_bid": r[7],
+                "yes_ask": r[8],
+                "no_bid": r[9],
+                "no_ask": r[10],
+                "volume": r[11],
+                "open_interest": r[12],
+                "raw": raw,
+            }
+        )
+    return out
+
 def fetch_joined_errors(
     db_path: Path,
     *,
