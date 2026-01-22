@@ -1,0 +1,48 @@
+# Kalshi weather pilot cities (v1)
+# NOTE: lat/lon are used only to query api.weather.gov points endpoint.
+#       tz here is used for labeling and gating; NWS response also includes timeZone.
+#
+# Settlement source is NWS "Climatological Report (Daily)" (CLI) text products.
+# We store observed max temps from CLI (Daily Climate Report) for each city.
+
+cities:
+  - key: MIAHIGH
+    label: Miami
+    tz: America/New_York
+    lat: 25.7617
+    lon: -80.1918
+    cli:
+      issuedby: MIA
+      site: MFL
+      product: CLI
+
+  # Kalshi contract uses Los Angeles Airport (LAX)
+  - key: LAXHIGH
+    label: Los Angeles (LAX)
+    tz: America/Los_Angeles
+    lat: 34.0522
+    lon: -118.2437
+    cli:
+      issuedby: LAX
+      site: LOX
+      product: CLI
+
+  - key: CHIHIGH
+    label: Chicago
+    tz: America/Chicago
+    lat: 41.8781
+    lon: -87.6298
+    cli:
+      issuedby: MDW
+      site: LOT
+      product: CLI
+
+  - key: NHIGH
+    label: New York
+    tz: America/New_York
+    lat: 40.7128
+    lon: -74.0060
+    cli:
+      issuedby: NYC
+      site: OKX
+      product: CLI
