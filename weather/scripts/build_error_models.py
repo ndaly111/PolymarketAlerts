@@ -6,6 +6,8 @@ Build monthly forecast-error distributions (PMFs) per city for a given snapshot 
 We model integer error:
   error = observed_tmax_f - forecast_high_f
 
+IMPORTANT: Error models must be built per forecast source.
+
 Grouping:
   - by month-of-year (all Januaries combined, etc.)
   - by city_key
@@ -68,6 +70,7 @@ def main() -> int:
     p.add_argument("--snapshot-hour", type=int, default=int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6")))
     p.add_argument("--laplace", type=float, default=0.0, help="Optional Laplace smoothing alpha (e.g., 0.5).")
     p.add_argument("--min-samples", type=int, default=10, help="Only write models with >= N samples.")
+    p.add_argument("--forecast-source", default="nws_hourly_max", help="Which forecast_snapshots.source to use.")
     args = p.parse_args()
 
     db_path = Path(args.db)
@@ -85,6 +88,7 @@ def main() -> int:
                 city_key=city,
                 month=month,
                 snapshot_hour_local=int(args.snapshot_hour),
+                forecast_source=str(args.forecast_source),
             )
             if n < int(args.min_samples):
                 continue
@@ -97,6 +101,7 @@ def main() -> int:
                 city_key=city,
                 month=month,
                 snapshot_hour_local=int(args.snapshot_hour),
+                source=str(args.forecast_source),
                 n_samples=n,
                 pmf=pmf,
                 updated_at_utc=updated,
@@ -106,11 +111,13 @@ def main() -> int:
                 "city_key": city,
                 "month": month,
                 "snapshot_hour_local": int(args.snapshot_hour),
+                "forecast_source": str(args.forecast_source),
                 "n_samples": n,
                 "pmf_error": {str(k): v for k, v in pmf.items()},
                 "updated_at_utc": updated,
             }
-            out_path = OUT_DIR / f"{city}_m{month:02d}_h{int(args.snapshot_hour):02d}.json"
+            source_slug = str(args.forecast_source).replace("/", "_")
+            out_path = OUT_DIR / f"{city}_m{month:02d}_h{int(args.snapshot_hour):02d}_{source_slug}.json"
             out_path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
             wrote += 1
 

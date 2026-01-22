@@ -4,7 +4,12 @@ on:
   schedule:
     # Run daily after observed highs are typically recorded.
     - cron: "40 16 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      forecast_source:
+        description: "forecast_snapshots.source to build models from"
+        required: false
+        default: "nws_hourly_max"
 
 permissions:
   contents: write
@@ -16,6 +21,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,7 +44,8 @@ jobs:
         env:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          python -m weather.scripts.build_error_models --min-samples 10
+          ARGS=(--min-samples 10 --forecast-source "$FORECAST_SOURCE")
+          python -m weather.scripts.build_error_models "${ARGS[@]}"
 
       - name: Commit changes (if any)
         run: |

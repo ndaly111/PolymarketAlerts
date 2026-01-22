@@ -47,10 +47,11 @@ def ensure_schema(db_path: Path) -> None:
             );
             """
         )
+        conn.execute("DROP INDEX IF EXISTS idx_forecast_unique;")
         conn.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_unique
-            ON forecast_snapshots(city_key, target_date_local, snapshot_hour_local);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_unique_v2
+            ON forecast_snapshots(city_key, target_date_local, snapshot_hour_local, source);
             """
         )
 
@@ -87,16 +88,23 @@ def ensure_schema(db_path: Path) -> None:
               city_key TEXT NOT NULL,
               month INTEGER NOT NULL,               -- 1..12
               snapshot_hour_local INTEGER NOT NULL, -- aligns with forecast_snapshots
+              source TEXT NOT NULL,
               n_samples INTEGER NOT NULL,
               pmf_json TEXT NOT NULL,               -- mapping error_int->prob
               updated_at_utc TEXT NOT NULL
             );
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(error_models);").fetchall()}
+        if "source" not in columns:
+            conn.execute(
+                "ALTER TABLE error_models ADD COLUMN source TEXT NOT NULL DEFAULT 'nws_hourly_max';"
+            )
+        conn.execute("DROP INDEX IF EXISTS idx_error_models_unique;")
         conn.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_error_models_unique
-            ON error_models(city_key, month, snapshot_hour_local);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_error_models_unique_v2
+            ON error_models(city_key, month, snapshot_hour_local, source);
             """
         )
 
@@ -126,7 +134,7 @@ def upsert_forecast_snapshot(
               (city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
                forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(city_key, target_date_local, snapshot_hour_local) DO UPDATE SET
+            ON CONFLICT(city_key, target_date_local, snapshot_hour_local, source) DO UPDATE SET
               snapshot_time_utc=excluded.snapshot_time_utc,
               snapshot_tz=excluded.snapshot_tz,
               forecast_high_f=excluded.forecast_high_f,
@@ -206,6 +214,7 @@ def fetch_joined_errors(
     city_key: str,
     month: int,
     snapshot_hour_local: int,
+    forecast_source: str,
 ) -> Tuple[int, Dict[int, int]]:
     """
     Returns (n_samples, counts_by_error) for the given city/month/snapshot_hour.
@@ -221,10 +230,11 @@ def fetch_joined_errors(
               ON f.city_key=o.city_key
              AND f.target_date_local=o.date_local
              AND f.snapshot_hour_local=?
+             AND f.source=?
             WHERE o.city_key=?
               AND CAST(strftime('%m', o.date_local) AS INTEGER)=?
             """,
-            (int(snapshot_hour_local), city_key, int(month)),
+            (int(snapshot_hour_local), str(forecast_source), city_key, int(month)),
         ).fetchall()
 
     counts: Dict[int, int] = {}
@@ -240,6 +250,7 @@ def upsert_error_model(
     city_key: str,
     month: int,
     snapshot_hour_local: int,
+    source: str,
     n_samples: int,
     pmf: Dict[int, float],
     updated_at_utc: str,
@@ -249,14 +260,24 @@ def upsert_error_model(
     with connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO error_models(city_key, month, snapshot_hour_local, n_samples, pmf_json, updated_at_utc)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(city_key, month, snapshot_hour_local) DO UPDATE SET
+            INSERT INTO error_models(
+              city_key, month, snapshot_hour_local, source, n_samples, pmf_json, updated_at_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, month, snapshot_hour_local, source) DO UPDATE SET
               n_samples=excluded.n_samples,
               pmf_json=excluded.pmf_json,
               updated_at_utc=excluded.updated_at_utc;
             """,
-            (city_key, int(month), int(snapshot_hour_local), int(n_samples), pmf_json, updated_at_utc),
+            (
+                city_key,
+                int(month),
+                int(snapshot_hour_local),
+                str(source),
+                int(n_samples),
+                pmf_json,
+                updated_at_utc,
+            ),
         )
 
 
@@ -266,21 +287,33 @@ def fetch_forecast_snapshot(
     city_key: str,
     target_date_local: str,
     snapshot_hour_local: int,
+    source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Returns the snapshot row (dict) for a given city/date/hour, or None if missing.
     """
     ensure_schema(db_path)
     with connect(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
-                   forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
-            FROM forecast_snapshots
-            WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=?
-            """,
-            (city_key, target_date_local, int(snapshot_hour_local)),
-        ).fetchone()
+        if source:
+            row = conn.execute(
+                """
+                SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
+                       forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
+                FROM forecast_snapshots
+                WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=? AND source=?
+                """,
+                (city_key, target_date_local, int(snapshot_hour_local), str(source)),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
+                       forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
+                FROM forecast_snapshots
+                WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=?
+                """,
+                (city_key, target_date_local, int(snapshot_hour_local)),
+            ).fetchone()
 
     if not row:
         return None
@@ -305,6 +338,7 @@ def fetch_error_model(
     city_key: str,
     month: int,
     snapshot_hour_local: int,
+    source: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Returns {"n_samples": int, "pmf": {error_int: prob}} or None if missing.
@@ -315,9 +349,9 @@ def fetch_error_model(
             """
             SELECT n_samples, pmf_json, updated_at_utc
             FROM error_models
-            WHERE city_key=? AND month=? AND snapshot_hour_local=?
+            WHERE city_key=? AND month=? AND snapshot_hour_local=? AND source=?
             """,
-            (city_key, int(month), int(snapshot_hour_local)),
+            (city_key, int(month), int(snapshot_hour_local), str(source)),
         ).fetchone()
     if not row:
         return None

@@ -4,7 +4,12 @@ on:
   schedule:
     # After the snapshot window (09:05..16:05 UTC) so all cities have a chance to write.
     - cron: "35 16 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      forecast_source:
+        description: "forecast_snapshots.source to price from"
+        required: false
+        default: "nws_hourly_max"
 
 permissions:
   contents: write
@@ -16,6 +21,8 @@ concurrency:
 jobs:
   compute:
     runs-on: ubuntu-latest
+    env:
+      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,7 +42,8 @@ jobs:
         env:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          python -m weather.scripts.compute_fair_prices
+          ARGS=(--forecast-source "$FORECAST_SOURCE")
+          python -m weather.scripts.compute_fair_prices "${ARGS[@]}"
 
       - name: Commit changes (if any)
         run: |
