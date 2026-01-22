@@ -119,31 +119,60 @@ def iso_to_ts(value: str) -> Optional[int]:
 
 
 def _normalize_epoch_seconds(value: Any) -> Optional[int]:
+    """Normalize epoch timestamps that may be seconds, ms, us, or ns into seconds."""
     if value is None:
         return None
     try:
         if isinstance(value, str) and ("T" in value or "Z" in value or "+" in value):
             return iso_to_ts(value)
-        v = float(value)
+        t = int(float(value))
     except Exception:
         return None
-    if v > 1e18:
-        v = v / 1e9
-    elif v > 1e15:
-        v = v / 1e6
-    elif v > 1e12:
-        v = v / 1e3
-    return int(v)
+    if t < 0:
+        return None
+    while t > 10_000_000_000:
+        t //= 1000
+    return t
 
 
 def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
-    """Return market close time (unix seconds) if present.
+    """Return the *effective* market timestamp (unix seconds) when available.
 
-    Kalshi endpoints may return either:
-      - close_time: ISO8601 string
-      - close_ts: integer unix seconds
-    We support both, and fall back to None if unavailable.
+    IMPORTANT:
+      For Kalshi sports markets, ``close_time`` / ``expiration_time`` can be a
+      *settlement/expiration* timestamp that may be days or weeks after the game.
+      The field ``expected_expiration_time`` is usually the best proxy for the
+      underlying game start.
+
+    We therefore prefer (in order):
+      1) expected_expiration_ts / expected_expiration_time
+      2) expiration_ts / expiration_time
+      3) close_ts / close_time
+
+    The rest of the pipeline uses this value for "within lookahead" filtering
+    and Odds API time-skew checks, so choosing the right field is critical.
     """
+
+    # Prefer the game-time proxy when present.
+    for k in ("expected_expiration_ts", "expected_expiration_time", "expectedExpirationTime"):
+        try:
+            if k in market and market[k] is not None:
+                ts = _normalize_epoch_seconds(market[k])
+                if ts is not None:
+                    return ts
+        except Exception:
+            pass
+
+    for k in ("expiration_ts", "expiration_time", "expirationTime"):
+        try:
+            if k in market and market[k] is not None:
+                ts = _normalize_epoch_seconds(market[k])
+                if ts is not None:
+                    return ts
+        except Exception:
+            pass
+
+    # Fall back to close time.
     try:
         if "close_ts" in market and market["close_ts"] is not None:
             return _normalize_epoch_seconds(market["close_ts"])
@@ -374,28 +403,45 @@ SPREAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+WIN_BY_RE = re.compile(
+    r"^(?P<team>.+?)\s+wins?\s+by\s+(?P<side>over|under)\s*(?P<points>[0-9]+(?:\.[0-9]+)?)\s*(?:pts?|points?)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
-    """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
-    t = str(title)
-    t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
-    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
-    if ":" in t:
-        t_tail = t.split(":")[-1].strip()
-        if len(t_tail) >= 5:
-            t = t_tail
-    t = " ".join(t.split())
-    m = re.search(
-        r"(?i)\b(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$",
-        t,
-    )
-    if not m:
-        return None
-    a = str(m.group(1)).strip()
-    b = str(m.group(3)).strip()
-    if not a or not b:
-        return None
-    return a, b
+    """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'.
+
+    Kalshi event titles sometimes contain colons for descriptors, e.g.
+      - "NCAAB: Xavier at Creighton"
+      - "Xavier at Creighton: Spread"
+    A naive "substring after the last colon" breaks the second form, so we try
+    a few candidates and return the first that parses.
+    """
+    raw = str(title or "")
+    raw = re.sub(r"[\(\[].*?[\)\]]", " ", raw)
+    raw = raw.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
+    raw = " ".join(raw.split())
+
+    cands = [raw]
+    if ":" in raw:
+        # Common patterns: "LEAGUE: A at B" or "A at B: Spread"
+        after_first = raw.split(":", 1)[1].strip()
+        before_last = raw.rsplit(":", 1)[0].strip()
+        for t in (after_first, before_last):
+            if t and t not in cands:
+                cands.append(t)
+
+    rx = re.compile(r"(?i)(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$")
+    for t in cands:
+        m = rx.search(t)
+        if not m:
+            continue
+        a = str(m.group(1)).strip()
+        b = str(m.group(3)).strip()
+        if a and b and a.lower() != b.lower():
+            return a, b
+    return None
 
 
 def derive_matchup_from_subtitles(line_type: str, yes_sub: str, no_sub: str) -> Optional[Tuple[str, str]]:
@@ -445,16 +491,29 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
     if lt == "spread":
         # Common forms: "Brooklyn -1", "BKN -1.5"
         m = SPREAD_RE.match(s)
-        if not m:
+        if m:
+            team = m.group("team").strip()
+            spread = float(m.group("spread"))
+            return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+
+        # Kalshi alt-spread phrasing: "TEAM wins by over 9.5 Points"
+        wm = WIN_BY_RE.match(s)
+        if wm:
+            team = wm.group("team").strip()
+            side = wm.group("side").lower()
+            pts = float(wm.group("points"))
+            # "wins by over X" aligns best with covering approximately -X.
+            if side == "over":
+                spread = -pts
+                return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+            # If Kalshi ever emits "wins by under X", we can't safely map it to a standard spread.
             return None
-        team = m.group("team").strip()
-        spread = float(m.group("spread"))
-        return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+
+        return None
 
     if lt == "h2h":
         # Common forms: "Brooklyn", "Brooklyn wins"
-        team = s
-        team = re.sub(r"\b(wins|win|to win)\b", "", team, flags=re.IGNORECASE).strip()
+        team = re.sub(r"(?i)\b(wins|win|to win)\b", "", s).strip()
         if not team:
             return None
         return {"team": team, "label": team}
@@ -464,12 +523,19 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
 
 def infer_line_type(series_ticker: str, market_ticker: str, market_title: str) -> Optional[str]:
     raw = f"{series_ticker} {market_ticker} {market_title}".lower()
-    if "total" in raw or TOTAL_RE.search(raw):
-        return "total"
-    if "spread" in raw:
+    st_u = str(series_ticker or "").upper()
+
+    # Spread signals must come before totals because Kalshi spread props often contain "over 9.5".
+    if "spread" in raw or "wins by" in raw or "win by" in raw or "margin" in raw or "SPREAD" in st_u:
         return "spread"
-    # Many moneyline series use GAME
-    if "game" in raw or "moneyline" in raw or "money line" in raw or re.search(r"\bh2h\b", raw):
+
+    # Totals: require an explicit keyword or a strong ticker hint.
+    if "total" in raw or "TOTAL" in st_u or "OVERUNDER" in st_u or "OU" in st_u:
+        if "total" in raw or TOTAL_RE.search(raw):
+            return "total"
+
+    # Many moneyline series use GAME; also allow "h2h".
+    if "game" in raw or "moneyline" in raw or "money line" in raw or "h2h" in raw:
         return "h2h"
     return None
 
@@ -482,6 +548,10 @@ def infer_line_type_from_subtitles(yes_sub: str, no_sub: str) -> Optional[str]:
         return None
 
     hay = f"{ys} {ns}".upper()
+
+    # Kalshi spread markets often look like: "TEAM wins by over 9.5 Points"
+    if "WINS BY" in hay or "WIN BY" in hay or "MARGIN" in hay:
+        return "spread"
 
     # Totals usually look like: "Over 42.5" / "Under 42.5"
     if ("OVER" in hay or "UNDER" in hay) and re.search(r"\d", hay):
@@ -513,6 +583,27 @@ def cents_to_prob(cents: Optional[Any]) -> Optional[float]:
         return None
     # Kalshi prices are in cents; clamp to [0, 1] to avoid weirdness if API ever returns >100.
     return max(0.0, min(1.0, c / 100.0))
+
+
+def _short_market_view(m: Dict[str, Any], close_ts: Optional[int] = None) -> Dict[str, Any]:
+    """Small, stable view of a market for pipeline artifacts."""
+    return {
+        "ticker": m.get("ticker") or m.get("market_ticker"),
+        "status": m.get("status"),
+        "close_time": m.get("close_time"),
+        "close_ts": close_ts if close_ts is not None else m.get("close_ts"),
+        "expected_expiration_time": m.get("expected_expiration_time") or m.get("expectedExpirationTime"),
+        "expiration_time": m.get("expiration_time") or m.get("expirationTime"),
+        "event_title": (m.get("event_title") or ""),
+        "title": (m.get("title") or m.get("market_title") or ""),
+        "yes_sub_title": m.get("yes_sub_title"),
+        "no_sub_title": m.get("no_sub_title"),
+        "volume": m.get("volume"),
+        "yes_ask": m.get("yes_ask"),
+        "no_ask": m.get("no_ask"),
+        "yes_bid": m.get("yes_bid"),
+        "no_bid": m.get("no_bid"),
+    }
 
 
 def _has_real_bid(p: Optional[float]) -> bool:
@@ -1271,6 +1362,23 @@ def _attach_master_debug(
     return stats
 
 
+def _stage_inc(stages: Dict[str, Any], name: str, n: int = 1) -> None:
+    s = stages.setdefault(name, {"count": 0})
+    try:
+        s["count"] = int(s.get("count") or 0) + int(n)
+    except Exception:
+        s["count"] = 0
+
+
+def _stage_sample(stages: Dict[str, Any], name: str, item: Any, limit: int = 20) -> None:
+    s = stages.setdefault(name, {"count": 0, "samples": []})
+    if "count" not in s:
+        s["count"] = 0
+    samples = s.setdefault("samples", [])
+    if isinstance(samples, list) and len(samples) < limit:
+        samples.append(item)
+
+
 def scan() -> int:
     # Output directory (create immediately so artifacts always have *something* if we can write it)
     outdir = env_str("OUTDIR", "out")
@@ -1279,6 +1387,9 @@ def scan() -> int:
     stamp = now_dt_utc.strftime("%Y%m%d_%H%M%SZ")
 
     debug_max = env_int("KALSHI_DEBUG_MAX", 50)  # keep artifacts small; bump if needed
+
+    pipeline_report_enabled = env_bool("KALSHI_PIPELINE_REPORT", False)
+    pipeline_stages: Dict[str, Any] = {}
 
     fee_cents = env_int("KALSHI_BUY_FEE_CENTS", 2)
     fee_prob = fee_cents / 100.0
@@ -1320,6 +1431,9 @@ def scan() -> int:
     # In DEBUG_MODE we want to *see* non-edge matches to validate matching/filtering.
     debug_show_all = debug_mode or env_bool("KALSHI_DEBUG_SHOW_ALL", False)
     match_max_time_skew_hours = env_int("KALSHI_MATCH_MAX_TIME_SKEW_HOURS", 12)
+
+    # If debug/no-filter, automatically enable pipeline report unless explicitly disabled.
+    pipeline_report_enabled = pipeline_report_enabled or debug_mode or no_filters
 
     odds_regions = env_str("ODDS_REGIONS", "us")
     min_books = env_min_books()
@@ -1376,6 +1490,15 @@ def scan() -> int:
         "status": "starting",
     }
 
+    if pipeline_report_enabled:
+        pipeline_stages["config"] = {
+            "now_ts": now_ts,
+            "min_close_ts": min_close_ts_effective,
+            "max_close_ts": max_close_ts_effective,
+            "lookahead_hours": lookahead_hours,
+            "game_lookahead_hours": game_lookahead_hours,
+        }
+
     meta_path = os.path.join(outdir, f"kalshi_run_meta_{stamp}.json")
     meta_latest = os.path.join(outdir, "kalshi_run_meta_latest.json")
 
@@ -1413,6 +1536,22 @@ def scan() -> int:
         odds_events = fetch_all_draftkings_events(sport_keys)
 
     run_meta["sportsbook_source"] = sportsbook_source
+
+    if pipeline_report_enabled:
+        _stage_inc(pipeline_stages, "odds_ingest", len(odds_events or []))
+        for e in (odds_events or [])[:20]:
+            _stage_sample(
+                pipeline_stages,
+                "odds_ingest",
+                {
+                    "id": e.get("id"),
+                    "sport_key": e.get("sport_key"),
+                    "commence_time": e.get("commence_time"),
+                    "home_team": e.get("home_team"),
+                    "away_team": e.get("away_team"),
+                },
+                limit=20,
+            )
 
     if not odds_events:
         # Default behavior: skip (exit 0) if sportsbook odds are unavailable.
@@ -1631,6 +1770,16 @@ def scan() -> int:
             {"ticker": t, "title": title, "score": int(score)}
             for (score, t, title) in scored[: min(25, len(scored))]
         ]
+
+    if pipeline_report_enabled:
+        _stage_inc(pipeline_stages, "kalshi_series_selected", len(series or []))
+        for st in (series or [])[:20]:
+            _stage_sample(
+                pipeline_stages,
+                "kalshi_series_selected",
+                {"series_ticker": st},
+                limit=20,
+            )
     if not series:
         run_meta["status"] = "error_no_series"
 
@@ -1691,12 +1840,14 @@ def scan() -> int:
     for st in series:
         try:
             print(f"Fetching markets for series={st} (close_window_enabled={close_window_enabled})")
+            api_min = min_close_ts_effective if close_window_enabled else None
+            api_max = max_close_ts_effective if close_window_enabled else None
             markets = list_markets_for_series(
                 session,
                 st,
                 status="",
-                min_close_ts=None,
-                max_close_ts=None,
+                min_close_ts=api_min,
+                max_close_ts=api_max,
                 mve_filter=mve_filter,
             )
         except Exception as exc:
@@ -1707,10 +1858,29 @@ def scan() -> int:
 
         raw_count = len(markets)
         markets_fetched_total += raw_count
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "kalshi_markets_ingest", raw_count)
+            for m in markets[:5]:
+                _stage_sample(
+                    pipeline_stages,
+                    "kalshi_markets_ingest",
+                    _short_market_view(m),
+                    limit=30,
+                )
         # If the API didn't enforce open-only (or doesn't like combining filters),
         # enforce it here without dropping markets that omit 'status'.
         filtered: List[Dict[str, Any]] = []
         for m in markets:
+            markets_seen_total += 1
+            if pipeline_report_enabled:
+                _stage_inc(pipeline_stages, "kalshi_markets_seen", 1)
+            if pipeline_report_enabled and markets_seen_total <= 30:
+                _stage_sample(
+                    pipeline_stages,
+                    "kalshi_markets_seen",
+                    _short_market_view(m),
+                    limit=30,
+                )
             s = str(m.get("status") or "").strip().lower()
             if not (debug_mode or no_filters):
                 if s in ("closed", "settled"):
@@ -1720,6 +1890,8 @@ def scan() -> int:
             filtered.append(m)
         markets = filtered
         status_filtered_count = len(markets)
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "status_pass", status_filtered_count)
 
         if close_window_enabled:
             close_filtered: List[Dict[str, Any]] = []
@@ -1727,17 +1899,39 @@ def scan() -> int:
                 cts = market_close_ts(m)
                 if cts is None:
                     drops["close_time_missing"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "close_time_missing", 1)
                     close_filtered.append(m)
                     continue
                 if min_close_ts_effective is not None and cts < min_close_ts_effective:
                     drops["close_time_before_min"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "drop_close_time_before_min", 1)
                     continue
                 if max_close_ts_effective is not None and cts > max_close_ts_effective:
                     drops["close_time_after_max"] += 1
+                    if pipeline_report_enabled:
+                        _stage_inc(pipeline_stages, "drop_close_time_after_max", 1)
+                        _stage_sample(
+                            pipeline_stages,
+                            "drop_close_time_after_max",
+                            {
+                                "market": _short_market_view(m, close_ts=cts),
+                                "close_ts": cts,
+                                "now_ts": now_ts,
+                                "max_close_ts": max_close_ts_effective,
+                                "delta_hours": (cts - now_ts) / 3600.0,
+                            },
+                            limit=20,
+                        )
                     continue
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "pass_close_window", 1)
                 close_filtered.append(m)
             markets = close_filtered
         close_window_count = len(markets)
+        if pipeline_report_enabled:
+            _stage_inc(pipeline_stages, "close_window_pass", close_window_count)
 
         if len(debug_series_counts) < debug_max:
             debug_series_counts.append(
@@ -1750,7 +1944,6 @@ def scan() -> int:
             )
 
         for m in markets:
-            markets_seen_total += 1
             market_ticker = str(m.get("ticker") or "")
             if not market_ticker:
                 continue
@@ -1931,6 +2124,20 @@ def scan() -> int:
                             skew = abs(int(commence_ts) - int(close_ts))
                             if skew > int(match_max_time_skew_hours * 3600):
                                 drops["odds_match_time_skew"] += 1
+                                if pipeline_report_enabled:
+                                    _stage_inc(pipeline_stages, "drop_odds_match_time_skew", 1)
+                                    _stage_sample(
+                                        pipeline_stages,
+                                        "drop_odds_match_time_skew",
+                                        {
+                                            "market": _short_market_view(m),
+                                            "matchup": {"a": team_a, "b": team_b},
+                                            "close_ts": close_ts,
+                                            "odds_commence_time": odds_event.get("commence_time"),
+                                            "skew_seconds": skew,
+                                        },
+                                        limit=10,
+                                    )
                                 if debug_log and len(debug_unmatched) < debug_max:
                                     debug_unmatched.append(
                                         {
@@ -1954,6 +2161,18 @@ def scan() -> int:
                         match_fuzzy_ok += 1
             if not odds_event:
                 drops["odds_match_failed"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_odds_match_failed", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_odds_match_failed",
+                        {
+                            "market": _short_market_view(m),
+                            "matchup": {"a": team_a, "b": team_b},
+                            "line_type": lt,
+                        },
+                        limit=10,
+                    )
                 if debug_log and len(debug_unmatched) < debug_max:
                     debug_unmatched.append(
                         {
@@ -2073,6 +2292,18 @@ def scan() -> int:
 
             if not fair_yes:
                 drops["fair_prob_unavailable"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_fair_prob_unavailable", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_fair_prob_unavailable",
+                        {
+                            "market": _short_market_view(m),
+                            "line_type": lt,
+                            "matchup": {"a": team_a, "b": team_b},
+                        },
+                        limit=10,
+                    )
                 if debug_log and len(debug_candidates) < debug_max:
                     debug_candidates.append(
                         {
@@ -2101,6 +2332,18 @@ def scan() -> int:
             books_used = int(fair_yes.get("books_used") or 0)
             if books_used < min_books_effective:
                 drops["books_below_min"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_books_below_min", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_books_below_min",
+                        {
+                            "market": _short_market_view(m),
+                            "books_used": books_used,
+                            "min_books": min_books_effective,
+                        },
+                        limit=10,
+                    )
                 continue
 
             # Kalshi buy prices (asks)
@@ -2172,6 +2415,18 @@ def scan() -> int:
             # so we can validate matching + filtering correctness.
             if (not debug_show_all) and (not no_filters) and best_edge < min_edge:
                 drops["edge_below_min"] += 1
+                if pipeline_report_enabled:
+                    _stage_inc(pipeline_stages, "drop_edge_below_min", 1)
+                    _stage_sample(
+                        pipeline_stages,
+                        "drop_edge_below_min",
+                        {
+                            "market": _short_market_view(m),
+                            "edge": float(best_edge),
+                            "min_edge": min_edge,
+                        },
+                        limit=10,
+                    )
                 continue
 
             if len(debug_matched) < debug_max:
@@ -2306,6 +2561,23 @@ def scan() -> int:
         run_meta["debug_candidates_rows"] = len(debug_candidates)
     _write_json(meta_path, run_meta)
     _copy_text(meta_path, meta_latest)
+
+    if pipeline_report_enabled:
+        pipe_path = os.path.join(outdir, f"kalshi_pipeline_report_{stamp}.json")
+        pipe_latest = os.path.join(outdir, "kalshi_pipeline_report_latest.json")
+        payload = {
+            "stamp_utc": stamp,
+            "run_meta_key_counts": {
+                "odds_events_total": run_meta.get("odds_events_total"),
+                "markets_fetched_total": run_meta.get("markets_fetched_total"),
+                "markets_seen_total": run_meta.get("markets_seen_total"),
+                "rows_written": run_meta.get("rows_written"),
+            },
+            "drop_counts": run_meta.get("drop_counts") or {},
+            "stages": pipeline_stages,
+        }
+        _write_json(pipe_path, payload)
+        _copy_text(pipe_path, pipe_latest)
 
     print(f"Wrote {len(rows)} rows to {csv_path} and {json_path}")
 
