@@ -1,0 +1,25 @@
+name: Weather - Tests
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - "weather/**"
+      - ".github/workflows/weather_tests.yml"
+
+jobs:
+  test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r weather/requirements.txt
+      - name: Run pytest
+        run: |
+          pytest -q
