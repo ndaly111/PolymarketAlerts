@@ -67,6 +67,7 @@ def main() -> int:
         default="",
         help="Optional target date_local YYYY-MM-DD (default: today in each city TZ)",
     )
+    p.add_argument("--forecast-source", default="nws_hourly_max", help="Forecast source to price from.")
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
@@ -87,6 +88,7 @@ def main() -> int:
             city_key=c.key,
             target_date_local=target_date_local,
             snapshot_hour_local=snapshot_hour_local,
+            source=str(args.forecast_source),
         )
         if not snap:
             continue
@@ -96,6 +98,7 @@ def main() -> int:
             city_key=c.key,
             month=month,
             snapshot_hour_local=snapshot_hour_local,
+            source=str(args.forecast_source),
         )
         if not model:
             continue
@@ -111,6 +114,7 @@ def main() -> int:
             "tz": c.tz,
             "target_date_local": target_date_local,
             "snapshot_hour_local": snapshot_hour_local,
+            "forecast_source": str(args.forecast_source),
             "forecast_high_f": forecast_high,
             "error_model_month": month,
             "error_model_n_samples": int(model["n_samples"]),
@@ -131,7 +135,8 @@ def main() -> int:
             },
         }
 
-        out_dir = OUT_BASE / target_date_local
+        source_slug = str(args.forecast_source).replace("/", "_")
+        out_dir = OUT_BASE / source_slug / target_date_local
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{c.key}.json"
         out_path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
