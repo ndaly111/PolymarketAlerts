@@ -26,8 +26,6 @@ from pathlib import Path
 from typing import Dict, List
 from zoneinfo import ZoneInfo
 
-import yaml
-
 from weather.lib import db as db_lib
 
 
@@ -42,6 +40,8 @@ def _now_utc_iso() -> str:
 
 
 def load_city_keys(config_path: Path) -> List[str]:
+    import yaml
+
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     return [str(c["key"]).strip() for c in (data.get("cities") or [])]
 
