@@ -80,6 +80,37 @@ def ensure_schema(db_path: Path) -> None:
             """
         )
 
+        # Kalshi weather market snapshots captured at scan-time.
+        # Append-only: we want historical quotes for audits/backtests.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kalshi_weather_market_snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              snapshot_time_utc TEXT NOT NULL,
+              city_key TEXT NOT NULL,
+              target_date_local TEXT NOT NULL,
+              series_ticker TEXT NOT NULL,
+              event_ticker TEXT NOT NULL,
+              market_ticker TEXT NOT NULL,
+              status TEXT NOT NULL,
+              yes_bid INTEGER,
+              yes_ask INTEGER,
+              no_bid INTEGER,
+              no_ask INTEGER,
+              volume INTEGER,
+              open_interest INTEGER,
+              raw_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_kalshi_weather_unique;")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kalshi_weather_unique_v2
+            ON kalshi_weather_market_snapshots(snapshot_time_utc, market_ticker);
+            """
+        )
+
         # Monthly error PMFs by city/month/snapshot-hour
         conn.execute(
             """
@@ -207,6 +238,56 @@ def upsert_observed_cli(
             ),
         )
 
+
+def insert_kalshi_weather_market_snapshot(
+    db_path: Path,
+    *,
+    snapshot_time_utc: str,
+    city_key: str,
+    target_date_local: str,
+    series_ticker: str,
+    event_ticker: str,
+    market_ticker: str,
+    status: str,
+    yes_bid: Optional[int],
+    yes_ask: Optional[int],
+    no_bid: Optional[int],
+    no_ask: Optional[int],
+    volume: Optional[int],
+    open_interest: Optional[int],
+    raw: Dict[str, Any],
+) -> None:
+    """Insert one Kalshi market snapshot row (append-only).
+
+    Unique on (snapshot_time_utc, market_ticker) so a single run doesn't duplicate itself.
+    """
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO kalshi_weather_market_snapshots
+              (snapshot_time_utc, city_key, target_date_local, series_ticker, event_ticker,
+               market_ticker, status, yes_bid, yes_ask, no_bid, no_ask, volume, open_interest, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                snapshot_time_utc,
+                city_key,
+                target_date_local,
+                series_ticker,
+                event_ticker,
+                market_ticker,
+                status,
+                yes_bid,
+                yes_ask,
+                no_bid,
+                no_ask,
+                volume,
+                open_interest,
+                raw_json,
+            ),
+        )
 
 def fetch_joined_errors(
     db_path: Path,
