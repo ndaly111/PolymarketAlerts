@@ -1,4 +1,4 @@
-name: Weather - Backfill Forecast Snapshots (Open-Meteo Archived)
+name: Weather - Backfill Forecast Snapshots (Open-Meteo Historical Forecast)
 
 on:
   workflow_dispatch:
@@ -17,10 +17,14 @@ on:
         description: "Snapshot hour local to label rows (e.g., 5)"
         required: false
         default: "5"
-      past_days:
-        description: "Archived forecast history window for Open-Meteo (days)"
+      max_days_per_call:
+        description: "Max days per Open-Meteo request chunk (larger = fewer calls)"
         required: false
-        default: "92"
+        default: "31"
+      sleep:
+        description: "Sleep between Open-Meteo calls (seconds)"
+        required: false
+        default: "0.25"
       commit_results:
         description: "Commit updated weather.db to repo"
         type: choice
@@ -55,7 +59,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
 
-      - name: Backfill forecast snapshots (Open-Meteo archived)
+      - name: Backfill forecast snapshots (Open-Meteo historical forecast)
         run: |
           ARGS=()
           if [[ -n "${{ github.event.inputs.city }}" ]]; then
@@ -64,7 +68,8 @@ jobs:
           ARGS+=(--start-date "${{ github.event.inputs.start_date }}")
           ARGS+=(--end-date "${{ github.event.inputs.end_date }}")
           ARGS+=(--snapshot-hour-local "${{ github.event.inputs.snapshot_hour_local }}")
-          ARGS+=(--past-days "${{ github.event.inputs.past_days }}")
+          ARGS+=(--max-days-per-call "${{ github.event.inputs.max_days_per_call }}")
+          ARGS+=(--sleep "${{ github.event.inputs.sleep }}")
           python -m weather.scripts.backfill_forecast_open_meteo "${ARGS[@]}"
 
       - name: Upload updated DB
@@ -81,7 +86,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add weather/data/weather.db
-            git commit -m "weather: backfill forecast snapshots (open-meteo archived)"
+            git commit -m "weather: backfill forecast snapshots (open-meteo historical forecast)"
             git push
           else
             echo "No changes to commit."
