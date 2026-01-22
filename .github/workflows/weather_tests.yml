@@ -22,4 +22,4 @@ jobs:
           pip install -r weather/requirements.txt
       - name: Run pytest
         run: |
-          pytest -q
+          python -m pytest -q

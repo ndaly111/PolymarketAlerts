@@ -4,7 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -258,3 +258,70 @@ def upsert_error_model(
             """,
             (city_key, int(month), int(snapshot_hour_local), int(n_samples), pmf_json, updated_at_utc),
         )
+
+
+def fetch_forecast_snapshot(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    snapshot_hour_local: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Returns the snapshot row (dict) for a given city/date/hour, or None if missing.
+    """
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
+                   forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
+            FROM forecast_snapshots
+            WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=?
+            """,
+            (city_key, target_date_local, int(snapshot_hour_local)),
+        ).fetchone()
+
+    if not row:
+        return None
+    return {
+        "city_key": row[0],
+        "target_date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "snapshot_hour_local": int(row[3]),
+        "snapshot_tz": row[4],
+        "forecast_high_f": int(row[5]),
+        "source": row[6],
+        "points_url": row[7],
+        "forecast_url": row[8],
+        "qc_flags": row[9],
+        "raw": json.loads(row[10]) if row[10] else {},
+    }
+
+
+def fetch_error_model(
+    db_path: Path,
+    *,
+    city_key: str,
+    month: int,
+    snapshot_hour_local: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Returns {"n_samples": int, "pmf": {error_int: prob}} or None if missing.
+    """
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT n_samples, pmf_json, updated_at_utc
+            FROM error_models
+            WHERE city_key=? AND month=? AND snapshot_hour_local=?
+            """,
+            (city_key, int(month), int(snapshot_hour_local)),
+        ).fetchone()
+    if not row:
+        return None
+    n_samples, pmf_json, updated_at_utc = row
+    pmf_raw = json.loads(pmf_json) if pmf_json else {}
+    pmf = {int(k): float(v) for k, v in pmf_raw.items()}
+    return {"n_samples": int(n_samples), "pmf": pmf, "updated_at_utc": updated_at_utc}

@@ -37,7 +37,7 @@ jobs:
         env:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          python weather/scripts/build_error_models.py --min-samples 10
+          python -m weather.scripts.build_error_models --min-samples 10
 
       - name: Commit changes (if any)
         run: |
