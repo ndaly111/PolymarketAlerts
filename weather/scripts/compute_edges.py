@@ -29,6 +29,7 @@ from weather.lib import db as db_lib
 from weather.lib.fees import FeeSchedule, ev_no, ev_yes
 from weather.lib.kalshi_weather import (
     best_buy_prices_from_snapshot_row,
+    best_bid_ask_from_snapshot_row,
     parse_event_spec_from_title,
     prob_event,
 )
@@ -117,23 +118,15 @@ def _parse_optional_float(s: Any) -> Optional[float]:
 
 def _spread_cents_for_side(row: Dict[str, Any], side: str) -> Optional[int]:
     """Return bid/ask spread in cents for YES or NO. None if bid or ask missing."""
+    yes_bid, yes_ask, no_bid, no_ask = best_bid_ask_from_snapshot_row(row)
     side = (side or "").upper().strip()
     if side == "YES":
-        bid = row.get("yes_bid")
-        ask = row.get("yes_ask")
+        bid, ask = yes_bid, yes_ask
     else:
-        bid = row.get("no_bid")
-        ask = row.get("no_ask")
-    try:
-        if bid is None or ask is None:
-            return None
-        b = int(bid)
-        a = int(ask)
-        if b < 0 or a < 0:
-            return None
-        return a - b
-    except Exception:
+        bid, ask = no_bid, no_ask
+    if bid is None or ask is None:
         return None
+    return ask - bid
 
 def _strike_overlaps_support(spec_kind: str, a: int, b: Optional[int], support_lo: int, support_hi: int) -> bool:
     """
