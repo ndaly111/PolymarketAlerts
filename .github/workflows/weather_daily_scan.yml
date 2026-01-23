@@ -68,6 +68,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: America/New_York
+      # Allow scripts run by file path (python weather/scripts/x.py) to import the
+      # weather package from repo root.
+      PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
       WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
