@@ -297,24 +297,7 @@ def main() -> int:
         if summary_date_local is None:
             summary_date_local = target_date_local
 
-        pmf_raw = fair.get("pmf_high_f") or {}
-        pmf: Dict[int, float] = {}
-        for k, v in pmf_raw.items():
-            try:
-                pmf[int(k)] = float(v)
-            except Exception:
-                continue
         # Support-overlap guardrail is OPTIONAL. If disabled, we do not drop based on overlap.
-        if support_tail_mass is not None and support_tail_mass > 0.0:
-            support_lo, support_hi = _central_support_interval(pmf, tail_mass=float(support_tail_mass))
-            support_enabled = True
-        else:
-            support_lo, support_hi = _pmf_min_max(pmf)
-            support_enabled = False
-        tail_prob_min = max(0.0, min(0.49, float(support_tail_mass or 0.0) / 2.0))  # metadata only
-        q_lo = float(min_q)
-        q_hi = float(1.0 - min_q)
-
         snap_time = db_lib.fetch_latest_kalshi_weather_snapshot_time(
             db_path,
             city_key=c.key,
@@ -340,6 +323,7 @@ def main() -> int:
             "unparsed": 0,
             "no_prices": 0,
             "no_positive_ev": 0,
+            "no_pmf": 0,
             # strike doesn't overlap modeled support interval (blueprint "weird strikes outside PMF support")
             "outside_support": 0,
             # model probability in tails (q < 5% or q > 95% by default)
@@ -349,6 +333,61 @@ def main() -> int:
             "max_spread_missing": 0,
             "max_spread_too_wide": 0,
         }
+
+        pmf_raw = fair.get("pmf_high_f") or {}
+        pmf: Dict[int, float] = {}
+        for k, v in pmf_raw.items():
+            try:
+                pmf[int(k)] = float(v)
+            except Exception:
+                continue
+        if not pmf:
+            drops["no_pmf"] += 1
+            out = {
+                "city_key": c.key,
+                "label": c.label,
+                "tz": c.tz,
+                "target_date_local": target_date_local,
+                "forecast_source": str(args.forecast_source),
+                "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
+                "kalshi_snapshot_time_utc": snap_time,
+                "filters": {
+                    "min_ev": min_ev,
+                    "min_q": min_q,
+                    "q_interval": [min_q, 1.0 - min_q],
+                    # Optional guardrail: support overlap filter
+                    "support_tail_mass": support_tail_mass,
+                    "support_overlap_enabled": False,
+                    # retained for reference/debugging
+                    "tail_prob_min": 0.0,
+                    "support_interval_f": [0, 0],
+                    "min_volume": min_volume,
+                    "min_open_interest": min_open_interest,
+                    "max_spread_cents": max_spread_cents,
+                },
+                "drops": drops,
+                "candidates": [],
+            }
+            src = str(args.forecast_source).replace("/", "_")
+            out_dir = OUT_BASE / src / target_date_local
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / f"{c.key}.json").write_text(
+                json.dumps(out, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            wrote += 1
+            continue
+
+        # Support-overlap guardrail is OPTIONAL. If disabled, we do not drop based on overlap.
+        if support_tail_mass is not None and support_tail_mass > 0.0:
+            support_lo, support_hi = _central_support_interval(pmf, tail_mass=float(support_tail_mass))
+            support_enabled = True
+        else:
+            support_lo, support_hi = _pmf_min_max(pmf)
+            support_enabled = False
+        tail_prob_min = max(0.0, min(0.49, float(support_tail_mass or 0.0) / 2.0))  # metadata only
+        q_lo = float(min_q)
+        q_hi = float(1.0 - min_q)
 
         for row in markets:
             # liquidity filters (raw markets)
