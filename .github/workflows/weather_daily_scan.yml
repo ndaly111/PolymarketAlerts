@@ -76,18 +76,20 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
-      # Allow manual override (dispatch); otherwise use top-level default.
-      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || env.FORECAST_SOURCE }}
-      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
-      WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
-      WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
-      WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
-      WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
-      WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
-      WEATHER_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || '0' }}
-      WEATHER_MIN_OPEN_INTEREST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_open_interest || '0' }}
-      WEATHER_MAX_SPREAD_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_spread_cents || '' }}
-      WEATHER_TOP_N: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.top_n || '25' }}
+      # Job-level env cannot reference `env.*` inside this block.
+      # Use workflow_dispatch inputs when present; otherwise fall back to the same literal defaults
+      # defined in workflow_dispatch.inputs (and/or top-level defaults).
+      FORECAST_SOURCE: ${{ inputs.forecast_source || 'nws_hourly_max' }}
+      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ inputs.snapshot_hour_local || '4' }}
+      WEATHER_ERROR_GAUSS_MIX: ${{ inputs.gaussian_mix || '0' }}
+      WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ inputs.gaussian_support_std || '4' }}
+      WEATHER_BUY_FEE_CENTS: ${{ inputs.fee_cents || '2' }}
+      WEATHER_MIN_EV: ${{ inputs.min_ev || '0.02' }}
+      WEATHER_MIN_Q: ${{ inputs.min_q || '0.05' }}
+      WEATHER_MIN_VOLUME: ${{ inputs.min_volume || '0' }}
+      WEATHER_MIN_OPEN_INTEREST: ${{ inputs.min_open_interest || '0' }}
+      WEATHER_MAX_SPREAD_CENTS: ${{ inputs.max_spread_cents || '' }}
+      WEATHER_TOP_N: ${{ inputs.top_n || '25' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -95,18 +97,11 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
         with:
           python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r weather/requirements.txt
-          # Discord poster / Kalshi collector uses requests explicitly
-          pip install requests
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          install-root-requirements: "true"
 
       - name: "Gate scheduled runs to 05:00–16:00 America/New_York"
         id: gate

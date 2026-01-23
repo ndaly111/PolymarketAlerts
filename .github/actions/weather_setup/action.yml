@@ -1,0 +1,30 @@
+name: "Weather setup (Python + deps)"
+description: "Common bootstrap for weather workflows"
+inputs:
+  python-version:
+    description: "Python version"
+    required: false
+    default: "3.11"
+  install-root-requirements:
+    description: "Also pip install -r requirements.txt if present at repo root"
+    required: false
+    default: "true"
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install deps
+      shell: bash
+      run: |
+        set -e
+        python -m pip install --upgrade pip
+        pip install -r weather/requirements.txt
+        # Keep for compatibility: some scripts explicitly rely on requests
+        pip install requests
+        if [[ "${{ inputs.install-root-requirements }}" == "true" ]] && [[ -f requirements.txt ]]; then
+          pip install -r requirements.txt
+        fi
