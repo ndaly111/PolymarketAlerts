@@ -6,6 +6,10 @@ on:
     - cron: "55 * * * *"
   workflow_dispatch:
     inputs:
+      snapshot_hour_local:
+        description: "Local hour used for snapshot + pricing lookup (America/New_York). For manual tests, set to current ET hour."
+        required: false
+        default: "4"
       forecast_source:
         description: "forecast_snapshots.source to price from (compute_fair_prices/edges)"
         required: false
@@ -51,6 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
+      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
       WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
       WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
@@ -108,12 +113,17 @@ jobs:
       - name: Collect forecast snapshot (for pricing)
         if: steps.gate.outputs.run == 'true'
         env:
-          # We run at 04:55, so use snapshot hour 4 and allow minute 55
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+          # Allow any minute when scheduled hourly; script gates by hour/minute.
           WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+          # NWS requests should identify you (same pattern as forecast snapshot workflow)
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
         run: |
-          # NOTE: collect_forecast_snapshot does NOT accept --source.
-          python -m weather.scripts.collect_forecast_snapshot
+          ARGS=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual runs should be able to write snapshots anytime.
+            ARGS+=(--no-gate)
+          fi
+          python -m weather.scripts.collect_forecast_snapshot "${ARGS[@]}"
 
       - name: Collect Kalshi market snapshots
         if: steps.gate.outputs.run == 'true'
@@ -122,16 +132,16 @@ jobs:
           WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
           # Kalshi auth required by KalshiClient.from_env() (kalshi_inspect.py)
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
-          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
-          # Optional if your repo supports it (safe if unset)
-          KALSHI_API_BASE: ${{ secrets.KALSHI_API_BASE || vars.KALSHI_API_BASE }}
+          # Support both secret names used across your repo
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID || secrets.KALSHI_API_KEY_ID }}
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          # IMPORTANT: KalshiClient reads KALSHI_BASE (not KALSHI_API_BASE)
+          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
         run: |
           python -m weather.scripts.collect_kalshi_weather_markets
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
-        env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
