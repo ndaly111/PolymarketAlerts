@@ -117,7 +117,7 @@ jobs:
       - name: Collect forecast snapshot (for pricing)
         if: steps.gate.outputs.run == 'true'
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
           python -m weather.scripts.collect_forecast_snapshot --source "$FORECAST_SOURCE"
 
@@ -129,7 +129,7 @@ jobs:
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
