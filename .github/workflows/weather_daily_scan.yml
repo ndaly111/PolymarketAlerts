@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       forecast_source:
-        description: "forecast_snapshots.source to price from (blank = default)"
+        description: "forecast_snapshots.source to price from"
         required: false
-        default: ""
+        default: "nws_hourly_max"
       snapshot_hour_local:
         description: "Snapshot/model hour to price from. MUST match how snapshots/models were built."
         required: false
@@ -76,8 +76,8 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
-      # Allow manual override; empty string falls back to top-level env.FORECAST_SOURCE.
-      FORECAST_SOURCE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source != '') && github.event.inputs.forecast_source || env.FORECAST_SOURCE }}
+      # Allow manual override (dispatch); otherwise use top-level default.
+      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || env.FORECAST_SOURCE }}
       WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
       WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
@@ -186,28 +186,6 @@ jobs:
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --min-pct 0.0 \
             --min-count 1
-
-      - name: Commit forecast snapshot changes early (if any)
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -e
-          if [[ -n "$(git status --porcelain weather/data)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data
-            git commit -m "weather: add forecast snapshot(s)"
-            ok=0
-            for i in 1 2 3; do
-              git pull --rebase && git push && ok=1 && break
-              echo "Push failed (attempt $i). Retrying..."
-              sleep 2
-            done
-            if [[ "$ok" != "1" ]]; then
-              echo "WARN: Could not push snapshot commit after 3 attempts; continuing."
-            fi
-          else
-            echo "No snapshot changes to commit."
-          fi
 
       - name: Collect observed highs (CLI)
         if: steps.gate.outputs.run == 'true'
