@@ -1,0 +1,172 @@
+name: Weather - Morning Discord Alert
+
+on:
+  schedule:
+    # Run hourly; we gate to 4:55 AM America/New_York inside the job so DST stays correct.
+    - cron: "55 * * * *"
+  workflow_dispatch:
+    inputs:
+      forecast_source:
+        description: "forecast_snapshots.source to price from"
+        required: false
+        default: "nws_hourly_max"
+      fee_cents:
+        description: "Flat open fee per contract in cents (added to buy cost)"
+        required: false
+        default: "2"
+      min_ev:
+        description: "Minimum EV ($/contract) to keep"
+        required: false
+        default: "0.02"
+      min_q:
+        description: "Drop markets where model q is in tails: q < min_q or q > (1-min_q)."
+        required: false
+        default: "0.05"
+      min_volume:
+        description: "Minimum Kalshi volume to include (0 disables)"
+        required: false
+        default: "0"
+      min_open_interest:
+        description: "Minimum Kalshi open interest to include (0 disables)"
+        required: false
+        default: "0"
+      max_spread_cents:
+        description: "Maximum bid/ask spread in cents for the side we would buy (blank disables)."
+        required: false
+        default: ""
+      top_n:
+        description: "Top N per city to keep"
+        required: false
+        default: "25"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-morning-discord-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    env:
+      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
+      WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
+      WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
+      WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
+      WEATHER_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || '0' }}
+      WEATHER_MIN_OPEN_INTEREST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_open_interest || '0' }}
+      WEATHER_MAX_SPREAD_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_spread_cents || '' }}
+      WEATHER_TOP_N: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.top_n || '25' }}
+      TZ: America/New_York
+    steps:
+      - name: Gate (only run at 4:55 AM America/New_York for scheduled runs)
+        id: gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NOW_LOCAL="$(date +'%H:%M')"
+          if [[ "$NOW_LOCAL" == "04:55" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Not 04:55 America/New_York (it's $NOW_LOCAL). Skipping."
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r weather/requirements.txt
+          # post_weather_edges_discord.py depends on requests; ensure it's available
+          pip install requests
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Set run date (America/New_York)
+        if: steps.gate.outputs.run == 'true'
+        id: run_date
+        shell: bash
+        run: |
+          echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Sanity check modules
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python -c "import weather.scripts.collect_forecast_snapshot"
+          python -c "import weather.scripts.collect_kalshi_weather_markets"
+          python -c "import weather.scripts.compute_fair_prices"
+          python -c "import weather.scripts.compute_edges"
+          python -c "import weather.scripts.post_weather_edges_discord"
+
+      - name: Collect forecast snapshot (for pricing)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+        run: |
+          python -m weather.scripts.collect_forecast_snapshot --source "$FORECAST_SOURCE"
+
+      - name: Collect Kalshi market snapshots
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python -m weather.scripts.collect_kalshi_weather_markets
+
+      - name: Compute fair prices
+        if: steps.gate.outputs.run == 'true'
+        env:
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+        run: |
+          python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
+
+      - name: Compute edges
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python -m weather.scripts.compute_edges \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}" \
+            --fee-cents "$WEATHER_BUY_FEE_CENTS" \
+            --min-ev "$WEATHER_MIN_EV" \
+            --min-q "$WEATHER_MIN_Q" \
+            --min-volume "$WEATHER_MIN_VOLUME" \
+            --min-open-interest "$WEATHER_MIN_OPEN_INTEREST" \
+            --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
+            --top-n "$WEATHER_TOP_N" \
+            --require-ask
+
+      - name: Post to Discord
+        if: steps.gate.outputs.run == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERT }}
+        run: |
+          python -m weather.scripts.post_weather_edges_discord \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}"
+
+      - name: Commit artifacts (if any)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data weather/outputs/fair_prices weather/outputs/edges
+            git commit -m "weather: morning fair prices + edges"
+            git push
+          else
+            echo "No changes to commit."
+          fi
