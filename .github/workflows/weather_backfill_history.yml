@@ -28,6 +28,7 @@ permissions:
   contents: write
 
 concurrency:
+  # Keep MOS migration/backfill isolated from other workflows.
   group: weather-backfill-history
   cancel-in-progress: false
 
@@ -135,7 +136,16 @@ jobs:
             git add weather/data/forecast_archive || true
             git add weather/data weather/outputs/models || true
             git commit -m "weather: migrate MOS CSVs + backfill DB/models"
-            git push
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "ERROR: Could not push after 3 attempts."
+              exit 1
+            fi
           else
             echo "No changes to commit."
           fi
