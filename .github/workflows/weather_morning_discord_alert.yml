@@ -123,6 +123,8 @@ jobs:
 
       - name: Collect Kalshi market snapshots
         if: steps.gate.outputs.run == 'true'
+        env:
+          WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
         run: |
           python -m weather.scripts.collect_kalshi_weather_markets
 
