@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       files_glob:
-        description: "Glob for MOS archive CSVs in-repo"
+        description: "Glob for MOS archive CSVs in-repo (relative to repo root)"
         required: false
-        default: "weather/data/forecast_archive/*.csv"
+        default: "weather/data/forecast_archive/**/*.csv"
       forecast_source:
         description: "forecast_snapshots.source label for MOS backfill"
         required: false
@@ -34,6 +34,10 @@ concurrency:
 jobs:
   backfill:
     runs-on: ubuntu-latest
+    env:
+      # Allow scripts run by file path (python weather/scripts/x.py) to import the
+      # weather package from repo root.
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,14 +53,69 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
 
-      - name: Ingest MOS archive CSVs into weather.db
+      - name: Preview MOS archive files (fail early if glob matches nothing)
+        env:
+          FILES_GLOB: "${{ github.event.inputs.files_glob }}"
         run: |
-          python weather/scripts/ingest_mos_archive_csvs.py \
-            --files "${{ github.event.inputs.files_glob }}" \
-            --source "${{ github.event.inputs.forecast_source }}" \
-            --model "${{ github.event.inputs.model }}" \
-            --runtime-hour-utc "${{ github.event.inputs.runtime_hour_utc }}" \
-            --snapshot-hour "${{ github.event.inputs.snapshot_hour_local }}"
+          python - <<'PY'
+          import glob
+          import os
+          import sys
+          import pathlib
+          pat = os.environ["FILES_GLOB"]
+          print(f"[backfill] cwd: {pathlib.Path().resolve()}")
+          files = sorted(glob.glob(pat, recursive=True))
+          print(f"[backfill] files_glob: {pat}")
+          print(f"[backfill] matches: {len(files)}")
+          for f in files[:50]:
+            print(f"  - {f}")
+          if not files:
+            # Helpful extra context when the default folder is empty/misplaced
+            if "weather/data/forecast_archive" in pat:
+              print("[backfill] listing weather/data/forecast_archive:", file=sys.stderr)
+              os.system("ls -la weather/data/forecast_archive || true")
+            print(
+              "[backfill] ERROR: No MOS archive CSVs matched your glob.\n"
+              "This workflow does not download MOS files. You must commit the CSVs into the repo first.\n"
+              "Put CSVs under weather/data/forecast_archive/ OR run the workflow with files_glob overridden "
+              "(e.g., '*.csv' if they live at repo root).",
+              file=sys.stderr,
+            )
+            raise SystemExit(1)
+          PY
+
+      - name: Ingest MOS archive CSVs into weather.db
+        env:
+          FILES_GLOB: "${{ github.event.inputs.files_glob }}"
+        run: |
+          python - <<'PY'
+          import glob
+          import os
+          import shlex
+          import subprocess
+          import sys
+          pat = os.environ["FILES_GLOB"]
+          files = sorted(glob.glob(pat, recursive=True))
+          if not files:
+            print(f"No files matched: {pat}", file=sys.stderr)
+            raise SystemExit(1)
+          cmd = [
+            "python",
+            "weather/scripts/ingest_mos_archive_csvs.py",
+            "--files",
+            *files,
+            "--source",
+            "${{ github.event.inputs.forecast_source }}",
+            "--model",
+            "${{ github.event.inputs.model }}",
+            "--runtime-hour-utc",
+            "${{ github.event.inputs.runtime_hour_utc }}",
+            "--snapshot-hour",
+            "${{ github.event.inputs.snapshot_hour_local }}",
+          ]
+          print("[backfill] running:", " ".join(shlex.quote(x) for x in cmd[:8] + ["..."]))
+          subprocess.check_call(cmd)
+          PY
 
       - name: Build / update monthly error models (MOS source)
         env:
