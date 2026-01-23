@@ -260,7 +260,11 @@ def main() -> int:
     if stm is not None:
         support_tail_mass = _clamp(float(stm), 0.0, 0.98)
     min_volume = int(str(args.min_volume).strip())
+    if min_volume < 0:
+        min_volume = 0
     min_open_interest = int(str(args.min_open_interest).strip())
+    if min_open_interest < 0:
+        min_open_interest = 0
     max_spread_raw = str(args.max_spread_cents).strip()
     max_spread_cents: Optional[int] = None
     if max_spread_raw != "":
@@ -269,6 +273,8 @@ def main() -> int:
         except Exception:
             # Treat invalid input as disabled rather than failing the run.
             max_spread_cents = None
+    if max_spread_cents is not None and max_spread_cents < 0:
+        max_spread_cents = None
 
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
