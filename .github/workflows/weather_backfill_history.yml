@@ -34,6 +34,10 @@ concurrency:
 jobs:
   backfill:
     runs-on: ubuntu-latest
+    env:
+      # Allow scripts run by file path (python weather/scripts/x.py) to import the
+      # weather package from repo root.
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
         with:
