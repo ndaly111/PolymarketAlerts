@@ -2,14 +2,15 @@ name: Weather - Morning Discord Alert
 
 on:
   schedule:
-    # Run hourly; we gate to 4:55 AM America/New_York inside the job so DST stays correct.
-    - cron: "55 * * * *"
+    # Run every 30 minutes; we gate to 05:00–15:00 America/New_York inside the job so DST stays correct.
+    # (last run is 15:00; 15:30+ is skipped)
+    - cron: "0,30 * * * *"
   workflow_dispatch:
     inputs:
       snapshot_hour_local:
-        description: "Local hour used for snapshot + pricing lookup (America/New_York). For manual tests, set to current ET hour."
+        description: "Snapshot/model hour to price from (America/New_York). Keep this aligned with your built models (default 5)."
         required: false
-        default: "4"
+        default: "5"
       forecast_source:
         description: "forecast_snapshots.source to price from (compute_fair_prices/edges)"
         required: false
@@ -55,7 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
-      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
       WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
       WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
@@ -65,21 +65,43 @@ jobs:
       WEATHER_TOP_N: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.top_n || '25' }}
       TZ: America/New_York
     steps:
-      - name: Gate (only run at 4:55 AM America/New_York for scheduled runs)
+      - name: Gate (only run 05:00–15:00 America/New_York for scheduled runs; last run is 15:00)
         id: gate
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "WEATHER_SNAPSHOT_HOUR_LOCAL=${{ github.event.inputs.snapshot_hour_local }}" >> "$GITHUB_ENV"
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          NOW_LOCAL="$(date +'%H:%M')"
-          if [[ "$NOW_LOCAL" == "04:55" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
+          H="$(date +'%H')"
+          M="$(date +'%M')"
+          HM="$(date +'%H:%M')"
+
+          # Allow 05:00–14:59 (i.e., 05:00 through 14:30 on this 30-min schedule),
+          # and allow exactly 15:00; skip anything after 15:00.
+          if (( 10#$H < 5 )); then
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Not 04:55 America/New_York (it's $NOW_LOCAL). Skipping."
+            echo "Before 05:00 ET (it's $HM). Skipping."
+            exit 0
           fi
+
+          if (( 10#$H > 15 )); then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "After 15:00 ET window (it's $HM). Skipping."
+            exit 0
+          fi
+
+          if (( 10#$H == 15 )) && (( 10#$M != 0 )); then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "After 15:00 ET cutoff (it's $HM). Skipping."
+            exit 0
+          fi
+
+          # Keep snapshot/model hour fixed for scheduled scans so pricing uses
+          # consistent error models.
+          echo "WEATHER_SNAPSHOT_HOUR_LOCAL=5" >> "$GITHUB_ENV"
+          echo "run=true" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
         if: steps.gate.outputs.run == 'true'
@@ -160,8 +182,25 @@ jobs:
             --top-n "$WEATHER_TOP_N" \
             --require-ask
 
-      - name: Post to Discord
+      - name: Check for edges summary
         if: steps.gate.outputs.run == 'true'
+        id: edges_summary
+        shell: bash
+        run: |
+          set -e
+          SRC="${FORECAST_SOURCE//\//_}"
+          DATE="${{ steps.run_date.outputs.date }}"
+          SUMMARY="weather/outputs/edges/${SRC}/${DATE}/SUMMARY.md"
+          if [[ -f "$SUMMARY" ]]; then
+            echo "has_summary=true" >> "$GITHUB_OUTPUT"
+            echo "Found $SUMMARY"
+          else
+            echo "has_summary=false" >> "$GITHUB_OUTPUT"
+            echo "No edges summary found at $SUMMARY (likely no +EV candidates)."
+          fi
+
+      - name: Post to Discord
+        if: steps.gate.outputs.run == 'true' && steps.edges_summary.outputs.has_summary == 'true'
         env:
           # Your screenshot shows DISCORD_WEATHER_ALERTS (plural).
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEATHER_ALERT || secrets.DISCORD_WEBHOOK_URL || vars.DISCORD_WEATHER_ALERTS || vars.DISCORD_WEATHER_ALERT }}
