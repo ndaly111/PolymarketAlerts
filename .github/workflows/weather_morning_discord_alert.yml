@@ -119,7 +119,7 @@ jobs:
         env:
           WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
         run: |
-          python -m weather.scripts.collect_forecast_snapshot --source "$FORECAST_SOURCE"
+          python -m weather.scripts.collect_forecast_snapshot
 
       - name: Collect Kalshi market snapshots
         if: steps.gate.outputs.run == 'true'
