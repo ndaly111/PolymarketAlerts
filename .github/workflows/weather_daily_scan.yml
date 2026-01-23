@@ -241,6 +241,27 @@ jobs:
             --top-n "$WEATHER_TOP_N" \
             --require-ask
 
+      - name: Ensure SUMMARY.md exists for manual runs (post "no results" when empty)
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -e
+          SRC="${FORECAST_SOURCE//\//_}"
+          DATE="${{ steps.run_date.outputs.date }}"
+          SUMMARY_DIR="weather/outputs/edges/${SRC}/${DATE}"
+          SUMMARY_FILE="${SUMMARY_DIR}/SUMMARY.md"
+          if [[ -f "${SUMMARY_FILE}" ]]; then
+            echo "[summary] found ${SUMMARY_FILE}"
+            exit 0
+          fi
+          echo "[summary] no SUMMARY.md found; creating 'no results' stub for manual run"
+          mkdir -p "${SUMMARY_DIR}"
+          cat > "${SUMMARY_FILE}" <<MD
+          # Weather edges — ${DATE} (${SRC})
+
+          No results.
+          MD
+
       - name: Check for edges summary
         id: edges_summary
         if: steps.gate.outputs.run == 'true'
