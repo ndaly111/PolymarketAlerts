@@ -108,7 +108,7 @@ jobs:
           pip install requests
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Gate scheduled runs to 05:00–16:00 America/New_York
+      - name: "Gate scheduled runs to 05:00–16:00 America/New_York"
         id: gate
         shell: bash
         run: |
