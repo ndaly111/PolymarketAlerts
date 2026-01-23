@@ -124,8 +124,7 @@ def prob_event(pmf_high_f: Dict[int, float], spec: EventSpec) -> float:
 
 def best_buy_prices_from_snapshot_row(row: Dict[str, object]) -> Tuple[Optional[float], Optional[float]]:
     """Return (p_yes, p_no) buy prices in dollars from a snapshot DB row (asks)."""
-    yes_ask = row.get("yes_ask")
-    no_ask = row.get("no_ask")
+    _, yes_ask, _, no_ask = best_bid_ask_from_snapshot_row(row)
 
     def _cents_to_dollars(v) -> Optional[float]:
         try:
@@ -139,3 +138,25 @@ def best_buy_prices_from_snapshot_row(row: Dict[str, object]) -> Tuple[Optional[
             return None
 
     return _cents_to_dollars(yes_ask), _cents_to_dollars(no_ask)
+
+
+def best_bid_ask_from_snapshot_row(
+    row: Dict[str, object],
+) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    """Return (yes_bid, yes_ask, no_bid, no_ask) in cents from a snapshot DB row."""
+    def _cents(v: object) -> Optional[int]:
+        try:
+            if v is None:
+                return None
+            c = int(v)
+            if c < 0:
+                return None
+            return c
+        except Exception:
+            return None
+
+    yes_bid = _cents(row.get("yes_bid"))
+    yes_ask = _cents(row.get("yes_ask"))
+    no_bid = _cents(row.get("no_bid"))
+    no_ask = _cents(row.get("no_ask"))
+    return yes_bid, yes_ask, no_bid, no_ask

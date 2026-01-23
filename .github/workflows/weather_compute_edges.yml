@@ -22,10 +22,14 @@ on:
         description: "Drop markets where model q is in tails: q < min_q or q > (1-min_q). Default 0.05 => drop <5% and >95%."
         required: false
         default: "0.05"
-      tail_mass:
-        description: "Defines model support interval for dropping strikes outside support (e.g., 0.05 keeps central 95%)."
+      support_tail_mass:
+        description: "Optional guardrail: build a central support interval from the PMF and drop strikes that don't overlap it. Leave blank to disable."
         required: false
-        default: "0.05"
+        default: ""
+      tail_mass:
+        description: "DEPRECATED (use support_tail_mass). Kept for backwards compatibility."
+        required: false
+        default: ""
       min_volume:
         description: "Minimum Kalshi volume to include (0 disables)"
         required: false
@@ -58,7 +62,8 @@ jobs:
       WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
       WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
       WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
-      WEATHER_TAIL_MASS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tail_mass || '0.05' }}
+      # Prefer new support_tail_mass; fall back to deprecated tail_mass; default disables (blank).
+      WEATHER_SUPPORT_TAIL_MASS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.support_tail_mass != '' && github.event.inputs.support_tail_mass || github.event.inputs.tail_mass) || '' }}
       WEATHER_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || '0' }}
       WEATHER_MIN_OPEN_INTEREST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_open_interest || '0' }}
       WEATHER_MAX_SPREAD_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_spread_cents || '' }}
@@ -86,7 +91,7 @@ jobs:
             --fee-cents "$WEATHER_BUY_FEE_CENTS" \
             --min-ev "$WEATHER_MIN_EV" \
             --min-q "$WEATHER_MIN_Q" \
-            --tail-mass "$WEATHER_TAIL_MASS" \
+            --support-tail-mass "$WEATHER_SUPPORT_TAIL_MASS" \
             --min-volume "$WEATHER_MIN_VOLUME" \
             --min-open-interest "$WEATHER_MIN_OPEN_INTEREST" \
             --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \

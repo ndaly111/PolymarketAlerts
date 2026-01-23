@@ -48,11 +48,13 @@ def load_city_keys(config_path: Path) -> List[str]:
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     return [str(c["key"]).strip() for c in (data.get("cities") or [])]
 
+
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
         return max(lo, min(hi, float(x)))
     except Exception:
         return lo
+
 
 def _moments_from_counts(counts: Dict[int, int]) -> Tuple[float, float]:
     """Return (mean, stddev) for an integer-valued distribution described by counts."""
@@ -65,6 +67,7 @@ def _moments_from_counts(counts: Dict[int, int]) -> Tuple[float, float]:
     var = sum(((float(k) - mean) ** 2) * float(max(0, int(v))) for k, v in counts.items()) / total
     std = math.sqrt(max(0.0, var))
     return (mean, std)
+
 
 def _gaussian_pmf_int_support(mean: float, std: float, support_std: float) -> Dict[int, float]:
     """Discrete Gaussian PMF over integer errors within +/- support_std*std."""
@@ -85,6 +88,7 @@ def _gaussian_pmf_int_support(mean: float, std: float, support_std: float) -> Di
         k0 = int(round(mean))
         return {k0: 1.0}
     return {k: v / z for k, v in out.items()}
+
 
 def _mix_pmfs(pmf_a: Dict[int, float], pmf_b: Dict[int, float], mix_b: float) -> Dict[int, float]:
     """Return (1-mix_b)*A + mix_b*B over union support, normalized."""
