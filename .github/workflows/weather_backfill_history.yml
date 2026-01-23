@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       files_glob:
-        description: "Glob for MOS archive CSVs in-repo (relative to repo root)"
+        description: "Glob for MOS archive CSVs after migration (relative to repo root)"
         required: false
         default: "weather/data/forecast_archive/**/*.csv"
       forecast_source:
@@ -53,35 +53,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
 
-      - name: Preview MOS archive files (fail early if glob matches nothing)
+      - name: Migrate MOS CSVs into weather/data/forecast_archive
+        run: |
+          set -e
+          echo "[backfill] listing repo root csvs:"
+          ls -al *.csv || true
+          echo "[backfill] listing weather/data/forecast_archive:"
+          ls -al weather/data/forecast_archive || true
+          python weather/scripts/migrate_mos_archive_csvs.py --recursive
+          echo "[backfill] after migration:"
+          ls -al weather/data/forecast_archive || true
+
+      - name: Validate MOS CSVs exist
         env:
           FILES_GLOB: "${{ github.event.inputs.files_glob }}"
         run: |
           python - <<'PY'
           import glob
           import os
-          import sys
-          import pathlib
-          pat = os.environ["FILES_GLOB"]
-          print(f"[backfill] cwd: {pathlib.Path().resolve()}")
-          files = sorted(glob.glob(pat, recursive=True))
-          print(f"[backfill] files_glob: {pat}")
-          print(f"[backfill] matches: {len(files)}")
-          for f in files[:50]:
-            print(f"  - {f}")
-          if not files:
-            # Helpful extra context when the default folder is empty/misplaced
-            if "weather/data/forecast_archive" in pat:
-              print("[backfill] listing weather/data/forecast_archive:", file=sys.stderr)
-              os.system("ls -la weather/data/forecast_archive || true")
-            print(
-              "[backfill] ERROR: No MOS archive CSVs matched your glob.\n"
-              "This workflow does not download MOS files. You must commit the CSVs into the repo first.\n"
-              "Put CSVs under weather/data/forecast_archive/ OR run the workflow with files_glob overridden "
-              "(e.g., '*.csv' if they live at repo root).",
-              file=sys.stderr,
+          pat = os.environ.get("FILES_GLOB", "weather/data/forecast_archive/**/*.csv")
+          matches = sorted(glob.glob(pat, recursive=True))
+          print("[backfill] files_glob:", pat)
+          print("[backfill] matches:", len(matches))
+          if matches:
+            for m in matches[:25]:
+              print(" -", m)
+          if not matches:
+            raise SystemExit(
+              "[backfill] ERROR: No MOS archive CSVs matched your glob. "
+              "Commit CSVs or move them into weather/data/forecast_archive/."
             )
-            raise SystemExit(1)
           PY
 
       - name: Ingest MOS archive CSVs into weather.db
@@ -125,14 +126,15 @@ jobs:
             --min-samples 10 \
             --forecast-source "${{ github.event.inputs.forecast_source }}"
 
-      - name: Commit DB + models (if any)
+      - name: Commit migrated CSVs + DB + models (if any)
         run: |
           set -e
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data weather/outputs/models
-            git commit -m "weather: backfill MOS archive + rebuild models"
+            git add weather/data/forecast_archive || true
+            git add weather/data weather/outputs/models || true
+            git commit -m "weather: migrate MOS CSVs + backfill DB/models"
             git push
           else
             echo "No changes to commit."
