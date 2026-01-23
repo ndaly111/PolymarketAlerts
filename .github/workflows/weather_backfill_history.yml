@@ -1,0 +1,80 @@
+name: Weather - Backfill History (MOS Archive → Models)
+
+on:
+  workflow_dispatch:
+    inputs:
+      files_glob:
+        description: "Glob for MOS archive CSVs in-repo"
+        required: false
+        default: "weather/data/forecast_archive/*.csv"
+      forecast_source:
+        description: "forecast_snapshots.source label for MOS backfill"
+        required: false
+        default: "mos_gfs_18z_archive"
+      model:
+        description: "MOS model filter (IEM CSV 'model' column)"
+        required: false
+        default: "GFS"
+      runtime_hour_utc:
+        description: "Only ingest rows from this MOS cycle hour in UTC (18 = 18Z). -1 disables."
+        required: false
+        default: "18"
+      snapshot_hour_local:
+        description: "Value stored in forecast_snapshots.snapshot_hour_local for these MOS rows"
+        required: false
+        default: "18"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-backfill-history
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r weather/requirements.txt
+
+      - name: Ingest MOS archive CSVs into weather.db
+        run: |
+          python weather/scripts/ingest_mos_archive_csvs.py \
+            --files "${{ github.event.inputs.files_glob }}" \
+            --source "${{ github.event.inputs.forecast_source }}" \
+            --model "${{ github.event.inputs.model }}" \
+            --runtime-hour-utc "${{ github.event.inputs.runtime_hour_utc }}" \
+            --snapshot-hour "${{ github.event.inputs.snapshot_hour_local }}"
+
+      - name: Build / update monthly error models (MOS source)
+        env:
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "${{ github.event.inputs.snapshot_hour_local }}"
+        run: |
+          python weather/scripts/build_error_models.py \
+            --min-samples 10 \
+            --forecast-source "${{ github.event.inputs.forecast_source }}"
+
+      - name: Commit DB + models (if any)
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data weather/outputs/models
+            git commit -m "weather: backfill MOS archive + rebuild models"
+            git push
+          else
+            echo "No changes to commit."
+          fi

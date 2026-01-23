@@ -10,6 +10,12 @@ Runs every 15 minutes via GitHub Actions and posts Discord alerts when the monit
 - Polymarket Sports Value Scan: daily canonical scanner.
 - (LEGACY) Moneyline Compare: manual-only reference workflow.
 
+### Weather workflows
+
+- Weather - Forecast Snapshot (Hourly Max): scheduled snapshots by city.
+- Weather - Daily Scan (NWS → Models → Fair → Edge → Discord): daily end-to-end pipeline.
+- Weather - Backfill History (MOS Archive → Models): manual-only backfill for historical MOS data.
+
 ## Setup
 
 1) In GitHub repo: Settings → Secrets and variables → Actions → New repository secret
