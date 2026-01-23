@@ -13,8 +13,11 @@ Why hourly-max?
 
 Gating:
   - Script may run multiple times per day (DST-safe schedule).
-  - For each city, we only write when the city's local hour equals SNAPSHOT_HOUR_LOCAL
-    and local minute <= SNAPSHOT_MINUTE_MAX.
+  - For each city, we only write when the city's local time falls within the
+    snapshot window:
+      * exact snapshot hour with minute <= SNAPSHOT_MINUTE_MAX, OR
+      * within WEATHER_SNAPSHOT_LATE_WINDOW_HOURS after the snapshot hour.
+  - Existing snapshots are preserved unless --overwrite is provided.
 """
 
 from __future__ import annotations
@@ -74,12 +77,26 @@ def load_cities(config_path: Path) -> List[City]:
     return cities
 
 
-def gate_city(now_local: datetime, snapshot_hour_local: int, minute_max: int) -> bool:
-    if now_local.hour != snapshot_hour_local:
+def gate_city(
+    now_local: datetime,
+    snapshot_hour_local: int,
+    minute_max: int,
+    late_window_hours: int,
+) -> bool:
+    if now_local.hour == snapshot_hour_local:
+        return now_local.minute <= minute_max
+    if late_window_hours <= 0:
         return False
-    if now_local.minute > minute_max:
+    snapshot_start = now_local.replace(
+        hour=snapshot_hour_local,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if now_local < snapshot_start:
         return False
-    return True
+    delta_hours = (now_local - snapshot_start).total_seconds() / 3600.0
+    return delta_hours <= late_window_hours
 
 
 def compute_hourly_max_for_local_date(
@@ -122,10 +139,13 @@ def main() -> int:
     p.add_argument("--config", default=str(DEFAULT_CONFIG))
     p.add_argument("--db", default=str(DEFAULT_DB))
     p.add_argument("--no-gate", action="store_true", help="Ignore time gate (for local testing).")
+    p.add_argument("--overwrite", action="store_true", help="Overwrite existing snapshots.")
     args = p.parse_args()
 
+    forecast_source = os.getenv("FORECAST_SOURCE", "nws_hourly_max").strip() or "nws_hourly_max"
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     minute_max = int(os.getenv("WEATHER_SNAPSHOT_MINUTE_MAX", "25"))
+    late_window_hours = int(os.getenv("WEATHER_SNAPSHOT_LATE_WINDOW_HOURS", "0"))
 
     user_agent = os.getenv("NWS_USER_AGENT", "").strip()
     if not user_agent:
@@ -142,15 +162,35 @@ def main() -> int:
     wrote = 0
     for c in cities:
         now_local = _now_in_tz(c.tz)
-        if (not args.no_gate) and (not gate_city(now_local, snapshot_hour_local, minute_max)):
+        if (not args.no_gate) and (
+            not gate_city(now_local, snapshot_hour_local, minute_max, late_window_hours)
+        ):
             print(
-                f"[skip] {c.key} {c.label}: local={now_local.isoformat()} not in gate hour={snapshot_hour_local}<=:{minute_max}"
+                "[skip] "
+                f"{c.key} {c.label}: local={now_local.isoformat()} "
+                "not in gate hour="
+                f"{snapshot_hour_local}<=:{minute_max} "
+                f"(late_window_hours={late_window_hours})"
             )
             continue
 
         target_date_local = now_local.date().isoformat()
         qc: List[str] = []
         try:
+            if not args.overwrite:
+                existing = db_lib.fetch_forecast_snapshot(
+                    db_path,
+                    city_key=c.key,
+                    target_date_local=target_date_local,
+                    snapshot_hour_local=snapshot_hour_local,
+                    source=forecast_source,
+                )
+                if existing:
+                    print(
+                        f"[skip] {c.key} {c.label}: snapshot exists for {target_date_local} hour={snapshot_hour_local}"
+                    )
+                    continue
+
             endpoints = nws_lib.get_points_endpoints(s, c.lat, c.lon)
             # Use city TZ from config for labeling; NWS also returns a tz we could compare
             if endpoints.time_zone and endpoints.time_zone != c.tz:
@@ -182,7 +222,7 @@ def main() -> int:
                 snapshot_hour_local=snapshot_hour_local,
                 snapshot_tz=c.tz,
                 forecast_high_f=int(fcst_high),
-                source="nws_hourly_max",
+                source=forecast_source,
                 points_url=endpoints.points_url,
                 forecast_url=endpoints.forecast_hourly_url,
                 qc_flags=qc,
