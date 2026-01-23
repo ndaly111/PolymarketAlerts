@@ -172,8 +172,8 @@ jobs:
             --forecast-source "$FORECAST_SOURCE" \
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --target-date "${{ steps.run_date.outputs.date }}" \
-            --min-pct 0.80 \
-            --min-count 5
+            --min-pct 0.75 \
+            --min-count 3
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
