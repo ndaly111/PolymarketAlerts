@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       forecast_source:
-        description: "forecast_snapshots.source to price from"
+        description: "forecast_snapshots.source to price from (compute_fair_prices/edges)"
         required: false
         default: "nws_hourly_max"
       fee_cents:
@@ -94,7 +94,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
-          # post_weather_edges_discord.py depends on requests; ensure it's available
+          # Discord poster uses requests explicitly; ensure it's available
           pip install requests
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
@@ -105,33 +105,33 @@ jobs:
         run: |
           echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
 
-      - name: Sanity check modules
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          python -c "import weather.scripts.collect_forecast_snapshot"
-          python -c "import weather.scripts.collect_kalshi_weather_markets"
-          python -c "import weather.scripts.compute_fair_prices"
-          python -c "import weather.scripts.compute_edges"
-          python -c "import weather.scripts.post_weather_edges_discord"
-
       - name: Collect forecast snapshot (for pricing)
         if: steps.gate.outputs.run == 'true'
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
+          # We run at 04:55, so use snapshot hour 4 and allow minute 55
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
         run: |
+          # NOTE: collect_forecast_snapshot does NOT accept --source.
           python -m weather.scripts.collect_forecast_snapshot
 
       - name: Collect Kalshi market snapshots
         if: steps.gate.outputs.run == 'true'
         env:
+          # Series list for weather markets (non-secret is fine as a Repo Variable)
           WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
+          # Kalshi auth required by KalshiClient.from_env() (kalshi_inspect.py)
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
+          # Optional if your repo supports it (safe if unset)
+          KALSHI_API_BASE: ${{ secrets.KALSHI_API_BASE || vars.KALSHI_API_BASE }}
         run: |
           python -m weather.scripts.collect_kalshi_weather_markets
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
@@ -153,7 +153,8 @@ jobs:
       - name: Post to Discord
         if: steps.gate.outputs.run == 'true'
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERT }}
+          # Your screenshot shows DISCORD_WEATHER_ALERTS (plural).
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEATHER_ALERT || secrets.DISCORD_WEBHOOK_URL || vars.DISCORD_WEATHER_ALERTS || vars.DISCORD_WEATHER_ALERT }}
         run: |
           python -m weather.scripts.post_weather_edges_discord \
             --forecast-source "$FORECAST_SOURCE" \

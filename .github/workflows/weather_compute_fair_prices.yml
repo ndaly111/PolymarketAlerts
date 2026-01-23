@@ -40,7 +40,7 @@ jobs:
 
       - name: Compute fair price artifacts
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
         run: |
           ARGS=(--forecast-source "$FORECAST_SOURCE")
           python -m weather.scripts.compute_fair_prices "${ARGS[@]}"

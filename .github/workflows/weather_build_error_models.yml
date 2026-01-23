@@ -52,7 +52,7 @@ jobs:
 
       - name: Build models
         env:
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "5"
+          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
         run: |
           ARGS=(
             --min-samples 10
