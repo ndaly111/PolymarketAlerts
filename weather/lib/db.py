@@ -442,44 +442,76 @@ def fetch_forecast_snapshot(
     source: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Returns the snapshot row (dict) for a given city/date/hour, or None if missing.
+    Return an existing snapshot row for a given city/date/hour/source, or None.
+    Used to enforce 'first snapshot wins' unless --overwrite is supplied.
+    When source is None, this will match any source for the city/date/hour.
     """
     ensure_schema(db_path)
     with connect(db_path) as conn:
-        if source:
+        if source is None:
             row = conn.execute(
                 """
-                SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
-                       forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
+                SELECT
+                  city_key,
+                  target_date_local,
+                  snapshot_time_utc,
+                  snapshot_hour_local,
+                  snapshot_tz,
+                  forecast_high_f,
+                  source,
+                  points_url,
+                  forecast_url,
+                  qc_flags,
+                  raw_json
                 FROM forecast_snapshots
-                WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=? AND source=?
+                WHERE city_key = ?
+                  AND target_date_local = ?
+                  AND snapshot_hour_local = ?
+                ORDER BY snapshot_time_utc ASC
+                LIMIT 1;
                 """,
-                (city_key, target_date_local, int(snapshot_hour_local), str(source)),
+                (city_key, target_date_local, int(snapshot_hour_local)),
             ).fetchone()
         else:
             row = conn.execute(
                 """
-                SELECT city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
-                       forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json
+                SELECT
+                  city_key,
+                  target_date_local,
+                  snapshot_time_utc,
+                  snapshot_hour_local,
+                  snapshot_tz,
+                  forecast_high_f,
+                  source,
+                  points_url,
+                  forecast_url,
+                  qc_flags,
+                  raw_json
                 FROM forecast_snapshots
-                WHERE city_key=? AND target_date_local=? AND snapshot_hour_local=?
+                WHERE city_key = ?
+                  AND target_date_local = ?
+                  AND snapshot_hour_local = ?
+                  AND source = ?
+                ORDER BY snapshot_time_utc ASC
+                LIMIT 1;
                 """,
-                (city_key, target_date_local, int(snapshot_hour_local)),
+                (city_key, target_date_local, int(snapshot_hour_local), str(source)),
             ).fetchone()
-
     if not row:
         return None
+
     return {
         "city_key": row[0],
         "target_date_local": row[1],
         "snapshot_time_utc": row[2],
-        "snapshot_hour_local": int(row[3]),
+        "snapshot_hour_local": int(row[3]) if row[3] is not None else None,
         "snapshot_tz": row[4],
-        "forecast_high_f": int(row[5]),
+        "forecast_high_f": int(row[5]) if row[5] is not None else None,
         "source": row[6],
         "points_url": row[7],
         "forecast_url": row[8],
         "qc_flags": row[9],
+        "raw_json": row[10],
         "raw": json.loads(row[10]) if row[10] else {},
     }
 

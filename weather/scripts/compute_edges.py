@@ -242,7 +242,10 @@ def main() -> int:
     p.add_argument(
         "--min-q",
         default=os.getenv("WEATHER_MIN_Q", "0.05"),
-        help="Drop markets where q < min_q or q > (1-min_q). Default 0.05 => drop <5% and >95%.",
+        help=(
+            "Drop markets where q < min_q or q > (1-min_q). "
+            "Default 0.05 => drop <5 percent and >95 percent."
+        ),
     )
     # Optional guardrail: strike support-overlap filtering derived from PMF central interval.
     # Default is disabled (blank). Kept separate from min_q, which enforces your true “<5% odds” rule.

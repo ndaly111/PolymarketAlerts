@@ -74,7 +74,7 @@ def main() -> int:
     p.add_argument("--forecast-source", required=True)
     p.add_argument("--snapshot-hour", type=int, required=True)
     p.add_argument("--target-date", required=True, help="YYYY-MM-DD (date_local used in DB)")
-    p.add_argument("--min-pct", type=float, default=0.80, help="Minimum % of cities with snapshots")
+    p.add_argument("--min-pct", type=float, default=0.80, help="Minimum percent of cities with snapshots")
     p.add_argument("--min-count", type=int, default=1, help="Minimum absolute count of snapshots")
     args = p.parse_args()
 

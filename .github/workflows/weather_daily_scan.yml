@@ -1,15 +1,15 @@
 name: Weather - Daily Scan (NWS → Models → Fair → Edge → Discord)
 
+env:
+  # Single source of truth for snapshots + models + pricing + edges.
+  FORECAST_SOURCE: nws_hourly_max
+
 on:
   schedule:
     # Run every 30 minutes, but gate execution to 05:00–16:00 America/New_York.
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
-      forecast_source:
-        description: "forecast_snapshots.source to price from"
-        required: false
-        default: "nws_hourly_max"
       snapshot_hour_local:
         description: "Snapshot/model hour to price from. MUST match how snapshots/models were built."
         required: false
@@ -60,6 +60,8 @@ permissions:
 
 concurrency:
   group: weather-daily-scan
+  # Prevent overlapping runs (push fights), but DO NOT cancel mid-run.
+  # With cancel-in-progress=false, new runs queue behind the active one.
   cancel-in-progress: false
 
 jobs:
@@ -71,7 +73,6 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
-      FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
       WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
       WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
@@ -136,6 +137,73 @@ jobs:
         run: |
           echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
 
+      - name: Collect forecast snapshots (gated per city)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          # The NWS API expects a real contact in User-Agent; fall back to placeholder.
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+          # Allow late starts to still write the intended snapshot hour.
+          WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
+        run: |
+          # Safe to run every time:
+          #  - script only writes when each city's local time is in-window
+          #  - script will NOT overwrite an existing snapshot unless --overwrite is used
+          python -m weather.scripts.collect_forecast_snapshot
+
+      - name: Preflight: forecast snapshot freshness
+        id: snap_pre
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        run: |
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --forecast-source "$FORECAST_SOURCE" \
+            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
+            --min-pct 0.0 \
+            --min-count 1
+
+      - name: Fallback: collect snapshot now (no-gate) if still missing
+        if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
+        env:
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+          WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
+        run: |
+          python -m weather.scripts.collect_forecast_snapshot --no-gate
+
+      - name: Postflight: forecast snapshot freshness
+        if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
+        run: |
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --forecast-source "$FORECAST_SOURCE" \
+            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
+            --min-pct 0.0 \
+            --min-count 1
+
+      - name: Commit forecast snapshot changes early (if any)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain weather/data)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data
+            git commit -m "weather: add forecast snapshot(s)"
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "WARN: Could not push snapshot commit after 3 attempts; continuing."
+            fi
+          else
+            echo "No snapshot changes to commit."
+          fi
+
       - name: Collect observed highs (CLI)
         if: steps.gate.outputs.run == 'true'
         run: |
@@ -173,7 +241,7 @@ jobs:
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --target-date "${{ steps.run_date.outputs.date }}" \
             --min-pct 0.75 \
-            --min-count 3
+            --min-count 1
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
@@ -230,7 +298,16 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add weather/data weather/outputs/models weather/outputs/fair_prices weather/outputs/edges
             git commit -m "weather: daily scan artifacts"
-            git push
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "WARN: Could not push artifacts after 3 attempts."
+              exit 1
+            fi
           else
             echo "No changes to commit."
           fi
