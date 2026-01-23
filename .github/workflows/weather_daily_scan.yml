@@ -1,20 +1,28 @@
-name: Weather - Morning Discord Alert
+name: Weather - Daily Scan (NWS → Models → Fair → Edge → Discord)
 
 on:
   schedule:
-    # Run every 30 minutes; we gate to 05:00–15:00 America/New_York inside the job so DST stays correct.
-    # (last run is 15:00; 15:30+ is skipped)
-    - cron: "0,30 * * * *"
+    # Run once daily AFTER the NWS snapshot window has completed for all timezones.
+    # The forecast snapshot workflow writes a consistent early-morning snapshot per city.
+    - cron: "05 17 * * *"
   workflow_dispatch:
     inputs:
-      snapshot_hour_local:
-        description: "Snapshot/model hour to price from (America/New_York). Keep this aligned with your built models (default 5)."
-        required: false
-        default: "5"
       forecast_source:
-        description: "forecast_snapshots.source to price from (compute_fair_prices/edges)"
+        description: "forecast_snapshots.source to price from"
         required: false
         default: "nws_hourly_max"
+      snapshot_hour_local:
+        description: "Snapshot/model hour to price from. MUST match how snapshots/models were built."
+        required: false
+        default: "4"
+      gaussian_mix:
+        description: "0..1. Mix weight for Gaussian-smoothed PMF of forecast error (0 disables)."
+        required: false
+        default: "0"
+      gaussian_support_std:
+        description: "How many std devs to include in Gaussian PMF support (e.g., 4)."
+        required: false
+        default: "4"
       fee_cents:
         description: "Flat open fee per contract in cents (added to buy cost)"
         required: false
@@ -43,19 +51,27 @@ on:
         description: "Top N per city to keep"
         required: false
         default: "25"
+      post_to_discord:
+        description: "Post SUMMARY.md to Discord when present"
+        required: false
+        default: "true"
 
 permissions:
   contents: write
 
 concurrency:
-  group: weather-morning-discord-alert
+  group: weather-daily-scan
   cancel-in-progress: false
 
 jobs:
-  alert:
+  scan:
     runs-on: ubuntu-latest
     env:
+      TZ: America/New_York
       FORECAST_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source || 'nws_hourly_max' }}
+      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
+      WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
+      WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
       WEATHER_BUY_FEE_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.fee_cents || '2' }}
       WEATHER_MIN_EV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_ev || '0.02' }}
       WEATHER_MIN_Q: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_q || '0.05' }}
@@ -63,112 +79,78 @@ jobs:
       WEATHER_MIN_OPEN_INTEREST: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_open_interest || '0' }}
       WEATHER_MAX_SPREAD_CENTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.max_spread_cents || '' }}
       WEATHER_TOP_N: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.top_n || '25' }}
-      TZ: America/New_York
     steps:
-      - name: Gate (only run 05:00–15:00 America/New_York for scheduled runs; last run is 15:00)
-        id: gate
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "WEATHER_SNAPSHOT_HOUR_LOCAL=${{ github.event.inputs.snapshot_hour_local }}" >> "$GITHUB_ENV"
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          H="$(date +'%H')"
-          M="$(date +'%M')"
-          HM="$(date +'%H:%M')"
-
-          # Allow 05:00–14:59 (i.e., 05:00 through 14:30 on this 30-min schedule),
-          # and allow exactly 15:00; skip anything after 15:00.
-          if (( 10#$H < 5 )); then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Before 05:00 ET (it's $HM). Skipping."
-            exit 0
-          fi
-
-          if (( 10#$H > 15 )); then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "After 15:00 ET window (it's $HM). Skipping."
-            exit 0
-          fi
-
-          if (( 10#$H == 15 )) && (( 10#$M != 0 )); then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "After 15:00 ET cutoff (it's $HM). Skipping."
-            exit 0
-          fi
-
-          # Keep snapshot/model hour fixed for scheduled scans so pricing uses
-          # consistent error models.
-          echo "WEATHER_SNAPSHOT_HOUR_LOCAL=5" >> "$GITHUB_ENV"
-          echo "run=true" >> "$GITHUB_OUTPUT"
-
       - name: Checkout
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
           persist-credentials: true
           fetch-depth: 0
 
       - name: Set up Python
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
-        if: steps.gate.outputs.run == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
-          # Discord poster uses requests explicitly; ensure it's available
+          # Discord poster / Kalshi collector uses requests explicitly
           pip install requests
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Ensure output dirs exist (avoid git add failures)
+        run: |
+          mkdir -p weather/outputs/fair_prices
+          mkdir -p weather/outputs/edges
+          mkdir -p weather/outputs/models
+
       - name: Set run date (America/New_York)
-        if: steps.gate.outputs.run == 'true'
         id: run_date
         shell: bash
         run: |
           echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
 
-      - name: Collect forecast snapshot (for pricing)
-        if: steps.gate.outputs.run == 'true'
-        env:
-          # Allow any minute when scheduled hourly; script gates by hour/minute.
-          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
-          # NWS requests should identify you (same pattern as forecast snapshot workflow)
-          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+      - name: Collect observed highs (CLI)
         run: |
-          ARGS=()
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # Manual runs should be able to write snapshots anytime.
-            ARGS+=(--no-gate)
-          fi
-          python -m weather.scripts.collect_forecast_snapshot "${ARGS[@]}"
+          python -m weather.scripts.collect_cli_observed --max-versions 25
+
+      - name: Build / update monthly error models (NWS)
+        run: |
+          python weather/scripts/build_error_models.py \
+            --min-samples 10 \
+            --forecast-source "$FORECAST_SOURCE" \
+            --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX" \
+            --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD"
 
       - name: Collect Kalshi market snapshots
-        if: steps.gate.outputs.run == 'true'
         env:
-          # Series list for weather markets (non-secret is fine as a Repo Variable)
           WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
-          # Kalshi auth required by KalshiClient.from_env() (kalshi_inspect.py)
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
-          # Support both secret names used across your repo
           KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID || secrets.KALSHI_API_KEY_ID }}
-          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
-          # IMPORTANT: KalshiClient reads KALSHI_BASE (not KALSHI_API_BASE)
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
         run: |
-          python -m weather.scripts.collect_kalshi_weather_markets
+          if [[ -z "${WEATHER_KALSHI_SERIES_TICKERS}" ]]; then
+            echo "WEATHER_KALSHI_SERIES_TICKERS is empty; skipping Kalshi snapshot."
+            exit 0
+          fi
+          python -m weather.scripts.collect_kalshi_weather_markets --require-city-match
+
+      - name: Verify forecast snapshots are fresh (avoid stale/missing pricing)
+        run: |
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --forecast-source "$FORECAST_SOURCE" \
+            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --min-pct 0.80 \
+            --min-count 5
 
       - name: Compute fair prices
-        if: steps.gate.outputs.run == 'true'
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
       - name: Compute edges
-        if: steps.gate.outputs.run == 'true'
         run: |
           python -m weather.scripts.compute_edges \
             --forecast-source "$FORECAST_SOURCE" \
@@ -183,7 +165,6 @@ jobs:
             --require-ask
 
       - name: Check for edges summary
-        if: steps.gate.outputs.run == 'true'
         id: edges_summary
         shell: bash
         run: |
@@ -200,9 +181,8 @@ jobs:
           fi
 
       - name: Post to Discord
-        if: steps.gate.outputs.run == 'true' && steps.edges_summary.outputs.has_summary == 'true'
+        if: steps.edges_summary.outputs.has_summary == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.post_to_discord == 'true')
         env:
-          # Your screenshot shows DISCORD_WEATHER_ALERTS (plural).
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEATHER_ALERT || secrets.DISCORD_WEBHOOK_URL || vars.DISCORD_WEATHER_ALERTS || vars.DISCORD_WEATHER_ALERT }}
         run: |
           python -m weather.scripts.post_weather_edges_discord \
@@ -210,14 +190,13 @@ jobs:
             --date "${{ steps.run_date.outputs.date }}"
 
       - name: Commit artifacts (if any)
-        if: steps.gate.outputs.run == 'true'
         run: |
           set -e
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data weather/outputs/fair_prices weather/outputs/edges
-            git commit -m "weather: morning fair prices + edges"
+            git add weather/data weather/outputs/models weather/outputs/fair_prices weather/outputs/edges
+            git commit -m "weather: daily scan artifacts"
             git push
           else
             echo "No changes to commit."
