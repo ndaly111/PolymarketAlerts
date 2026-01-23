@@ -1,30 +1,32 @@
-name: Weather - Forecast Snapshot (Hourly Max)
+name: Weather - Forecast Snapshot (NWS hourly → forecast_snapshots)
 
 on:
-  schedule:
-    # Run at many UTC times; script gates per-city local hour (04:00 local).
-    # Wide window keeps this DST-safe across ET/CT/PT.
-    - cron: "55 08 * * *"
-    - cron: "55 09 * * *"
-    - cron: "55 10 * * *"
-    - cron: "55 11 * * *"
-    - cron: "55 12 * * *"
-    - cron: "55 13 * * *"
-    - cron: "55 14 * * *"
-    - cron: "55 15 * * *"
-    - cron: "55 16 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      snapshot_hour_local:
+        description: "Hour in each city local time to snapshot (default: 4)"
+        required: false
+        default: "4"
 
 permissions:
   contents: write
 
 concurrency:
+  # Manual tool: if you accidentally trigger twice, no need to queue.
   group: weather-forecast-snapshot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   snapshot:
     runs-on: ubuntu-latest
+    env:
+      TZ: America/New_York
+      PYTHONPATH: ${{ github.workspace }}
+      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event.inputs.snapshot_hour_local || '4' }}
+      WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+      WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
+      # The NWS API expects a real contact in User-Agent; fall back to placeholder.
+      NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,28 +44,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r weather/requirements.txt
 
-      - name: Collect forecast snapshots (gated per city)
-        env:
-          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
-          WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
-          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+      - name: Collect snapshots
         run: |
-          ARGS=()
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            # Manual runs should be able to write snapshots anytime.
-            ARGS+=(--no-gate)
-          fi
-          python -m weather.scripts.collect_forecast_snapshot "${ARGS[@]}"
+          python -m weather.scripts.collect_forecast_snapshot
 
-      - name: Commit changes (if any)
+      - name: Commit snapshot changes (if any)
         run: |
           set -e
-          if [[ -n "$(git status --porcelain)" ]]; then
+          if [[ -n "$(git status --porcelain weather/data)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add weather/data
             git commit -m "weather: add forecast snapshot(s)"
-            git push
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "ERROR: Could not push snapshot commit after 3 attempts."
+              exit 1
+            fi
           else
-            echo "No changes to commit."
+            echo "No snapshot changes to commit."
           fi

@@ -10,6 +10,10 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
+      forecast_source:
+        description: "forecast_snapshots.source to price from (blank = default)"
+        required: false
+        default: ""
       snapshot_hour_local:
         description: "Snapshot/model hour to price from. MUST match how snapshots/models were built."
         required: false
@@ -59,10 +63,9 @@ permissions:
   contents: write
 
 concurrency:
+  # Personal tool: avoid backlogs. If a new run starts, cancel the old run.
   group: weather-daily-scan
-  # Prevent overlapping runs (push fights), but DO NOT cancel mid-run.
-  # With cancel-in-progress=false, new runs queue behind the active one.
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   scan:
@@ -73,6 +76,8 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
+      # Allow manual override; empty string falls back to top-level env.FORECAST_SOURCE.
+      FORECAST_SOURCE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.forecast_source != '') && github.event.inputs.forecast_source || env.FORECAST_SOURCE }}
       WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.snapshot_hour_local || '4' }}
       WEATHER_ERROR_GAUSS_MIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_mix || '0' }}
       WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gaussian_support_std || '4' }}
@@ -151,7 +156,7 @@ jobs:
           #  - script will NOT overwrite an existing snapshot unless --overwrite is used
           python -m weather.scripts.collect_forecast_snapshot
 
-      - name: Preflight: forecast snapshot freshness
+      - name: "Preflight: forecast snapshot freshness"
         id: snap_pre
         if: steps.gate.outputs.run == 'true'
         continue-on-error: true
@@ -163,7 +168,7 @@ jobs:
             --min-pct 0.0 \
             --min-count 1
 
-      - name: Fallback: collect snapshot now (no-gate) if still missing
+      - name: "Fallback: collect snapshot now (no-gate) if still missing"
         if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
         env:
           NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
@@ -172,7 +177,7 @@ jobs:
         run: |
           python -m weather.scripts.collect_forecast_snapshot --no-gate
 
-      - name: Postflight: forecast snapshot freshness
+      - name: "Postflight: forecast snapshot freshness"
         if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \

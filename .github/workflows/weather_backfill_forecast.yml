@@ -36,6 +36,7 @@ permissions:
   contents: write
 
 concurrency:
+  # Backfills can take a while; keep them isolated so they don't block Daily Scan.
   group: weather-backfill-forecast
   cancel-in-progress: false
 
@@ -87,7 +88,16 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add weather/data/weather.db
             git commit -m "weather: backfill forecast snapshots (open-meteo historical forecast)"
-            git push
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "ERROR: Could not push after 3 attempts."
+              exit 1
+            fi
           else
             echo "No changes to commit."
           fi
