@@ -9,10 +9,8 @@ on:
         default: false
         type: boolean
   schedule:
-    # 6:00 AM America/New_York (handles DST by running at both possible UTC hours
-    # and gating at runtime).
-    - cron: "0 10 * * *"  # 6:00 AM EDT
-    - cron: "0 11 * * *"  # 6:00 AM EST
+    # Runs every 15 minutes
+    - cron: "*/15 * * * *"
 
 jobs:
   scan:
@@ -35,21 +33,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Gate to 6:00 AM America/New_York (schedule only)
-        id: gate
-        if: github.event_name == 'schedule'
-        shell: bash
-        run: |
-          NOW="$(TZ=America/New_York date +%H%M)"
-          if [ "$NOW" = "0600" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Not 6:00 AM America/New_York (it's $NOW). Skipping run."
-          fi
-
       - name: Run scanner
-        if: github.event_name != 'schedule' || steps.gate.outputs.run == 'true'
         env:
           THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
