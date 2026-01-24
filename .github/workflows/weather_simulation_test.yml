@@ -66,7 +66,7 @@ jobs:
       - name: Post simulation result to Discord (manual runs always post)
         if: always()
         env:
-          WEATHER_DISCORD_WEBHOOK: ${{ secrets.WEATHER_DISCORD_WEBHOOK }}
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS }}
         run: |
           set -euo pipefail
 
@@ -104,17 +104,6 @@ PY
           python - <<'PY'
 import json
 import os
-import urllib.request
-
-webhook = os.environ["WEATHER_DISCORD_WEBHOOK"]
-content = os.environ["DISCORD_CONTENT"]
-payload = json.dumps({"content": content}).encode("utf-8")
-request = urllib.request.Request(
-    webhook,
-    data=payload,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
 urllib.request.urlopen(request).read()
 print("Posted to Discord.")
 PY
