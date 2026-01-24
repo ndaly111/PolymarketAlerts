@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from weather.lib import db as db_lib
+from utils.logging_utils import configure_logging
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
@@ -106,6 +107,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min-open-interest", default="0")
     p.add_argument("--max-spread-cents", default="")
     p.add_argument("--top-n", default="25")
+    p.add_argument("--debug", action="store_true")
     p.add_argument("--require-ask", action="store_true", default=True)
     p.add_argument("--no-require-ask", dest="require_ask", action="store_false")
     return p.parse_args()
@@ -209,6 +211,11 @@ def _build_fake_markets(city: City, target_date: str, forecast_high: int) -> Lis
 
 def main() -> int:
     args = _parse_args()
+    configure_logging(
+        name="weather_simulate_daily_scan",
+        log_dir=ROOT / "weather" / "outputs" / "logs",
+        debug=args.debug,
+    )
     cities = _load_cities(Path(args.config))
     city = _resolve_city(cities, args.city) if args.city else None
     if not city:
@@ -377,6 +384,8 @@ def main() -> int:
         edges_args += ["--max-spread-cents", str(args.max_spread_cents)]
     if args.require_ask:
         edges_args += ["--require-ask"]
+    if args.debug:
+        edges_args += ["--debug"]
 
     edges_rc = _run_main(compute_edges.main, edges_args)
     if edges_rc != 0:

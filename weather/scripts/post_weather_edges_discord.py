@@ -39,10 +39,10 @@ def main() -> int:
     p.add_argument("--date", default="", help="YYYY-MM-DD (default: today America/New_York)")
     args = p.parse_args()
 
-    webhook = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+    webhook = (os.getenv("WEATHER_DISCORD_WEBHOOK") or os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
     if not webhook:
         raise SystemExit(
-            "DISCORD_WEBHOOK_URL is not set (env). Add a repo Secret/Variable and map it in the workflow."
+            "WEATHER_DISCORD_WEBHOOK is not set (env). Add a repo Secret/Variable and map it in the workflow."
         )
 
     src = str(args.forecast_source).replace("/", "_")
@@ -59,8 +59,8 @@ def main() -> int:
     payload = {"content": content[:1990]}
     r = requests.post(webhook, json=payload, timeout=20)
     if r.status_code >= 300:
-        raise SystemExit(f"Discord post failed: HTTP {r.status_code} {r.text[:200]}")
-    print("[ok] posted weather edges to Discord")
+        raise SystemExit(f"Discord post failed: HTTP {r.status_code} {r.text[:500]}")
+    print(f"[ok] posted weather edges to Discord (status={r.status_code})")
     return 0
 
 

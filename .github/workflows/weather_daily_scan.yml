@@ -282,7 +282,7 @@ jobs:
       - name: Post to Discord
         if: steps.gate.outputs.run == 'true' && steps.edges_summary.outputs.has_summary == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.post_to_discord == 'true')
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEATHER_ALERT || secrets.DISCORD_WEBHOOK_URL || vars.DISCORD_WEATHER_ALERTS || vars.DISCORD_WEATHER_ALERT }}
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS }}
         run: |
           python -m weather.scripts.post_weather_edges_discord \
             --forecast-source "$FORECAST_SOURCE" \
