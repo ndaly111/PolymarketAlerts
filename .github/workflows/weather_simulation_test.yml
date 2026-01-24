@@ -61,7 +61,8 @@ jobs:
             --forecast-high "${{ github.event.inputs.forecast_high }}" \
             --forecast-source "${{ github.event.inputs.forecast_source }}" \
             --snapshot-hour-local "${{ github.event.inputs.snapshot_hour_local }}" \
-            --markets-json "${{ github.event.inputs.markets_json }}"
+            --markets-json "${{ github.event.inputs.markets_json }}" \
+            --debug
 
       - name: Post simulation result to Discord (manual runs always post)
         if: always()
@@ -77,36 +78,9 @@ jobs:
 
           echo "Discord webhook present (length=${#WEATHER_DISCORD_WEBHOOK})."
 
-          SRC_SANITIZED="$(echo "${{ github.event.inputs.forecast_source }}" | tr '/' '_' )"
-          TARGET_DATE="${{ github.event.inputs.target_date }}"
-          SUMMARY_PATH="weather/outputs/edges/${SRC_SANITIZED}/${TARGET_DATE}/SUMMARY.md"
-
-          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          HEADER="**Weather Simulation (Offline Fixtures)**  \nCity: \`${{ github.event.inputs.city }}\`  \nDate: \`${TARGET_DATE}\`  \nSource: \`${{ github.event.inputs.forecast_source }}\`  \nRun: ${RUN_URL}\n"
-
-          if [ -f "${SUMMARY_PATH}" ]; then
-            export SUMMARY_PATH
-            BODY="$(python - <<'PY'
-from pathlib import Path
-import os
-
-summary_path = Path(os.environ["SUMMARY_PATH"])
-summary_text = summary_path.read_text(encoding="utf-8")
-print(summary_text[:1800])
-PY
-)"
-            CONTENT="${HEADER}\n\`\`\`\n${BODY}\n\`\`\`"
-          else
-            CONTENT="${HEADER}\n⚠️ SUMMARY.md not found at \`${SUMMARY_PATH}\`.\nCheck artifacts for outputs + DB."
-          fi
-
-          export DISCORD_CONTENT="${CONTENT}"
-          python - <<'PY'
-import json
-import os
-urllib.request.urlopen(request).read()
-print("Posted to Discord.")
-PY
+          python -m weather.scripts.post_weather_edges_discord \
+            --forecast-source "${{ github.event.inputs.forecast_source }}" \
+            --date "${{ github.event.inputs.target_date }}"
 
       - name: Upload simulation outputs
         uses: actions/upload-artifact@v4

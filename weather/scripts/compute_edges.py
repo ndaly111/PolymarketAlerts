@@ -15,7 +15,9 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import yaml
+
+from utils.logging_utils import configure_logging
 
 from weather.lib import db as db_lib
 from weather.lib.fees import FeeSchedule, ev_no, ev_yes
@@ -39,6 +43,8 @@ DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
 DEFAULT_DB = ROOT / "weather" / "data" / "weather.db"
 FAIR_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 OUT_BASE = ROOT / "weather" / "outputs" / "edges"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -256,7 +262,17 @@ def main() -> int:
     p.add_argument("--min-open-interest", default=os.getenv("WEATHER_MIN_OPEN_INTEREST", "0"))
     p.add_argument("--max-spread-cents", default=os.getenv("WEATHER_MAX_SPREAD_CENTS", ""))
     p.add_argument("--require-ask", action="store_true")
+    p.add_argument("--debug", action="store_true", help="Write per-market audit CSV showing q/EV and drop reason")
     args = p.parse_args()
+
+    debug_enabled = bool(args.debug) or os.getenv("WEATHER_DEBUG", "").strip().lower() in {"1", "true", "yes", "y"}
+    configure_logging(
+        name="weather_compute_edges",
+        log_dir=ROOT / "weather" / "outputs" / "logs",
+        debug=debug_enabled,
+    )
+    if debug_enabled:
+        logger.info("compute_edges debug enabled (will write per-market audit CSV)")
 
     fee_cents = int(str(args.fee_cents).strip())
     fees = FeeSchedule(open_fee_cents=fee_cents)
@@ -299,6 +315,7 @@ def main() -> int:
     for c in cities:
         if args.city and c.key != args.city:
             continue
+        audit_rows: List[Dict[str, Any]] = []
 
         now_local = _now_utc().astimezone(ZoneInfo(c.tz))
         target_date_local = args.date.strip() or now_local.date().isoformat()
@@ -328,7 +345,11 @@ def main() -> int:
             )
         )
         if not markets:
-            continue
+            if debug_enabled:
+                audit_rows.append(
+                    {"city_key": c.key, "reason": "no_markets_at_snapshot", "snapshot_time_utc": snap_time}
+                )
+            markets = []
 
         scored: List[Dict[str, Any]] = []
         drops = {
@@ -403,58 +424,65 @@ def main() -> int:
         q_hi = float(1.0 - min_q)
 
         for row in markets:
+            drop_reason = ""
             # liquidity filters (raw markets)
             vol = _to_int(row.get("volume"), default=0)
             oi = _to_int(row.get("open_interest"), default=0)
             if min_volume > 0 and vol < min_volume:
                 drops["min_volume"] += 1
-                continue
+                drop_reason = "min_volume"
             if min_open_interest > 0 and oi < min_open_interest:
                 drops["min_open_interest"] += 1
-                continue
+                drop_reason = drop_reason or "min_open_interest"
 
             raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
             title = _market_title_from_raw(raw)
             if not title:
                 drops["no_title"] += 1
-                continue
+                drop_reason = drop_reason or "no_title"
 
             spec = parse_event_spec_from_title(title)
             if not spec:
                 drops["unparsed"] += 1
-                continue
+                drop_reason = drop_reason or "unparsed"
 
-            q = prob_event(pmf, spec)
+            q = None
+            if spec:
+                q = float(prob_event(pmf, spec))
             # OPTIONAL guardrail: ignore strikes that do not overlap modeled support.
             # Default: disabled to avoid double-filtering beyond the min_q policy.
             if support_enabled:
-                if not _strike_overlaps_support(spec.kind, spec.a, spec.b, support_lo, support_hi):
+                if spec and (not _strike_overlaps_support(spec.kind, spec.a, spec.b, support_lo, support_hi)):
                     drops["outside_support"] += 1
-                    continue
+                    drop_reason = drop_reason or "outside_support"
             # Hard tail cutoff: ignore events with <5% chance (or >95% on the other tail).
-            if float(q) < q_lo or float(q) > q_hi:
+            if q is not None and (q < q_lo or q > q_hi):
                 drops["q_tail"] += 1
-                continue
+                drop_reason = drop_reason or "q_tail"
 
             p_yes, p_no = best_buy_prices_from_snapshot_row(row)
 
             if args.require_ask and (p_yes is None and p_no is None):
                 drops["no_prices"] += 1
-                continue
+                drop_reason = drop_reason or "no_prices"
 
             best_side = None
             best_ev = -1e9
             chosen_price = None
+            ev_yes_val = None
+            ev_no_val = None
 
-            if p_yes is not None:
+            if p_yes is not None and q is not None:
                 ev = ev_yes(q, float(p_yes), fee_open)
+                ev_yes_val = float(ev)
                 if ev > best_ev:
                     best_ev = ev
                     best_side = "YES"
                     chosen_price = float(p_yes)
 
-            if p_no is not None:
+            if p_no is not None and q is not None:
                 ev = ev_no(q, float(p_no), fee_open)
+                ev_no_val = float(ev)
                 if ev > best_ev:
                     best_ev = ev
                     best_side = "NO"
@@ -462,20 +490,44 @@ def main() -> int:
 
             if best_side is None or chosen_price is None:
                 drops["no_prices"] += 1
-                continue
+                drop_reason = drop_reason or "no_prices"
 
             # spread filter applied to chosen side (requires bid + ask on that side)
             if max_spread_cents is not None:
                 sp = _spread_cents_for_side(row, best_side)
                 if sp is None:
                     drops["max_spread_missing"] += 1
-                    continue
+                    drop_reason = drop_reason or "max_spread_missing"
                 if sp > max_spread_cents:
                     drops["max_spread_too_wide"] += 1
-                    continue
+                    drop_reason = drop_reason or "max_spread_too_wide"
 
-            if best_ev < min_ev:
+            if q is not None and best_ev < min_ev:
                 drops["no_positive_ev"] += 1
+                drop_reason = drop_reason or "no_positive_ev"
+
+            if debug_enabled:
+                audit_rows.append(
+                    {
+                        "city_key": c.key,
+                        "target_date_local": target_date_local,
+                        "market_ticker": row.get("market_ticker"),
+                        "title": title,
+                        "snapshot_time_utc": row.get("snapshot_time_utc"),
+                        "volume": vol,
+                        "open_interest": oi,
+                        "q": q,
+                        "yes_ask": p_yes,
+                        "no_ask": p_no,
+                        "ev_yes": ev_yes_val,
+                        "ev_no": ev_no_val,
+                        "best_side": best_side,
+                        "best_ev": float(best_ev) if best_ev > -1e8 else None,
+                        "drop_reason": drop_reason,
+                    }
+                )
+
+            if drop_reason:
                 continue
 
             scored.append(
@@ -537,6 +589,31 @@ def main() -> int:
             json.dumps(out, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        if debug_enabled:
+            audit_path = out_dir / f"{c.key}_audit.csv"
+            cols = [
+                "city_key",
+                "target_date_local",
+                "market_ticker",
+                "title",
+                "snapshot_time_utc",
+                "volume",
+                "open_interest",
+                "q",
+                "yes_ask",
+                "no_ask",
+                "ev_yes",
+                "ev_no",
+                "best_side",
+                "best_ev",
+                "drop_reason",
+            ]
+            with audit_path.open("w", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=cols)
+                w.writeheader()
+                for r in audit_rows:
+                    w.writerow({k: r.get(k) for k in cols})
+            logger.info("Wrote audit CSV: %s (%d rows)", audit_path, len(audit_rows))
         wrote += 1
 
         for r in scored:
