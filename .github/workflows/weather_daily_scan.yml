@@ -10,54 +10,21 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
-      forecast_source:
-        description: "forecast_snapshots.source to price from"
-        required: false
-        default: "nws_hourly_max"
-      snapshot_hour_local:
-        description: "Snapshot/model hour to price from. MUST match how snapshots/models were built."
-        required: false
-        default: "4"
-      gaussian_mix:
-        description: "0..1. Mix weight for Gaussian-smoothed PMF of forecast error (0 disables)."
-        required: false
-        default: "0"
-      gaussian_support_std:
-        description: "How many std devs to include in Gaussian PMF support (e.g., 4)."
-        required: false
-        default: "4"
-      fee_cents:
-        description: "Flat open fee per contract in cents (added to buy cost)"
-        required: false
-        default: "2"
-      min_ev:
-        description: "Minimum EV ($/contract) to keep"
-        required: false
-        default: "0.02"
-      min_q:
-        description: "Drop markets where model q is in tails: q < min_q or q > (1-min_q)."
-        required: false
-        default: "0.05"
-      min_volume:
-        description: "Minimum Kalshi volume to include (0 disables)"
-        required: false
-        default: "0"
-      min_open_interest:
-        description: "Minimum Kalshi open interest to include (0 disables)"
-        required: false
-        default: "0"
-      max_spread_cents:
-        description: "Maximum bid/ask spread in cents for the side we would buy (blank disables)."
+      run_mode:
+        description: "Execution mode"
+        type: choice
+        options:
+          - manual
+          - debug
+        default: manual
+      target_date:
+        description: "Local date override YYYY-MM-DD (optional)"
         required: false
         default: ""
       top_n:
-        description: "Top N per city to keep"
+        description: "Top N per city to keep (optional override)"
         required: false
-        default: "25"
-      post_to_discord:
-        description: "Post SUMMARY.md to Discord when present"
-        required: false
-        default: "true"
+        default: ""
 
 permissions:
   contents: write
@@ -76,20 +43,17 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
-      # Job-level env cannot reference `env.*` inside this block.
-      # Use workflow_dispatch inputs when present; otherwise fall back to the same literal defaults
-      # defined in workflow_dispatch.inputs (and/or top-level defaults).
-      FORECAST_SOURCE: ${{ inputs.forecast_source || 'nws_hourly_max' }}
-      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ inputs.snapshot_hour_local || '4' }}
-      WEATHER_ERROR_GAUSS_MIX: ${{ inputs.gaussian_mix || '0' }}
-      WEATHER_ERROR_GAUSS_SUPPORT_STD: ${{ inputs.gaussian_support_std || '4' }}
-      WEATHER_BUY_FEE_CENTS: ${{ inputs.fee_cents || '2' }}
-      WEATHER_MIN_EV: ${{ inputs.min_ev || '0.02' }}
-      WEATHER_MIN_Q: ${{ inputs.min_q || '0.05' }}
-      WEATHER_MIN_VOLUME: ${{ inputs.min_volume || '0' }}
-      WEATHER_MIN_OPEN_INTEREST: ${{ inputs.min_open_interest || '0' }}
-      WEATHER_MAX_SPREAD_CENTS: ${{ inputs.max_spread_cents || '' }}
-      WEATHER_TOP_N: ${{ inputs.top_n || '25' }}
+      FORECAST_SOURCE: nws_hourly_max
+      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+      WEATHER_ERROR_GAUSS_MIX: "0"
+      WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
+      WEATHER_BUY_FEE_CENTS: "2"
+      WEATHER_MIN_EV: "0.02"
+      WEATHER_MIN_Q: "0.05"
+      WEATHER_MIN_VOLUME: "0"
+      WEATHER_MIN_OPEN_INTEREST: "0"
+      WEATHER_MAX_SPREAD_CENTS: ""
+      WEATHER_TOP_N: ${{ (github.event.inputs.top_n != '' && github.event.inputs.top_n) || '25' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -123,6 +87,23 @@ jobs:
             echo "[gate] schedule @ ${NOW_HHMM} ET → skipping (outside 05:00–16:00)"
           fi
 
+      - name: Resolve run mode/date
+        id: mode
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "debug=false" >> "$GITHUB_OUTPUT"
+            echo "date_override=" >> "$GITHUB_OUTPUT"
+          else
+            if [[ "${{ github.event.inputs.run_mode }}" == "debug" ]]; then
+              echo "debug=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "debug=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "date_override=${{ github.event.inputs.target_date }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Ensure output dirs exist (avoid git add failures)
         if: steps.gate.outputs.run == 'true'
         run: |
@@ -135,7 +116,11 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
-          echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+          if [[ -n "${{ steps.mode.outputs.date_override }}" ]]; then
+            echo "date=${{ steps.mode.outputs.date_override }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Collect forecast snapshots (gated per city)
         if: steps.gate.outputs.run == 'true'
@@ -228,6 +213,8 @@ jobs:
 
       - name: Compute edges
         if: steps.gate.outputs.run == 'true'
+        env:
+          WEATHER_DEBUG: ${{ steps.mode.outputs.debug }}
         run: |
           python -m weather.scripts.compute_edges \
             --forecast-source "$FORECAST_SOURCE" \
@@ -262,31 +249,70 @@ jobs:
           No results.
           MD
 
-      - name: Check for edges summary
-        id: edges_summary
+      - name: Decide whether to post to Discord
+        id: should_post
         if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
-          set -e
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "post=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           SRC="${FORECAST_SOURCE//\//_}"
           DATE="${{ steps.run_date.outputs.date }}"
-          SUMMARY="weather/outputs/edges/${SRC}/${DATE}/SUMMARY.md"
-          if [[ -f "$SUMMARY" ]]; then
-            echo "has_summary=true" >> "$GITHUB_OUTPUT"
-            echo "Found $SUMMARY"
-          else
-            echo "has_summary=false" >> "$GITHUB_OUTPUT"
-            echo "No edges summary found at $SUMMARY (likely no +EV candidates)."
+          EDGE_DIR="weather/outputs/edges/${SRC}/${DATE}"
+          if [[ ! -d "${EDGE_DIR}" ]]; then
+            echo "post=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          export EDGE_DIR
+          RESULT="$(python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+edge_dir = Path(os.environ["EDGE_DIR"])
+
+# 1) Prefer JSON signal (real edges exist)
+has_edges = False
+for p in edge_dir.glob("*.json"):
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if obj.get("candidates"):
+        has_edges = True
+        break
+
+if has_edges:
+    print("true")
+else:
+    # 2) Fallback: if SUMMARY.md exists AND isn't the "No results." stub, post it.
+    s = edge_dir / "SUMMARY.md"
+    if s.exists():
+        txt = s.read_text(encoding="utf-8", errors="ignore")
+        print("true" if "No results." not in txt else "false")
+    else:
+        print("false")
+PY
+)"
+          echo "post=${RESULT}" >> "$GITHUB_OUTPUT"
 
       - name: Post to Discord
-        if: steps.gate.outputs.run == 'true' && steps.edges_summary.outputs.has_summary == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.post_to_discord == 'true')
+        if: steps.gate.outputs.run == 'true' && steps.should_post.outputs.post == 'true'
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS }}
         run: |
           python -m weather.scripts.post_weather_edges_discord \
             --forecast-source "$FORECAST_SOURCE" \
             --date "${{ steps.run_date.outputs.date }}"
+
+      - name: Upload debug audit artifacts
+        if: steps.gate.outputs.run == 'true' && steps.mode.outputs.debug == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-debug-audits
+          path: weather/outputs/edges/**
 
       - name: Commit artifacts (if any)
         if: steps.gate.outputs.run == 'true'
