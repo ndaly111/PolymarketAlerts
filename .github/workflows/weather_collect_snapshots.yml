@@ -4,43 +4,30 @@ on:
   schedule:
     # Cron is UTC. Run in a window that safely covers 04:00 local
     # for ET/CT/MT/PT across DST changes.
-    # (ET 04:00 is 08–09 UTC; PT 04:00 is 11–12 UTC)
-    - cron: "*/30 7-15 * * *"
-  workflow_dispatch:
-    inputs:
-      snapshot_hour_local:
-        description: "Local hour for canonical snapshot (default 4)"
-        required: false
-        default: "4"
-      late_window_hours:
-        description: "Allow late starts to still write intended snapshot hour"
-        required: false
-        default: "3"
-      no_gate:
-        description: "If true, bypass local-time gate (debug only; NOT canonical)"
-        required: false
-        default: "false"
+    # (ET 04:00 is ~08–09 UTC; PT 04:00 is ~11–12 UTC, depending on DST)
+    # Run frequently so we don't miss 04:00 local if a run is delayed.
+    - cron: "*/10 7-15 * * *"
 
 permissions:
   contents: write
 
 concurrency:
-  # Snapshot workflow is scheduled every 30 minutes.
-  # If a run is slow, overlapping runs can fight over commits/pushes.
-  # Prefer the newest run and cancel older ones.
+  # Canonical data builder: do NOT cancel in-progress runs or we can miss
+  # the 04:00 local window for some cities.
   group: weather-collect-snapshots
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   snapshots:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
       # Canonical snapshot hour (local per city)
-      WEATHER_SNAPSHOT_HOUR_LOCAL: ${{ (github.event.inputs.snapshot_hour_local != '' && github.event.inputs.snapshot_hour_local) || '4' }}
+      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_SNAPSHOT_MINUTE_MAX: "59"
-      WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: ${{ (github.event.inputs.late_window_hours != '' && github.event.inputs.late_window_hours) || '3' }}
+      WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
       NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
 
     steps:
@@ -60,12 +47,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.no_gate }}" == "true" ]]; then
-            echo "[snapshots] running with --no-gate (debug only; NOT canonical)"
-            python -m weather.scripts.collect_forecast_snapshot --no-gate
-          else
-            python -m weather.scripts.collect_forecast_snapshot
-          fi
+          python -m weather.scripts.collect_forecast_snapshot
 
       - name: Snapshot coverage summary (non-blocking)
         continue-on-error: true
