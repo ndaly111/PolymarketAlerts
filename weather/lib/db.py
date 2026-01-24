@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +109,36 @@ def ensure_schema(db_path: Path) -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_kalshi_weather_unique_v2
             ON kalshi_weather_market_snapshots(snapshot_time_utc, market_ticker);
+            """
+        )
+
+        # Offline fixtures table for local simulation runs (no external calls).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kalshi_weather_market_fixtures (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              snapshot_time_utc TEXT NOT NULL,
+              city_key TEXT NOT NULL,
+              target_date_local TEXT NOT NULL,
+              series_ticker TEXT NOT NULL,
+              event_ticker TEXT NOT NULL,
+              market_ticker TEXT NOT NULL,
+              status TEXT NOT NULL,
+              yes_bid INTEGER,
+              yes_ask INTEGER,
+              no_bid INTEGER,
+              no_ask INTEGER,
+              volume INTEGER,
+              open_interest INTEGER,
+              raw_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("DROP INDEX IF EXISTS idx_kalshi_weather_fixtures_unique;")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_kalshi_weather_fixtures_unique_v2
+            ON kalshi_weather_market_fixtures(snapshot_time_utc, market_ticker);
             """
         )
 
@@ -290,6 +321,78 @@ def insert_kalshi_weather_market_snapshot(
         )
 
 
+def upsert_kalshi_weather_market_fixture(
+    db_path: Path,
+    *,
+    snapshot_time_utc: str,
+    city_key: str,
+    target_date_local: str,
+    series_ticker: str,
+    event_ticker: str,
+    market_ticker: str,
+    status: str,
+    yes_bid: Optional[int],
+    yes_ask: Optional[int],
+    no_bid: Optional[int],
+    no_ask: Optional[int],
+    volume: Optional[int],
+    open_interest: Optional[int],
+    raw: Dict[str, Any],
+) -> None:
+    """Insert or replace a Kalshi market fixture row for offline simulations."""
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO kalshi_weather_market_fixtures
+              (snapshot_time_utc, city_key, target_date_local, series_ticker, event_ticker,
+               market_ticker, status, yes_bid, yes_ask, no_bid, no_ask, volume, open_interest, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_time_utc, market_ticker) DO UPDATE SET
+              city_key=excluded.city_key,
+              target_date_local=excluded.target_date_local,
+              series_ticker=excluded.series_ticker,
+              event_ticker=excluded.event_ticker,
+              status=excluded.status,
+              yes_bid=excluded.yes_bid,
+              yes_ask=excluded.yes_ask,
+              no_bid=excluded.no_bid,
+              no_ask=excluded.no_ask,
+              volume=excluded.volume,
+              open_interest=excluded.open_interest,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                snapshot_time_utc,
+                city_key,
+                target_date_local,
+                series_ticker,
+                event_ticker,
+                market_ticker,
+                status,
+                yes_bid,
+                yes_ask,
+                no_bid,
+                no_ask,
+                volume,
+                open_interest,
+                raw_json,
+            ),
+        )
+
+
+def _offline_fixtures_enabled() -> bool:
+    return os.getenv("WEATHER_OFFLINE_FIXTURES", "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _kalshi_market_table() -> str:
+    table = "kalshi_weather_market_fixtures" if _offline_fixtures_enabled() else "kalshi_weather_market_snapshots"
+    if table not in {"kalshi_weather_market_fixtures", "kalshi_weather_market_snapshots"}:
+        raise RuntimeError(f"Unexpected kalshi market table: {table}")
+    return table
+
+
 def fetch_latest_kalshi_weather_snapshot_time(
     db_path: Path,
     *,
@@ -298,11 +401,12 @@ def fetch_latest_kalshi_weather_snapshot_time(
 ) -> Optional[str]:
     """Return latest snapshot_time_utc for a given city/date."""
     ensure_schema(db_path)
+    table = _kalshi_market_table()
     with connect(db_path) as conn:
         row = conn.execute(
-            """
+            f"""
             SELECT snapshot_time_utc
-            FROM kalshi_weather_market_snapshots
+            FROM {table}
             WHERE city_key = ? AND target_date_local = ?
             ORDER BY snapshot_time_utc DESC
             LIMIT 1;
@@ -321,13 +425,14 @@ def fetch_kalshi_weather_markets_at_snapshot(
 ) -> Iterable[Dict[str, Any]]:
     """Fetch all Kalshi weather markets for a city/date at a specific snapshot time."""
     ensure_schema(db_path)
+    table = _kalshi_market_table()
     with connect(db_path) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
               snapshot_time_utc, city_key, target_date_local, series_ticker, event_ticker, market_ticker,
               status, yes_bid, yes_ask, no_bid, no_ask, volume, open_interest, raw_json
-            FROM kalshi_weather_market_snapshots
+            FROM {table}
             WHERE snapshot_time_utc = ? AND city_key = ? AND target_date_local = ?
             ORDER BY market_ticker ASC;
             """,

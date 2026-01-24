@@ -1,0 +1,72 @@
+name: Weather - Simulation Test (Offline Fixtures)
+
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "City key or label (e.g., chicago)"
+        required: true
+        default: "chicago"
+      target_date:
+        description: "YYYY-MM-DD"
+        required: true
+        default: "2026-01-24"
+      forecast_high:
+        description: "Fake forecast high in °F"
+        required: true
+        default: "8"
+      forecast_source:
+        description: "Label for forecast_snapshots.source"
+        required: false
+        default: "nws_hourly_max"
+      snapshot_hour_local:
+        description: "Snapshot hour local (aligns with error model)"
+        required: false
+        default: "6"
+      markets_json:
+        description: "Path to fixtures JSON (optional)"
+        required: false
+        default: "weather/fixtures/kalshi_weather_fixture_chicago_realistic.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weather-simulation-test
+  cancel-in-progress: true
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      WEATHER_OFFLINE_FIXTURES: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+        with:
+          python-version: "3.11"
+          install-root-requirements: "true"
+
+      - name: Run offline simulation
+        run: |
+          set -euo pipefail
+          python -m weather.scripts.simulate_daily_scan \
+            --db weather/data/weather_sim.db \
+            --city "${{ github.event.inputs.city }}" \
+            --target-date "${{ github.event.inputs.target_date }}" \
+            --forecast-high "${{ github.event.inputs.forecast_high }}" \
+            --forecast-source "${{ github.event.inputs.forecast_source }}" \
+            --snapshot-hour-local "${{ github.event.inputs.snapshot_hour_local }}" \
+            --markets-json "${{ github.event.inputs.markets_json }}"
+
+      - name: Upload simulation outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-sim-outputs
+          path: |
+            weather/outputs/**
+            weather/data/weather_sim.db
