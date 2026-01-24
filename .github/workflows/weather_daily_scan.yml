@@ -44,6 +44,11 @@ jobs:
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
+      # IMPORTANT: this is the *local* snapshot hour for each city.
+      # Canonical dataset definition: we price from the 04:00 local snapshot.
+      # Scheduled runs start at 05:00 America/New_York, and the snapshot collector
+      # supports a late window, so Eastern cities are still captured.
+      # Manual runs that happen later rely on the --no-gate fallback (see below).
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_ERROR_GAUSS_MIX: "0"
       WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
@@ -104,6 +109,19 @@ jobs:
             echo "date_override=${{ github.event.inputs.target_date }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Apply debug overrides (drop filters)
+        if: steps.gate.outputs.run == 'true' && steps.mode.outputs.debug == 'true'
+        shell: bash
+        run: |
+          # Debug mode should be “show me everything”:
+          # - remove EV/min_q/liquidity/spread filters
+          # - still compute prices/EV; audits will show why things would normally be dropped
+          echo "WEATHER_MIN_EV=0" >> "$GITHUB_ENV"
+          echo "WEATHER_MIN_Q=0" >> "$GITHUB_ENV"
+          echo "WEATHER_MIN_VOLUME=0" >> "$GITHUB_ENV"
+          echo "WEATHER_MIN_OPEN_INTEREST=0" >> "$GITHUB_ENV"
+          echo "WEATHER_MAX_SPREAD_CENTS=" >> "$GITHUB_ENV"
+
       - name: Ensure output dirs exist (avoid git add failures)
         if: steps.gate.outputs.run == 'true'
         run: |
@@ -149,16 +167,17 @@ jobs:
             --min-count 1
 
       - name: "Fallback: collect snapshot now (no-gate) if still missing"
-        if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && steps.snap_pre.outcome == 'failure'
         env:
           NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
           WEATHER_SNAPSHOT_MINUTE_MAX: "59"
           WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
         run: |
+          # Manual/debug fallback only: this is not a true 04:00 local snapshot.
           python -m weather.scripts.collect_forecast_snapshot --no-gate
 
       - name: "Postflight: forecast snapshot freshness"
-        if: steps.gate.outputs.run == 'true' && steps.snap_pre.outcome == 'failure'
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && steps.snap_pre.outcome == 'failure'
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
             --target-date "${{ steps.run_date.outputs.date }}" \
@@ -196,8 +215,8 @@ jobs:
           fi
           python -m weather.scripts.collect_kalshi_weather_markets --require-city-match
 
-      - name: Verify forecast snapshots are fresh (avoid stale/missing pricing)
-        if: steps.gate.outputs.run == 'true'
+      - name: Verify forecast snapshots are fresh (STRICT for schedule)
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
             --forecast-source "$FORECAST_SOURCE" \
@@ -206,16 +225,36 @@ jobs:
             --min-pct 0.75 \
             --min-count 1
 
+      - name: Verify forecast snapshots are fresh (LENIENT for manual/debug)
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
+        continue-on-error: true
+        run: |
+          # Manual/debug runs are allowed to be partial (e.g., you ran after some cities left the snapshot window).
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --forecast-source "$FORECAST_SOURCE" \
+            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --min-pct 0.0 \
+            --min-count 0
+
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
       - name: Compute edges
         if: steps.gate.outputs.run == 'true'
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           WEATHER_DEBUG: ${{ steps.mode.outputs.debug }}
         run: |
+          set -e
+          REQUIRE_ASK="--require-ask"
+          if [[ "${WEATHER_DEBUG}" == "true" ]]; then
+            # In debug mode, don't drop markets just because asks are missing.
+            REQUIRE_ASK=""
+          fi
           python -m weather.scripts.compute_edges \
             --forecast-source "$FORECAST_SOURCE" \
             --date "${{ steps.run_date.outputs.date }}" \
@@ -226,9 +265,9 @@ jobs:
             --min-open-interest "$WEATHER_MIN_OPEN_INTEREST" \
             --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
             --top-n "$WEATHER_TOP_N" \
-            --require-ask
+            ${REQUIRE_ASK}
 
-      - name: Ensure SUMMARY.md exists for manual runs (post "no results" when empty)
+      - name: Ensure SUMMARY.md exists for manual/debug runs (always post something)
         if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
@@ -246,7 +285,7 @@ jobs:
           cat > "${SUMMARY_FILE}" <<MD
           # Weather edges — ${DATE} (${SRC})
 
-          No results.
+          No results (or insufficient snapshot data to price some cities).
           MD
 
       - name: Decide whether to post to Discord
@@ -273,7 +312,7 @@ from pathlib import Path
 
 edge_dir = Path(os.environ["EDGE_DIR"])
 
-# 1) Prefer JSON signal (real edges exist)
+# Scheduled runs: only post when we have real edge candidates.
 has_edges = False
 for p in edge_dir.glob("*.json"):
     try:
@@ -284,16 +323,7 @@ for p in edge_dir.glob("*.json"):
         has_edges = True
         break
 
-if has_edges:
-    print("true")
-else:
-    # 2) Fallback: if SUMMARY.md exists AND isn't the "No results." stub, post it.
-    s = edge_dir / "SUMMARY.md"
-    if s.exists():
-        txt = s.read_text(encoding="utf-8", errors="ignore")
-        print("true" if "No results." not in txt else "false")
-    else:
-        print("false")
+print("true" if has_edges else "false")
 PY
 )"
           echo "post=${RESULT}" >> "$GITHUB_OUTPUT"
