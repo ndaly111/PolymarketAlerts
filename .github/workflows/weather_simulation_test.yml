@@ -63,6 +63,62 @@ jobs:
             --snapshot-hour-local "${{ github.event.inputs.snapshot_hour_local }}" \
             --markets-json "${{ github.event.inputs.markets_json }}"
 
+      - name: Post simulation result to Discord (manual runs always post)
+        if: always()
+        env:
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.WEATHER_DISCORD_WEBHOOK }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WEATHER_DISCORD_WEBHOOK:-}" ]; then
+            echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
+            exit 0
+          fi
+
+          echo "Discord webhook present (length=${#WEATHER_DISCORD_WEBHOOK})."
+
+          SRC_SANITIZED="$(echo "${{ github.event.inputs.forecast_source }}" | tr '/' '_' )"
+          TARGET_DATE="${{ github.event.inputs.target_date }}"
+          SUMMARY_PATH="weather/outputs/edges/${SRC_SANITIZED}/${TARGET_DATE}/SUMMARY.md"
+
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          HEADER="**Weather Simulation (Offline Fixtures)**  \nCity: \`${{ github.event.inputs.city }}\`  \nDate: \`${TARGET_DATE}\`  \nSource: \`${{ github.event.inputs.forecast_source }}\`  \nRun: ${RUN_URL}\n"
+
+          if [ -f "${SUMMARY_PATH}" ]; then
+            export SUMMARY_PATH
+            BODY="$(python - <<'PY'
+from pathlib import Path
+import os
+
+summary_path = Path(os.environ["SUMMARY_PATH"])
+summary_text = summary_path.read_text(encoding="utf-8")
+print(summary_text[:1800])
+PY
+)"
+            CONTENT="${HEADER}\n\`\`\`\n${BODY}\n\`\`\`"
+          else
+            CONTENT="${HEADER}\n⚠️ SUMMARY.md not found at \`${SUMMARY_PATH}\`.\nCheck artifacts for outputs + DB."
+          fi
+
+          export DISCORD_CONTENT="${CONTENT}"
+          python - <<'PY'
+import json
+import os
+import urllib.request
+
+webhook = os.environ["WEATHER_DISCORD_WEBHOOK"]
+content = os.environ["DISCORD_CONTENT"]
+payload = json.dumps({"content": content}).encode("utf-8")
+request = urllib.request.Request(
+    webhook,
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+urllib.request.urlopen(request).read()
+print("Posted to Discord.")
+PY
+
       - name: Upload simulation outputs
         uses: actions/upload-artifact@v4
         with:
