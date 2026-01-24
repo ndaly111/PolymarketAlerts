@@ -1,4 +1,4 @@
-name: Weather - Daily Scan (NWS → Models → Fair → Edge → Discord)
+name: Weather - Daily Scan (Models → Fair → Edge → Discord)
 
 env:
   # Single source of truth for snapshots + models + pricing + edges.
@@ -6,8 +6,8 @@ env:
 
 on:
   schedule:
-    # Run every 30 minutes, but gate execution to 05:00–16:00 America/New_York.
-    - cron: "*/30 * * * *"
+    # Run hourly, but gate execution to 05:00–16:00 America/New_York.
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       run_mode:
@@ -46,9 +46,6 @@ jobs:
       FORECAST_SOURCE: nws_hourly_max
       # IMPORTANT: this is the *local* snapshot hour for each city.
       # Canonical dataset definition: we price from the 04:00 local snapshot.
-      # Scheduled runs start at 05:00 America/New_York, and the snapshot collector
-      # supports a late window, so Eastern cities are still captured.
-      # Manual runs that happen later rely on the --no-gate fallback (see below).
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_ERROR_GAUSS_MIX: "0"
       WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
@@ -140,51 +137,28 @@ jobs:
             echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Collect forecast snapshots (gated per city)
-        if: steps.gate.outputs.run == 'true'
-        env:
-          # The NWS API expects a real contact in User-Agent; fall back to placeholder.
-          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
-          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
-          # Allow late starts to still write the intended snapshot hour.
-          WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
+      - name: Preflight: snapshot freshness (STRICT for schedule)
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
+        shell: bash
         run: |
-          # Safe to run every time:
-          #  - script only writes when each city's local time is in-window
-          #  - script will NOT overwrite an existing snapshot unless --overwrite is used
-          python -m weather.scripts.collect_forecast_snapshot
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --forecast-source "$FORECAST_SOURCE" \
+            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --min-pct 0.75 \
+            --min-count 1
 
-      - name: "Preflight: forecast snapshot freshness"
-        id: snap_pre
-        if: steps.gate.outputs.run == 'true'
+      - name: Preflight: snapshot freshness (LENIENT for manual/debug)
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
         continue-on-error: true
+        shell: bash
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
-            --target-date "${{ steps.run_date.outputs.date }}" \
             --forecast-source "$FORECAST_SOURCE" \
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --min-pct 0.0 \
-            --min-count 1
-
-      - name: "Fallback: collect snapshot now (no-gate) if still missing"
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && steps.snap_pre.outcome == 'failure'
-        env:
-          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
-          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
-          WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
-        run: |
-          # Manual/debug fallback only: this is not a true 04:00 local snapshot.
-          python -m weather.scripts.collect_forecast_snapshot --no-gate
-
-      - name: "Postflight: forecast snapshot freshness"
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch' && steps.snap_pre.outcome == 'failure'
-        run: |
-          python weather/scripts/check_forecast_snapshot_freshness.py \
             --target-date "${{ steps.run_date.outputs.date }}" \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --min-pct 0.0 \
-            --min-count 1
+            --min-count 0
 
       - name: Collect observed highs (CLI)
         if: steps.gate.outputs.run == 'true'
