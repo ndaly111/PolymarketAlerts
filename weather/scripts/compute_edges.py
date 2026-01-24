@@ -128,6 +128,28 @@ def _parse_optional_float(s: Any) -> Optional[float]:
         return None
 
 
+def _event_display(spec_kind: str, a: int, b: Optional[int]) -> str:
+    k = (spec_kind or "").strip().lower()
+    if k in ("between", "range", "in") and b is not None:
+        lo = int(min(a, b))
+        hi = int(max(a, b))
+        return f"{lo}-{hi}"
+    if k in ("ge", "gte"):
+        return f">={int(a)}"
+    if k in ("gt",):
+        return f">{int(a)}"
+    if k in ("le", "lte"):
+        return f"<={int(a)}"
+    if k in ("lt",):
+        return f"<{int(a)}"
+    if k in ("exact", "eq"):
+        return str(int(a))
+    try:
+        return str(a) if b is None else f"{a}-{b}"
+    except Exception:
+        return "(unknown)"
+
+
 def _spread_cents_for_side(row: Dict[str, Any], side: str) -> Optional[int]:
     """Return bid/ask spread in cents for YES or NO. None if bid or ask missing."""
     yes_bid, yes_ask, no_bid, no_ask = best_bid_ask_from_snapshot_row(row)
@@ -262,10 +284,25 @@ def main() -> int:
     p.add_argument("--min-open-interest", default=os.getenv("WEATHER_MIN_OPEN_INTEREST", "0"))
     p.add_argument("--max-spread-cents", default=os.getenv("WEATHER_MAX_SPREAD_CENTS", ""))
     p.add_argument("--require-ask", action="store_true")
-    p.add_argument("--debug", action="store_true", help="Write per-market audit CSV showing q/EV and drop reason")
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Emit per-city audit CSVs with EVERY market evaluated, including computed q, prices, EV, and drop reason.",
+    )
+    p.add_argument(
+        "--debug-max",
+        default=os.getenv("WEATHER_DEBUG_MAX", "0"),
+        help="Optional cap on audit rows written per city (0 = no cap). Debug output only.",
+    )
     args = p.parse_args()
 
     debug_enabled = bool(args.debug) or os.getenv("WEATHER_DEBUG", "").strip().lower() in {"1", "true", "yes", "y"}
+    try:
+        debug_max = int(str(args.debug_max).strip() or "0")
+    except Exception:
+        debug_max = 0
+    if debug_max < 0:
+        debug_max = 0
     configure_logging(
         name="weather_compute_edges",
         log_dir=ROOT / "weather" / "outputs" / "logs",
@@ -317,6 +354,13 @@ def main() -> int:
             continue
         audit_rows: List[Dict[str, Any]] = []
 
+        def _audit_append(obj: Dict[str, Any]) -> None:
+            if not debug_enabled:
+                return
+            if debug_max and len(audit_rows) >= debug_max:
+                return
+            audit_rows.append(obj)
+
         now_local = _now_utc().astimezone(ZoneInfo(c.tz))
         target_date_local = args.date.strip() or now_local.date().isoformat()
 
@@ -346,8 +390,14 @@ def main() -> int:
         )
         if not markets:
             if debug_enabled:
-                audit_rows.append(
-                    {"city_key": c.key, "reason": "no_markets_at_snapshot", "snapshot_time_utc": snap_time}
+                _audit_append(
+                    {
+                        "market_ticker": "",
+                        "title": "",
+                        "drop_reason": "no_markets_at_snapshot",
+                        "volume": "",
+                        "open_interest": "",
+                    }
                 )
             markets = []
 
@@ -383,6 +433,7 @@ def main() -> int:
                 "tz": c.tz,
                 "target_date_local": target_date_local,
                 "forecast_source": str(args.forecast_source),
+                "forecast_high_f": fair.get("forecast_high_f"),
                 "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
                 "kalshi_snapshot_time_utc": snap_time,
                 "filters": {
@@ -424,65 +475,159 @@ def main() -> int:
         q_hi = float(1.0 - min_q)
 
         for row in markets:
-            drop_reason = ""
             # liquidity filters (raw markets)
             vol = _to_int(row.get("volume"), default=0)
             oi = _to_int(row.get("open_interest"), default=0)
             if min_volume > 0 and vol < min_volume:
                 drops["min_volume"] += 1
-                drop_reason = "min_volume"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": "",
+                        "drop_reason": "min_volume",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
             if min_open_interest > 0 and oi < min_open_interest:
                 drops["min_open_interest"] += 1
-                drop_reason = drop_reason or "min_open_interest"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": "",
+                        "drop_reason": "min_open_interest",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
             raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
             title = _market_title_from_raw(raw)
             if not title:
                 drops["no_title"] += 1
-                drop_reason = drop_reason or "no_title"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": "",
+                        "drop_reason": "no_title",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
             spec = parse_event_spec_from_title(title)
             if not spec:
                 drops["unparsed"] += 1
-                drop_reason = drop_reason or "unparsed"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": title,
+                        "drop_reason": "unparsed",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
-            q = None
-            if spec:
-                q = float(prob_event(pmf, spec))
+            q = float(prob_event(pmf, spec))
+
+            # Snapshot prices (asks) for YES/NO, in dollars.
+            p_yes, p_no = best_buy_prices_from_snapshot_row(row)
+
+            # Precompute best-side EV (even if not an edge) for debugging.
+            pre_best_side = None
+            pre_best_ev = None
+            pre_best_price = None
+            if p_yes is not None:
+                v = ev_yes(q, float(p_yes), fee_open)
+                pre_best_side, pre_best_ev, pre_best_price = "YES", float(v), float(p_yes)
+            if p_no is not None:
+                v = ev_no(q, float(p_no), fee_open)
+                if pre_best_ev is None or float(v) > float(pre_best_ev):
+                    pre_best_side, pre_best_ev, pre_best_price = "NO", float(v), float(p_no)
+
             # OPTIONAL guardrail: ignore strikes that do not overlap modeled support.
             # Default: disabled to avoid double-filtering beyond the min_q policy.
             if support_enabled:
-                if spec and (not _strike_overlaps_support(spec.kind, spec.a, spec.b, support_lo, support_hi)):
+                if not _strike_overlaps_support(spec.kind, spec.a, spec.b, support_lo, support_hi):
                     drops["outside_support"] += 1
-                    drop_reason = drop_reason or "outside_support"
+                    _audit_append(
+                        {
+                            "market_ticker": row.get("market_ticker"),
+                            "title": title,
+                            "event": spec.describe(),
+                            "event_display": _event_display(spec.kind, spec.a, spec.b),
+                            "q": float(q),
+                            "yes_ask": p_yes,
+                            "no_ask": p_no,
+                            "best_side": pre_best_side,
+                            "best_price": pre_best_price,
+                            "best_ev": pre_best_ev,
+                            "drop_reason": "outside_support",
+                            "volume": vol,
+                            "open_interest": oi,
+                        }
+                    )
+                    continue
             # Hard tail cutoff: ignore events with <5% chance (or >95% on the other tail).
-            if q is not None and (q < q_lo or q > q_hi):
+            if float(q) < q_lo or float(q) > q_hi:
                 drops["q_tail"] += 1
-                drop_reason = drop_reason or "q_tail"
-
-            p_yes, p_no = best_buy_prices_from_snapshot_row(row)
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": title,
+                        "event": spec.describe(),
+                        "event_display": _event_display(spec.kind, spec.a, spec.b),
+                        "q": float(q),
+                        "yes_ask": p_yes,
+                        "no_ask": p_no,
+                        "best_side": pre_best_side,
+                        "best_price": pre_best_price,
+                        "best_ev": pre_best_ev,
+                        "drop_reason": "q_tail",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
             if args.require_ask and (p_yes is None and p_no is None):
                 drops["no_prices"] += 1
-                drop_reason = drop_reason or "no_prices"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": title,
+                        "event": spec.describe(),
+                        "event_display": _event_display(spec.kind, spec.a, spec.b),
+                        "q": float(q),
+                        "yes_ask": p_yes,
+                        "no_ask": p_no,
+                        "best_side": pre_best_side,
+                        "best_price": pre_best_price,
+                        "best_ev": pre_best_ev,
+                        "drop_reason": "no_prices",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
             best_side = None
             best_ev = -1e9
             chosen_price = None
-            ev_yes_val = None
-            ev_no_val = None
 
-            if p_yes is not None and q is not None:
+            if p_yes is not None:
                 ev = ev_yes(q, float(p_yes), fee_open)
-                ev_yes_val = float(ev)
                 if ev > best_ev:
                     best_ev = ev
                     best_side = "YES"
                     chosen_price = float(p_yes)
 
-            if p_no is not None and q is not None:
+            if p_no is not None:
                 ev = ev_no(q, float(p_no), fee_open)
-                ev_no_val = float(ev)
                 if ev > best_ev:
                     best_ev = ev
                     best_side = "NO"
@@ -490,45 +635,111 @@ def main() -> int:
 
             if best_side is None or chosen_price is None:
                 drops["no_prices"] += 1
-                drop_reason = drop_reason or "no_prices"
+                _audit_append(
+                    {
+                        "market_ticker": row.get("market_ticker"),
+                        "title": title,
+                        "event": spec.describe(),
+                        "event_display": _event_display(spec.kind, spec.a, spec.b),
+                        "q": float(q),
+                        "yes_ask": p_yes,
+                        "no_ask": p_no,
+                        "best_side": pre_best_side,
+                        "best_price": pre_best_price,
+                        "best_ev": pre_best_ev,
+                        "drop_reason": "no_prices",
+                        "volume": vol,
+                        "open_interest": oi,
+                    }
+                )
+                continue
 
             # spread filter applied to chosen side (requires bid + ask on that side)
             if max_spread_cents is not None:
                 sp = _spread_cents_for_side(row, best_side)
                 if sp is None:
                     drops["max_spread_missing"] += 1
-                    drop_reason = drop_reason or "max_spread_missing"
+                    _audit_append(
+                        {
+                            "market_ticker": row.get("market_ticker"),
+                            "title": title,
+                            "event": spec.describe(),
+                            "event_display": _event_display(spec.kind, spec.a, spec.b),
+                            "q": float(q),
+                            "yes_ask": p_yes,
+                            "no_ask": p_no,
+                            "best_side": best_side,
+                            "best_price": chosen_price,
+                            "best_ev": best_ev,
+                            "spread_cents": sp,
+                            "drop_reason": "max_spread_missing",
+                            "volume": vol,
+                            "open_interest": oi,
+                        }
+                    )
+                    continue
                 if sp > max_spread_cents:
                     drops["max_spread_too_wide"] += 1
-                    drop_reason = drop_reason or "max_spread_too_wide"
+                    _audit_append(
+                        {
+                            "market_ticker": row.get("market_ticker"),
+                            "title": title,
+                            "event": spec.describe(),
+                            "event_display": _event_display(spec.kind, spec.a, spec.b),
+                            "q": float(q),
+                            "yes_ask": p_yes,
+                            "no_ask": p_no,
+                            "best_side": best_side,
+                            "best_price": chosen_price,
+                            "best_ev": best_ev,
+                            "spread_cents": sp,
+                            "drop_reason": "max_spread_too_wide",
+                            "volume": vol,
+                            "open_interest": oi,
+                        }
+                    )
+                    continue
 
-            if q is not None and best_ev < min_ev:
+            if best_ev < min_ev:
                 drops["no_positive_ev"] += 1
-                drop_reason = drop_reason or "no_positive_ev"
-
-            if debug_enabled:
-                audit_rows.append(
+                _audit_append(
                     {
-                        "city_key": c.key,
-                        "target_date_local": target_date_local,
                         "market_ticker": row.get("market_ticker"),
                         "title": title,
-                        "snapshot_time_utc": row.get("snapshot_time_utc"),
-                        "volume": vol,
-                        "open_interest": oi,
-                        "q": q,
+                        "event": spec.describe(),
+                        "event_display": _event_display(spec.kind, spec.a, spec.b),
+                        "q": float(q),
                         "yes_ask": p_yes,
                         "no_ask": p_no,
-                        "ev_yes": ev_yes_val,
-                        "ev_no": ev_no_val,
                         "best_side": best_side,
-                        "best_ev": float(best_ev) if best_ev > -1e8 else None,
-                        "drop_reason": drop_reason,
+                        "best_price": chosen_price,
+                        "best_ev": best_ev,
+                        "spread_cents": _spread_cents_for_side(row, best_side),
+                        "drop_reason": "no_positive_ev",
+                        "volume": vol,
+                        "open_interest": oi,
                     }
                 )
-
-            if drop_reason:
                 continue
+
+            _audit_append(
+                {
+                    "market_ticker": row.get("market_ticker"),
+                    "title": title,
+                    "event": spec.describe(),
+                    "event_display": _event_display(spec.kind, spec.a, spec.b),
+                    "q": float(q),
+                    "yes_ask": p_yes,
+                    "no_ask": p_no,
+                    "best_side": best_side,
+                    "best_price": chosen_price,
+                    "best_ev": best_ev,
+                    "spread_cents": _spread_cents_for_side(row, best_side),
+                    "drop_reason": "kept",
+                    "volume": vol,
+                    "open_interest": oi,
+                }
+            )
 
             scored.append(
                 {
@@ -562,6 +773,7 @@ def main() -> int:
             "tz": c.tz,
             "target_date_local": target_date_local,
             "forecast_source": str(args.forecast_source),
+            "forecast_high_f": fair.get("forecast_high_f"),
             "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
             "kalshi_snapshot_time_utc": snap_time,
             "filters": {
@@ -591,28 +803,27 @@ def main() -> int:
         )
         if debug_enabled:
             audit_path = out_dir / f"{c.key}_audit.csv"
-            cols = [
-                "city_key",
-                "target_date_local",
+            fieldnames = [
                 "market_ticker",
                 "title",
-                "snapshot_time_utc",
-                "volume",
-                "open_interest",
+                "event",
+                "event_display",
                 "q",
                 "yes_ask",
                 "no_ask",
-                "ev_yes",
-                "ev_no",
                 "best_side",
+                "best_price",
                 "best_ev",
+                "spread_cents",
+                "volume",
+                "open_interest",
                 "drop_reason",
             ]
             with audit_path.open("w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=cols)
+                w = csv.DictWriter(f, fieldnames=fieldnames)
                 w.writeheader()
                 for r in audit_rows:
-                    w.writerow({k: r.get(k) for k in cols})
+                    w.writerow({k: r.get(k, "") for k in fieldnames})
             logger.info("Wrote audit CSV: %s (%d rows)", audit_path, len(audit_rows))
         wrote += 1
 
