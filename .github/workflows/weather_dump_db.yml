@@ -1,0 +1,35 @@
+name: Weather - Dump DB to CSV
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+        with:
+          python-version: "3.11"
+          install-root-requirements: "true"
+
+      - name: Dump SQLite DB to CSV
+        run: |
+          python weather/scripts/dump_db_to_csv.py
+
+      - name: Upload CSV dump
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-db-csv-dump
+          path: weather/db_dump/
