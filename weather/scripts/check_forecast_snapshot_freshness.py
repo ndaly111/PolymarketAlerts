@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import List, Set
 
 import yaml
+from weather.lib import db as db_lib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +81,7 @@ def main() -> int:
     args = p.parse_args()
 
     db_path = Path(args.db)
+    db_lib.ensure_schema(db_path)
     config_path = Path(args.config)
     expected_keys = _load_city_keys(config_path)
     if not expected_keys:
