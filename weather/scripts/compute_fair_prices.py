@@ -71,6 +71,7 @@ def main() -> int:
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
+    fallback_source = os.getenv("WEATHER_FALLBACK_SOURCE", "").strip() or f"{args.forecast_source}_fallback"
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
     wrote = 0
@@ -90,22 +91,38 @@ def main() -> int:
             snapshot_hour_local=snapshot_hour_local,
             source=str(args.forecast_source),
         )
+        snapshot_kind = "canonical"
+        if not snap:
+            snap = db_lib.fetch_latest_forecast_snapshot(
+                db_path,
+                city_key=c.key,
+                target_date_local=target_date_local,
+                source=fallback_source,
+            )
+            snapshot_kind = "fallback" if snap else "missing"
         if not snap:
             continue
 
+        model_source = str(args.forecast_source)
+        model_snapshot_hour_local = snapshot_hour_local
         model = db_lib.fetch_error_model(
             db_path,
             city_key=c.key,
             month=month,
-            snapshot_hour_local=snapshot_hour_local,
-            source=str(args.forecast_source),
+            snapshot_hour_local=model_snapshot_hour_local,
+            source=model_source,
         )
-        if not model:
-            continue
 
         forecast_high = int(snap["forecast_high_f"])
-        pmf_error: Dict[int, float] = model["pmf"]
-        pmf_high = normalize_pmf(shift_pmf(pmf_error, forecast_high))
+        if model:
+            pmf_error: Dict[int, float] = model["pmf"]
+            pmf_high = normalize_pmf(shift_pmf(pmf_error, forecast_high))
+            error_model_n_samples = int(model["n_samples"])
+            error_model_updated_at_utc = model["updated_at_utc"]
+        else:
+            pmf_high = {int(forecast_high): 1.0}
+            error_model_n_samples = 0
+            error_model_updated_at_utc = None
         summary = summarize_pmf(pmf_high)
 
         out = {
@@ -113,12 +130,17 @@ def main() -> int:
             "label": c.label,
             "tz": c.tz,
             "target_date_local": target_date_local,
-            "snapshot_hour_local": snapshot_hour_local,
+            "snapshot_hour_local": int(snap["snapshot_hour_local"]),
             "forecast_source": str(args.forecast_source),
+            "snapshot_kind": snapshot_kind,
+            "fallback_source": fallback_source,
             "forecast_high_f": forecast_high,
             "error_model_month": month,
-            "error_model_n_samples": int(model["n_samples"]),
-            "error_model_updated_at_utc": model["updated_at_utc"],
+            "error_model_n_samples": error_model_n_samples,
+            "error_model_updated_at_utc": error_model_updated_at_utc,
+            "error_model_source": model_source,
+            "error_model_snapshot_hour_local": model_snapshot_hour_local,
+            "error_model_missing": model is None,
             "pmf_high_f": {str(k): v for k, v in sorted(pmf_high.items())},
             "summary": {
                 "mean": summary.mean,

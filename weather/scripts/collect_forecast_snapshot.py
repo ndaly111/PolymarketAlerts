@@ -140,9 +140,31 @@ def main() -> int:
     p.add_argument("--db", default=str(DEFAULT_DB))
     p.add_argument("--no-gate", action="store_true", help="Ignore time gate (for local testing).")
     p.add_argument("--overwrite", action="store_true", help="Overwrite existing snapshots.")
+    p.add_argument(
+        "--source",
+        default="",
+        help="Optional override for forecast source (defaults to FORECAST_SOURCE env).",
+    )
+    p.add_argument(
+        "--target-date",
+        default="",
+        help="Optional target date_local YYYY-MM-DD (default: today's local date per city).",
+    )
+    p.add_argument(
+        "--use-local-hour",
+        action="store_true",
+        help="Use each city's current local hour as snapshot_hour_local (fallback mode).",
+    )
+    p.add_argument(
+        "--skip-if-date-exists",
+        action="store_true",
+        help="Skip writing if any snapshot exists for the city/date/source (any hour).",
+    )
     args = p.parse_args()
 
-    forecast_source = os.getenv("FORECAST_SOURCE", "nws_hourly_max").strip() or "nws_hourly_max"
+    forecast_source = (
+        args.source.strip() or os.getenv("FORECAST_SOURCE", "nws_hourly_max").strip() or "nws_hourly_max"
+    )
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     minute_max = int(os.getenv("WEATHER_SNAPSHOT_MINUTE_MAX", "25"))
     late_window_hours = int(os.getenv("WEATHER_SNAPSHOT_LATE_WINDOW_HOURS", "0"))
@@ -162,19 +184,31 @@ def main() -> int:
     wrote = 0
     for c in cities:
         now_local = _now_in_tz(c.tz)
+        snapshot_hour_for_city = now_local.hour if args.use_local_hour else snapshot_hour_local
         if (not args.no_gate) and (
-            not gate_city(now_local, snapshot_hour_local, minute_max, late_window_hours)
+            not gate_city(now_local, snapshot_hour_for_city, minute_max, late_window_hours)
         ):
             print(
                 "[skip] "
                 f"{c.key} {c.label}: local={now_local.isoformat()} "
                 "not in gate hour="
-                f"{snapshot_hour_local}<=:{minute_max} "
+                f"{snapshot_hour_for_city}<=:{minute_max} "
                 f"(late_window_hours={late_window_hours})"
             )
             continue
 
-        target_date_local = now_local.date().isoformat()
+        target_date_local = args.target_date.strip() or now_local.date().isoformat()
+        if args.skip_if_date_exists and db_lib.forecast_snapshot_exists(
+            db_path,
+            city_key=c.key,
+            target_date_local=target_date_local,
+            source=forecast_source,
+        ):
+            print(
+                f"[skip] {c.key} {c.label}: snapshot exists for {target_date_local} source={forecast_source}"
+            )
+            continue
+
         qc: List[str] = []
         try:
             if not args.overwrite:
@@ -182,12 +216,12 @@ def main() -> int:
                     db_path,
                     city_key=c.key,
                     target_date_local=target_date_local,
-                    snapshot_hour_local=snapshot_hour_local,
+                    snapshot_hour_local=snapshot_hour_for_city,
                     source=forecast_source,
                 )
                 if existing:
                     print(
-                        f"[skip] {c.key} {c.label}: snapshot exists for {target_date_local} hour={snapshot_hour_local}"
+                        f"[skip] {c.key} {c.label}: snapshot exists for {target_date_local} hour={snapshot_hour_for_city}"
                     )
                     continue
 
@@ -219,7 +253,7 @@ def main() -> int:
                 city_key=c.key,
                 target_date_local=target_date_local,
                 snapshot_time_utc=fetched_at_utc,
-                snapshot_hour_local=snapshot_hour_local,
+                snapshot_hour_local=snapshot_hour_for_city,
                 snapshot_tz=c.tz,
                 forecast_high_f=int(fcst_high),
                 source=forecast_source,
@@ -229,7 +263,10 @@ def main() -> int:
                 raw=raw_trimmed,
             )
             wrote += 1
-            print(f"[ok] {c.key} {c.label}: {target_date_local} forecast_high={fcst_high}F (hour={snapshot_hour_local})")
+            print(
+                f"[ok] {c.key} {c.label}: {target_date_local} "
+                f"forecast_high={fcst_high}F (hour={snapshot_hour_for_city})"
+            )
             nws_lib.polite_sleep()
         except Exception as e:
             print(f"[err] {c.key} {c.label}: {e}", file=sys.stderr)

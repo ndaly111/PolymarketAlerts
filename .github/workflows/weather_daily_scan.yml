@@ -6,8 +6,8 @@ env:
 
 on:
   schedule:
-    # Run hourly, but gate execution to 05:00–16:00 America/New_York.
-    - cron: "0 * * * *"
+    # Run every 30 minutes, but gate execution to 05:00–20:00 America/New_York.
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       run_mode:
@@ -42,8 +42,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
-      WEATHER_ERROR_GAUSS_MIX: "0"
-      WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
+      WEATHER_FALLBACK_SOURCE: "nws_hourly_max_fallback"
       WEATHER_BUY_FEE_CENTS: "2"
       WEATHER_MIN_EV: "0.02"
       WEATHER_MIN_Q: "0.05"
@@ -65,7 +64,7 @@ jobs:
           python-version: "3.11"
           install-root-requirements: "true"
 
-      - name: "Gate scheduled runs to 05:00–16:00 America/New_York"
+      - name: "Gate scheduled runs to 05:00–20:00 America/New_York"
         id: gate
         shell: bash
         run: |
@@ -76,7 +75,7 @@ jobs:
           fi
 
           NOW_HHMM="$(date +%H%M)"
-          if (( NOW_HHMM >= 500 && NOW_HHMM <= 1600 )); then
+          if (( NOW_HHMM >= 500 && NOW_HHMM <= 2000 )); then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -125,8 +124,52 @@ jobs:
             echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Ensure snapshots exist (fallback collect now if missing)
+        id: snapshots
+        if: steps.gate.outputs.run == 'true'
+        env:
+          # The NWS API expects a real contact in User-Agent; fall back to placeholder.
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+          WEATHER_SNAPSHOT_MINUTE_MAX: "59"
+          WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
+        shell: bash
+        run: |
+          set -euo pipefail
+          DATE="${{ steps.run_date.outputs.date }}"
+          SRC="$FORECAST_SOURCE"
+          HOUR="$WEATHER_SNAPSHOT_HOUR_LOCAL"
+          echo "fallback_used=false" >> "$GITHUB_OUTPUT"
+
+          echo "[snapshots] checking snapshot coverage for date=${DATE} source=${SRC} hour_local=${HOUR}"
+          if python weather/scripts/check_forecast_snapshot_freshness.py \
+              --target-date "${DATE}" \
+              --forecast-source "${SRC}" \
+              --snapshot-hour "${HOUR}" \
+              --min-pct 0.0 \
+              --min-count 1
+          then
+            echo "[snapshots] ok: snapshot(s) exist"
+          else
+            echo "[snapshots] MISSING: collecting snapshot now with --no-gate (TEMPORARY/non-canonical)"
+            echo "fallback_used=true" >> "$GITHUB_OUTPUT"
+            python -m weather.scripts.collect_forecast_snapshot \
+              --no-gate \
+              --use-local-hour \
+              --skip-if-date-exists \
+              --source "$WEATHER_FALLBACK_SOURCE" \
+              --target-date "${DATE}"
+          fi
+
+          echo "[snapshots] post-check (non-blocking):"
+          python weather/scripts/check_forecast_snapshot_freshness.py \
+            --target-date "${DATE}" \
+            --forecast-source "${SRC}" \
+            --snapshot-hour "${HOUR}" \
+            --min-pct 0.0 \
+            --min-count 0 || true
+
       - name: "Preflight: snapshot freshness (STRICT for schedule)"
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
+        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule' && steps.snapshots.outputs.fallback_used != 'true'
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
             --forecast-source "$FORECAST_SOURCE" \
@@ -134,20 +177,6 @@ jobs:
             --target-date "${{ steps.run_date.outputs.date }}" \
             --min-pct 0.75 \
             --min-count 1
-
-      - name: Collect observed highs (CLI)
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          python -m weather.scripts.collect_observed_cli --max-versions 25
-
-      - name: Build / update monthly error models (NWS)
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          python weather/scripts/build_error_models.py \
-            --min-samples 10 \
-            --forecast-source "$FORECAST_SOURCE" \
-            --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX" \
-            --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD"
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
@@ -199,9 +228,14 @@ jobs:
             echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
             exit 0
           fi
+          POST_ARGS=()
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            POST_ARGS+=(--require-edges)
+          fi
           python -m weather.scripts.post_weather_edges_discord \
             --forecast-source "$FORECAST_SOURCE" \
-            --date "${{ steps.run_date.outputs.date }}"
+            --date "${{ steps.run_date.outputs.date }}" \
+            "${POST_ARGS[@]}"
 
       - name: Upload daily scan outputs
         if: steps.gate.outputs.run == 'true'
