@@ -39,6 +39,7 @@ jobs:
       # Allow scripts run by file path (python weather/scripts/x.py) to import the
       # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,7 +84,7 @@ jobs:
             )
           PY
 
-      - name: Ingest MOS archive CSVs into weather.db
+      - name: Ingest MOS archive CSVs into weather_forecast_accuracy.db
         env:
           FILES_GLOB: "${{ github.event.inputs.files_glob }}"
         run: |
@@ -111,6 +112,8 @@ jobs:
             "${{ github.event.inputs.runtime_hour_utc }}",
             "--snapshot-hour",
             "${{ github.event.inputs.snapshot_hour_local }}",
+            "--db",
+            os.environ["WEATHER_DB_PATH"],
           ]
           print("[backfill] running:", " ".join(shlex.quote(x) for x in cmd[:8] + ["..."]))
           subprocess.check_call(cmd)

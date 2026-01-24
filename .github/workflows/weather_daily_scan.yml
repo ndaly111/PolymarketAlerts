@@ -41,6 +41,7 @@ jobs:
       TZ: America/New_York
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_FALLBACK_SOURCE: "nws_hourly_max_fallback"
       WEATHER_BUY_FEE_CENTS: "2"
@@ -146,7 +147,8 @@ jobs:
               --forecast-source "${SRC}" \
               --snapshot-hour "${HOUR}" \
               --min-pct 0.0 \
-              --min-count 1
+              --min-count 1 \
+              --db "$WEATHER_DB_PATH"
           then
             echo "[snapshots] ok: snapshot(s) exist"
           else
@@ -157,7 +159,8 @@ jobs:
               --use-local-hour \
               --skip-if-date-exists \
               --source "$WEATHER_FALLBACK_SOURCE" \
-              --target-date "${DATE}"
+              --target-date "${DATE}" \
+              --db "$WEATHER_DB_PATH"
           fi
 
           echo "[snapshots] post-check (non-blocking):"
@@ -166,7 +169,8 @@ jobs:
             --forecast-source "${SRC}" \
             --snapshot-hour "${HOUR}" \
             --min-pct 0.0 \
-            --min-count 0 || true
+            --min-count 0 \
+            --db "$WEATHER_DB_PATH" || true
 
       - name: "Preflight: snapshot freshness (STRICT for schedule)"
         if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule' && steps.snapshots.outputs.fallback_used != 'true'
@@ -176,12 +180,15 @@ jobs:
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --target-date "${{ steps.run_date.outputs.date }}" \
             --min-pct 0.75 \
-            --min-count 1
+            --min-count 1 \
+            --db "$WEATHER_DB_PATH"
 
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
         run: |
-          python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
+          python -m weather.scripts.compute_fair_prices \
+            --forecast-source "$FORECAST_SOURCE" \
+            --db "$WEATHER_DB_PATH"
 
       - name: Collect Kalshi weather markets
         if: steps.gate.outputs.run == 'true'
@@ -194,7 +201,8 @@ jobs:
           set -euo pipefail
           python -m weather.scripts.collect_kalshi_weather_markets \
             --series-tickers "${WEATHER_KALSHI_SERIES_TICKERS}" \
-            --require-city-match
+            --require-city-match \
+            --db "$WEATHER_DB_PATH"
 
       - name: Compute edges
         if: steps.gate.outputs.run == 'true'
@@ -216,6 +224,7 @@ jobs:
             --min-open-interest "$WEATHER_MIN_OPEN_INTEREST" \
             --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
             --top-n "$WEATHER_TOP_N" \
+            --db "$WEATHER_DB_PATH" \
             ${REQUIRE_ASK}
 
       - name: Post edges to Discord
@@ -244,5 +253,5 @@ jobs:
           name: weather-daily-scan
           path: |
             weather/outputs/**
-            weather/data/weather.db
+            ${{ env.WEATHER_DB_PATH }}
           if-no-files-found: warn

@@ -15,7 +15,12 @@ class DbPaths:
 
 
 def default_paths(repo_root: Path) -> DbPaths:
-    return DbPaths(root=repo_root, db_path=repo_root / "weather" / "data" / "weather.db")
+    env = os.getenv("WEATHER_DB_PATH", "").strip()
+    if env:
+        return DbPaths(root=repo_root, db_path=Path(env))
+    return DbPaths(
+        root=repo_root, db_path=repo_root / "weather" / "data" / "weather_forecast_accuracy.db"
+    )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

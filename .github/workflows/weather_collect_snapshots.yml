@@ -24,6 +24,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
       # Canonical snapshot hour (local per city)
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_SNAPSHOT_MINUTE_MAX: "59"
@@ -47,7 +48,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          python -m weather.scripts.collect_forecast_snapshot
+          python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH"
 
       - name: Snapshot coverage summary (non-blocking)
         continue-on-error: true
@@ -59,16 +60,17 @@ jobs:
             --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
             --target-date "$(date +%F)" \
             --min-pct 0.0 \
-            --min-count 0
+            --min-count 0 \
+            --db "$WEATHER_DB_PATH"
 
       - name: Commit DB (if changed)
         shell: bash
         run: |
           set -e
-          if [[ -n "$(git status --porcelain weather/data/weather.db)" ]]; then
+          if [[ -n "$(git status --porcelain "$WEATHER_DB_PATH")" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data/weather.db
+            git add "$WEATHER_DB_PATH"
             git commit -m "weather: collect canonical forecast snapshots"
             ok=0
             for i in 1 2 3; do

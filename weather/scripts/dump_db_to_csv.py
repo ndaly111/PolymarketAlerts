@@ -15,11 +15,12 @@ Purpose:
 from __future__ import annotations
 
 import csv
+import os
 import sqlite3
 from pathlib import Path
 
 
-DB_PATH = Path("weather/data/weather.db")
+DB_PATH = Path(os.getenv("WEATHER_DB_PATH", "weather/data/weather_forecast_accuracy.db"))
 OUT_DIR = Path("weather/db_dump")
 
 
