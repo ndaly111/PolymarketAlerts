@@ -125,7 +125,7 @@ jobs:
             echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Preflight: snapshot freshness (STRICT for schedule)
+      - name: "Preflight: snapshot freshness (STRICT for schedule)"
         if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
