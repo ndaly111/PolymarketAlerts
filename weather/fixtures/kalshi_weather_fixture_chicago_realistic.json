@@ -1,0 +1,73 @@
+{
+  "meta": {
+    "city": "chicago",
+    "label": "Chicago",
+    "contract": "TMAX",
+    "notes": "Offline realistic Kalshi-style orderbook simulation"
+  },
+  "markets": [
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-LE-4",
+      "title": "Chicago high temperature 4°F or lower",
+      "bucket_type": "LE",
+      "hi": 4,
+      "yes_bid": 6,
+      "yes_ask": 8,
+      "no_bid": 92,
+      "no_ask": 94,
+      "volume": 1450,
+      "open_interest": 980
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-RANGE-5-7",
+      "title": "Chicago high temperature between 5°F and 7°F",
+      "bucket_type": "RANGE",
+      "lo": 5,
+      "hi": 7,
+      "yes_bid": 20,
+      "yes_ask": 23,
+      "no_bid": 77,
+      "no_ask": 80,
+      "volume": 2400,
+      "open_interest": 1650
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-RANGE-8-10",
+      "title": "Chicago high temperature between 8°F and 10°F",
+      "bucket_type": "RANGE",
+      "lo": 8,
+      "hi": 10,
+      "yes_bid": 34,
+      "yes_ask": 37,
+      "no_bid": 63,
+      "no_ask": 66,
+      "volume": 4100,
+      "open_interest": 3050
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-RANGE-11-13",
+      "title": "Chicago high temperature between 11°F and 13°F",
+      "bucket_type": "RANGE",
+      "lo": 11,
+      "hi": 13,
+      "yes_bid": 24,
+      "yes_ask": 27,
+      "no_bid": 73,
+      "no_ask": 76,
+      "volume": 3100,
+      "open_interest": 2250
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-GE-14",
+      "title": "Chicago high temperature 14°F or higher",
+      "bucket_type": "GE",
+      "lo": 14,
+      "yes_bid": 8,
+      "yes_ask": 10,
+      "no_bid": 90,
+      "no_ask": 92,
+      "volume": 1700,
+      "open_interest": 1200
+    }
+  ]
+}

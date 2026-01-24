@@ -1,0 +1,34 @@
+{
+  "markets": [
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-LE-5",
+      "title": "Chicago high temperature 5° or lower",
+      "yes_bid": 70,
+      "yes_ask": 74,
+      "no_bid": 26,
+      "no_ask": 30,
+      "volume": 2000,
+      "open_interest": 1500
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-RANGE-6-10",
+      "title": "Chicago high temperature between 6° and 10°",
+      "yes_bid": 48,
+      "yes_ask": 52,
+      "no_bid": 48,
+      "no_ask": 52,
+      "volume": 3000,
+      "open_interest": 2500
+    },
+    {
+      "market_ticker": "CHICAGO-TMAX-FIXTURE-GE-11",
+      "title": "Chicago high temperature 11° or higher",
+      "yes_bid": 18,
+      "yes_ask": 22,
+      "no_bid": 78,
+      "no_ask": 82,
+      "volume": 2500,
+      "open_interest": 2000
+    }
+  ]
+}
