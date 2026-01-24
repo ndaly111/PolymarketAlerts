@@ -38,14 +38,9 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     env:
-      # Ensure "date" in gate step uses Eastern time.
       TZ: America/New_York
-      # Allow scripts run by file path (python weather/scripts/x.py) to import the
-      # weather package from repo root.
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
-      # IMPORTANT: this is the *local* snapshot hour for each city.
-      # Canonical dataset definition: we price from the 04:00 local snapshot.
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       WEATHER_ERROR_GAUSS_MIX: "0"
       WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
@@ -56,6 +51,7 @@ jobs:
       WEATHER_MIN_OPEN_INTEREST: "0"
       WEATHER_MAX_SPREAD_CENTS: ""
       WEATHER_TOP_N: ${{ (github.event.inputs.top_n != '' && github.event.inputs.top_n) || '25' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,17 +72,14 @@ jobs:
           set -e
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "[gate] workflow_dispatch → allowed"
             exit 0
           fi
-          # schedule event: allow only 05:00–16:00 ET
+
           NOW_HHMM="$(date +%H%M)"
           if (( NOW_HHMM >= 500 && NOW_HHMM <= 1600 )); then
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "[gate] schedule @ ${NOW_HHMM} ET → allowed"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "[gate] schedule @ ${NOW_HHMM} ET → skipping (outside 05:00–16:00)"
           fi
 
       - name: Resolve run mode/date
@@ -108,18 +101,14 @@ jobs:
 
       - name: Apply debug overrides (drop filters)
         if: steps.gate.outputs.run == 'true' && steps.mode.outputs.debug == 'true'
-        shell: bash
         run: |
-          # Debug mode should be “show me everything”:
-          # - remove EV/min_q/liquidity/spread filters
-          # - still compute prices/EV; audits will show why things would normally be dropped
           echo "WEATHER_MIN_EV=0" >> "$GITHUB_ENV"
           echo "WEATHER_MIN_Q=0" >> "$GITHUB_ENV"
           echo "WEATHER_MIN_VOLUME=0" >> "$GITHUB_ENV"
           echo "WEATHER_MIN_OPEN_INTEREST=0" >> "$GITHUB_ENV"
           echo "WEATHER_MAX_SPREAD_CENTS=" >> "$GITHUB_ENV"
 
-      - name: Ensure output dirs exist (avoid git add failures)
+      - name: Ensure output dirs exist
         if: steps.gate.outputs.run == 'true'
         run: |
           mkdir -p weather/outputs/fair_prices
@@ -129,7 +118,6 @@ jobs:
       - name: Set run date (America/New_York)
         id: run_date
         if: steps.gate.outputs.run == 'true'
-        shell: bash
         run: |
           if [[ -n "${{ steps.mode.outputs.date_override }}" ]]; then
             echo "date=${{ steps.mode.outputs.date_override }}" >> "$GITHUB_OUTPUT"
@@ -139,7 +127,6 @@ jobs:
 
       - name: Preflight: snapshot freshness (STRICT for schedule)
         if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
-        shell: bash
         run: |
           python weather/scripts/check_forecast_snapshot_freshness.py \
             --forecast-source "$FORECAST_SOURCE" \
@@ -148,22 +135,10 @@ jobs:
             --min-pct 0.75 \
             --min-count 1
 
-      - name: Preflight: snapshot freshness (LENIENT for manual/debug)
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
-        continue-on-error: true
-        shell: bash
-        run: |
-          python weather/scripts/check_forecast_snapshot_freshness.py \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --target-date "${{ steps.run_date.outputs.date }}" \
-            --min-pct 0.0 \
-            --min-count 0
-
       - name: Collect observed highs (CLI)
         if: steps.gate.outputs.run == 'true'
         run: |
-          python -m weather.scripts.collect_cli_observed --max-versions 25
+          python -m weather.scripts.collect_observed_cli --max-versions 25
 
       - name: Build / update monthly error models (NWS)
         if: steps.gate.outputs.run == 'true'
@@ -174,61 +149,21 @@ jobs:
             --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX" \
             --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD"
 
-      - name: Collect Kalshi market snapshots
-        if: steps.gate.outputs.run == 'true'
-        env:
-          WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
-          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
-          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID || secrets.KALSHI_API_KEY_ID }}
-          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
-          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
-        run: |
-          if [[ -z "${WEATHER_KALSHI_SERIES_TICKERS}" ]]; then
-            echo "WEATHER_KALSHI_SERIES_TICKERS is empty; skipping Kalshi snapshot."
-            exit 0
-          fi
-          python -m weather.scripts.collect_kalshi_weather_markets --require-city-match
-
-      - name: Verify forecast snapshots are fresh (STRICT for schedule)
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule'
-        run: |
-          python weather/scripts/check_forecast_snapshot_freshness.py \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --target-date "${{ steps.run_date.outputs.date }}" \
-            --min-pct 0.75 \
-            --min-count 1
-
-      - name: Verify forecast snapshots are fresh (LENIENT for manual/debug)
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
-        continue-on-error: true
-        run: |
-          # Manual/debug runs are allowed to be partial (e.g., you ran after some cities left the snapshot window).
-          python weather/scripts/check_forecast_snapshot_freshness.py \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --target-date "${{ steps.run_date.outputs.date }}" \
-            --min-pct 0.0 \
-            --min-count 0
-
       - name: Compute fair prices
         if: steps.gate.outputs.run == 'true'
-        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
       - name: Compute edges
         if: steps.gate.outputs.run == 'true'
-        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           WEATHER_DEBUG: ${{ steps.mode.outputs.debug }}
         run: |
-          set -e
           REQUIRE_ASK="--require-ask"
-          if [[ "${WEATHER_DEBUG}" == "true" ]]; then
-            # In debug mode, don't drop markets just because asks are missing.
+          if [[ "$WEATHER_DEBUG" == "true" ]]; then
             REQUIRE_ASK=""
           fi
+
           python -m weather.scripts.compute_edges \
             --forecast-source "$FORECAST_SOURCE" \
             --date "${{ steps.run_date.outputs.date }}" \
@@ -240,103 +175,3 @@ jobs:
             --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
             --top-n "$WEATHER_TOP_N" \
             ${REQUIRE_ASK}
-
-      - name: Ensure SUMMARY.md exists for manual/debug runs (always post something)
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -e
-          SRC="${FORECAST_SOURCE//\//_}"
-          DATE="${{ steps.run_date.outputs.date }}"
-          SUMMARY_DIR="weather/outputs/edges/${SRC}/${DATE}"
-          SUMMARY_FILE="${SUMMARY_DIR}/SUMMARY.md"
-          if [[ -f "${SUMMARY_FILE}" ]]; then
-            echo "[summary] found ${SUMMARY_FILE}"
-            exit 0
-          fi
-          echo "[summary] no SUMMARY.md found; creating 'no results' stub for manual run"
-          mkdir -p "${SUMMARY_DIR}"
-          cat > "${SUMMARY_FILE}" <<MD
-          # Weather edges — ${DATE} (${SRC})
-
-          No results (or insufficient snapshot data to price some cities).
-          MD
-
-      - name: Decide whether to post to Discord
-        id: should_post
-        if: steps.gate.outputs.run == 'true'
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "post=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          SRC="${FORECAST_SOURCE//\//_}"
-          DATE="${{ steps.run_date.outputs.date }}"
-          EDGE_DIR="weather/outputs/edges/${SRC}/${DATE}"
-          if [[ ! -d "${EDGE_DIR}" ]]; then
-            echo "post=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          export EDGE_DIR
-          RESULT="$(python - <<'PY'
-import json
-import os
-from pathlib import Path
-
-edge_dir = Path(os.environ["EDGE_DIR"])
-
-# Scheduled runs: only post when we have real edge candidates.
-has_edges = False
-for p in edge_dir.glob("*.json"):
-    try:
-        obj = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    if obj.get("candidates"):
-        has_edges = True
-        break
-
-print("true" if has_edges else "false")
-PY
-)"
-          echo "post=${RESULT}" >> "$GITHUB_OUTPUT"
-
-      - name: Post to Discord
-        if: steps.gate.outputs.run == 'true' && steps.should_post.outputs.post == 'true'
-        env:
-          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS }}
-        run: |
-          python -m weather.scripts.post_weather_edges_discord \
-            --forecast-source "$FORECAST_SOURCE" \
-            --date "${{ steps.run_date.outputs.date }}"
-
-      - name: Upload debug audit artifacts
-        if: steps.gate.outputs.run == 'true' && steps.mode.outputs.debug == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: weather-debug-audits
-          path: weather/outputs/edges/**
-
-      - name: Commit artifacts (if any)
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          set -e
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add weather/data weather/outputs/models weather/outputs/fair_prices weather/outputs/edges
-            git commit -m "weather: daily scan artifacts"
-            ok=0
-            for i in 1 2 3; do
-              git pull --rebase && git push && ok=1 && break
-              echo "Push failed (attempt $i). Retrying..."
-              sleep 2
-            done
-            if [[ "$ok" != "1" ]]; then
-              echo "WARN: Could not push artifacts after 3 attempts."
-              exit 1
-            fi
-          else
-            echo "No changes to commit."
-          fi
