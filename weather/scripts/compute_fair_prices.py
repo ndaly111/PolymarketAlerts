@@ -28,7 +28,7 @@ from weather.lib.fair import normalize_pmf, shift_pmf, summarize_pmf
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
-DEFAULT_DB = ROOT / "weather" / "data" / "weather.db"
+DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 OUT_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 
 

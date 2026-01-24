@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ingest raw IEM NWS MOS archive CSVs into weather.db as forecast_snapshots.
+Ingest raw IEM NWS MOS archive CSVs into weather_forecast_accuracy.db as forecast_snapshots.
 
 These MOS archive downloads contain many hourly rows. The daily high is published via the
 MOS N/X element (here named `n_x` in the IEM CSV output). Empirically:
@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import csv
 import glob
+import os
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,7 +39,7 @@ from weather.lib import db as db_lib
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB = ROOT / "weather" / "data" / "weather.db"
+DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
 DEFAULT_GLOB = str(ROOT / "weather" / "data" / "forecast_archive" / "*.csv")
 

@@ -3,7 +3,7 @@
 
 Inputs:
 - Fair-price artifacts from weather/scripts/compute_fair_prices.py
-- Kalshi market snapshots stored in weather.db (weather/scripts/collect_kalshi_weather_markets.py)
+- Kalshi market snapshots stored in weather_forecast_accuracy.db (weather/scripts/collect_kalshi_weather_markets.py)
 
 Outputs:
 - JSON per city:
@@ -40,7 +40,7 @@ from weather.lib.kalshi_weather import (
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
-DEFAULT_DB = ROOT / "weather" / "data" / "weather.db"
+DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 FAIR_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 OUT_BASE = ROOT / "weather" / "outputs" / "edges"
 

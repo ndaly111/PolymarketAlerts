@@ -13,6 +13,7 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
 
     steps:
       - name: Checkout
