@@ -154,6 +154,19 @@ jobs:
         run: |
           python -m weather.scripts.compute_fair_prices --forecast-source "$FORECAST_SOURCE"
 
+      - name: Collect Kalshi weather markets
+        if: steps.gate.outputs.run == 'true'
+        env:
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+          WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
+        run: |
+          set -euo pipefail
+          python -m weather.scripts.collect_kalshi_weather_markets \
+            --series-tickers "${WEATHER_KALSHI_SERIES_TICKERS}" \
+            --require-city-match
+
       - name: Compute edges
         if: steps.gate.outputs.run == 'true'
         env:
@@ -175,3 +188,27 @@ jobs:
             --max-spread-cents "$WEATHER_MAX_SPREAD_CENTS" \
             --top-n "$WEATHER_TOP_N" \
             ${REQUIRE_ASK}
+
+      - name: Post edges to Discord
+        if: steps.gate.outputs.run == 'true'
+        env:
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEATHER_DISCORD_WEBHOOK:-}" ]; then
+            echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
+            exit 0
+          fi
+          python -m weather.scripts.post_weather_edges_discord \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}"
+
+      - name: Upload daily scan outputs
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-daily-scan
+          path: |
+            weather/outputs/**
+            weather/data/weather.db
+          if-no-files-found: warn
