@@ -43,7 +43,6 @@ jobs:
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
-      WEATHER_FALLBACK_SOURCE: "nws_hourly_max_fallback"
       WEATHER_BUY_FEE_CENTS: "2"
       WEATHER_MIN_EV: "0.02"
       WEATHER_MIN_Q: "0.05"
@@ -152,13 +151,12 @@ jobs:
           then
             echo "[snapshots] ok: snapshot(s) exist"
           else
-            echo "[snapshots] MISSING: collecting snapshot now with --no-gate (TEMPORARY/non-canonical)"
+            echo "[snapshots] MISSING: collecting snapshot now with --no-gate (late, but label as canonical hour/source)"
             echo "fallback_used=true" >> "$GITHUB_OUTPUT"
             python -m weather.scripts.collect_forecast_snapshot \
               --no-gate \
-              --use-local-hour \
               --skip-if-date-exists \
-              --source "$WEATHER_FALLBACK_SOURCE" \
+              --source "$FORECAST_SOURCE" \
               --target-date "${DATE}" \
               --db "$WEATHER_DB_PATH"
           fi
