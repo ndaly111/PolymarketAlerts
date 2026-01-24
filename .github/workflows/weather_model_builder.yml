@@ -1,0 +1,83 @@
+name: Weather - Build Error Models (Canonical 04:00 Local)
+
+on:
+  schedule:
+    # Daily after observed highs are likely available (UTC).
+    - cron: "30 10 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-model-builder
+  cancel-in-progress: true
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: America/New_York
+      PYTHONPATH: ${{ github.workspace }}
+      FORECAST_SOURCE: nws_hourly_max
+      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+      WEATHER_ERROR_GAUSS_MIX: "0.35"
+      WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+        with:
+          python-version: "3.11"
+          install-root-requirements: "true"
+
+      - name: Collect observed highs (CLI)
+        run: |
+          python -m weather.scripts.collect_observed_cli --max-versions 25
+
+      - name: Build / update monthly error models (NWS)
+        run: |
+          python weather/scripts/build_error_models.py \
+            --min-samples 10 \
+            --forecast-source "$FORECAST_SOURCE" \
+            --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX" \
+            --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD"
+
+      - name: Commit DB (if changed)
+        shell: bash
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain weather/data/weather.db)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data/weather.db
+            git commit -m "weather: update observed highs and error models"
+            ok=0
+            for i in 1 2 3; do
+              git pull --rebase && git push && ok=1 && break
+              echo "Push failed (attempt $i). Retrying..."
+              sleep 2
+            done
+            if [[ "$ok" != "1" ]]; then
+              echo "WARN: Could not push model updates after 3 attempts."
+              exit 1
+            fi
+          else
+            echo "No DB changes to commit."
+          fi
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-model-builder
+          path: |
+            weather/outputs/models/**
+            weather/data/weather.db
+          if-no-files-found: warn

@@ -242,6 +242,36 @@ def _read_fair_artifact(
         return None
 
 
+def _write_audit_files(out_dir: Path, city_key: str, audit_rows: List[Dict[str, Any]]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "market_ticker",
+        "title",
+        "event",
+        "event_display",
+        "q",
+        "yes_ask",
+        "no_ask",
+        "best_side",
+        "best_price",
+        "best_ev",
+        "spread_cents",
+        "volume",
+        "open_interest",
+        "drop_reason",
+    ]
+    audit_path = out_dir / f"{city_key}_audit.csv"
+    with audit_path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in audit_rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
+    audit_jsonl = out_dir / f"{city_key}_audit.jsonl"
+    with audit_jsonl.open("w", encoding="utf-8") as f:
+        for r in audit_rows:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+    logger.info("Wrote audit artifacts: %s (%d rows)", audit_path, len(audit_rows))
+
 
 def _market_title_from_raw(raw: Dict[str, Any]) -> str:
     for k in ("title", "market_title", "marketTitle", "name"):
@@ -344,6 +374,7 @@ def main() -> int:
 
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
+    src = str(args.forecast_source).replace("/", "_")
 
     wrote = 0
     all_rows_for_md: List[Dict[str, Any]] = []
@@ -363,9 +394,53 @@ def main() -> int:
 
         now_local = _now_utc().astimezone(ZoneInfo(c.tz))
         target_date_local = args.date.strip() or now_local.date().isoformat()
+        out_dir = OUT_BASE / src / target_date_local
 
         fair = _read_fair_artifact(args.forecast_source, target_date_local, c.key)
         if not fair:
+            if debug_enabled:
+                snap_time = db_lib.fetch_latest_kalshi_weather_snapshot_time(
+                    db_path,
+                    city_key=c.key,
+                    target_date_local=target_date_local,
+                )
+                if not snap_time:
+                    _audit_append(
+                        {
+                            "market_ticker": "",
+                            "title": "",
+                            "drop_reason": "missing_fair_price_no_market_snapshot",
+                        }
+                    )
+                else:
+                    markets = list(
+                        db_lib.fetch_kalshi_weather_markets_at_snapshot(
+                            db_path,
+                            snapshot_time_utc=snap_time,
+                            city_key=c.key,
+                            target_date_local=target_date_local,
+                        )
+                    )
+                    if not markets:
+                        _audit_append(
+                            {
+                                "market_ticker": "",
+                                "title": "",
+                                "drop_reason": "missing_fair_price_no_markets_at_snapshot",
+                            }
+                        )
+                    for row in markets:
+                        raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+                        _audit_append(
+                            {
+                                "market_ticker": row.get("market_ticker"),
+                                "title": _market_title_from_raw(raw),
+                                "drop_reason": "missing_fair_price",
+                                "volume": _to_int(row.get("volume"), default=0),
+                                "open_interest": _to_int(row.get("open_interest"), default=0),
+                            }
+                        )
+                _write_audit_files(out_dir, c.key, audit_rows)
             continue
         # Pick a consistent folder for SUMMARY.md: the first city's local target date we actually process.
         if summary_date_local is None:
@@ -378,6 +453,15 @@ def main() -> int:
             target_date_local=target_date_local,
         )
         if not snap_time:
+            if debug_enabled:
+                _audit_append(
+                    {
+                        "market_ticker": "",
+                        "title": "",
+                        "drop_reason": "no_market_snapshot_time",
+                    }
+                )
+                _write_audit_files(out_dir, c.key, audit_rows)
             continue
 
         markets = list(
@@ -794,37 +878,13 @@ def main() -> int:
             "candidates": scored,
         }
 
-        src = str(args.forecast_source).replace("/", "_")
-        out_dir = OUT_BASE / src / target_date_local
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"{c.key}.json").write_text(
             json.dumps(out, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         if debug_enabled:
-            audit_path = out_dir / f"{c.key}_audit.csv"
-            fieldnames = [
-                "market_ticker",
-                "title",
-                "event",
-                "event_display",
-                "q",
-                "yes_ask",
-                "no_ask",
-                "best_side",
-                "best_price",
-                "best_ev",
-                "spread_cents",
-                "volume",
-                "open_interest",
-                "drop_reason",
-            ]
-            with audit_path.open("w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=fieldnames)
-                w.writeheader()
-                for r in audit_rows:
-                    w.writerow({k: r.get(k, "") for k in fieldnames})
-            logger.info("Wrote audit CSV: %s (%d rows)", audit_path, len(audit_rows))
+            _write_audit_files(out_dir, c.key, audit_rows)
         wrote += 1
 
         for r in scored:
@@ -841,7 +901,6 @@ def main() -> int:
 
     if wrote > 0 and all_rows_for_md:
         all_rows_for_md.sort(key=lambda r: float(r.get("ev", 0.0)), reverse=True)
-        src = str(args.forecast_source).replace("/", "_")
         # Keep SUMMARY.md alongside per-city artifacts (same date folder).
         target_date = args.date.strip() or (summary_date_local or _now_utc().date().isoformat())
         out_dir = OUT_BASE / src / str(target_date)

@@ -224,6 +224,11 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--forecast-source", default="nws_hourly_max")
     p.add_argument("--date", default="", help="YYYY-MM-DD (default: today America/New_York)")
+    p.add_argument(
+        "--require-edges",
+        action="store_true",
+        help="Skip posting when no candidate edges are available.",
+    )
     args = p.parse_args()
 
     webhook = (os.getenv("WEATHER_DISCORD_WEBHOOK") or os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
@@ -244,6 +249,9 @@ def main() -> int:
             txt = summary_path.read_text(encoding="utf-8", errors="ignore")
             content = _truncate(txt)
         else:
+            if args.require_edges:
+                print(f"[skip] no edges found for {day} ({src}); skipping Discord post.")
+                return 0
             content = f"Weather edges: no edges found for {day} ({src})."
 
     # Discord hard limit is 2000 chars; keep room.

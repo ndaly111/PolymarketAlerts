@@ -621,6 +621,81 @@ def fetch_forecast_snapshot(
     }
 
 
+def fetch_latest_forecast_snapshot(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    source: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest snapshot row for a given city/date/source, or None."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key,
+              target_date_local,
+              snapshot_time_utc,
+              snapshot_hour_local,
+              snapshot_tz,
+              forecast_high_f,
+              source,
+              points_url,
+              forecast_url,
+              qc_flags,
+              raw_json
+            FROM forecast_snapshots
+            WHERE city_key = ?
+              AND target_date_local = ?
+              AND source = ?
+            ORDER BY snapshot_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local, str(source)),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "city_key": row[0],
+        "target_date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "snapshot_hour_local": int(row[3]) if row[3] is not None else None,
+        "snapshot_tz": row[4],
+        "forecast_high_f": int(row[5]) if row[5] is not None else None,
+        "source": row[6],
+        "points_url": row[7],
+        "forecast_url": row[8],
+        "qc_flags": row[9],
+        "raw_json": row[10],
+        "raw": json.loads(row[10]) if row[10] else {},
+    }
+
+
+def forecast_snapshot_exists(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    source: str,
+) -> bool:
+    """Return True if any snapshot exists for a city/date/source (any hour)."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM forecast_snapshots
+            WHERE city_key = ?
+              AND target_date_local = ?
+              AND source = ?
+            LIMIT 1;
+            """,
+            (city_key, target_date_local, str(source)),
+        ).fetchone()
+    return row is not None
+
+
 def fetch_error_model(
     db_path: Path,
     *,
