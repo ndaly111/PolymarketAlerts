@@ -424,6 +424,12 @@ def fmt_start_time(dt: Optional[datetime]) -> str:
         return dt.isoformat().replace("+00:00", "Z")
 
 
+def fmt_delta_hours(delta_hours: Optional[float]) -> str:
+    if delta_hours is None:
+        return "?"
+    return f"{delta_hours:.1f}h"
+
+
 def normalize_league(league: str) -> str:
     """
     Make sportsbook league strings consistent for display + matching context.
@@ -506,7 +512,23 @@ def overlap_coeff(a: set[str], b: set[str]) -> float:
     return inter / denom if denom else 0.0
 
 
-MATCH_MIN_OVERLAP = env_float("MATCH_MIN_OVERLAP", 0.80)
+MATCH_MIN_SIMILARITY = env_float("MATCH_MIN_SIMILARITY", 0.85)
+
+
+def team_similarity_scores(
+    poly_team1: str, poly_team2: str, home_team: str, away_team: str
+) -> Tuple[float, float]:
+    """
+    Return (direct, swapped) similarity scores in [0, 1].
+    Each score is the average of two per-team overlap coefficients.
+    """
+    p1 = team_tokens(poly_team1)
+    p2 = team_tokens(poly_team2)
+    a = team_tokens(home_team)
+    b = team_tokens(away_team)
+    direct = (overlap_coeff(p1, a) + overlap_coeff(p2, b)) / 2.0
+    swapped = (overlap_coeff(p1, b) + overlap_coeff(p2, a)) / 2.0
+    return direct, swapped
 
 
 def moneyline_to_prob(ml: int) -> float:
@@ -598,7 +620,7 @@ class SportsbookGame:
 class MatchResult:
     index: int
     game: SportsbookGame
-    delta_seconds: float
+    delta_seconds: Optional[float]
     overlap_score: float
 
 
@@ -1341,37 +1363,37 @@ def match_sportsbook_game(
     poly: PolyMoneylineMarket, books: List[SportsbookGame]
 ) -> Optional[MatchResult]:
     """
-    Match by lightweight token overlap + time proximity.
+    Match by lightweight token overlap + time proximity when available.
     No aliases/uniforming; this is only to align sportsbook odds with Polymarket outcomes.
     """
-    if not poly.start_time:
-        return None
-
     best_match: Optional[MatchResult] = None
     best_score = 0.0
-    best_delta = float("inf")
+    best_delta: Optional[float] = None
+    best_books_used = -1
 
     for idx, sb in enumerate(books):
         if not sb.start_time:
             continue
-        delta = abs((poly.start_time - sb.start_time).total_seconds())
-        if delta > TIME_WINDOW_HOURS * 3600:
-            continue
+        delta = None
+        if poly.start_time:
+            delta = abs((poly.start_time - sb.start_time).total_seconds())
+            if delta > TIME_WINDOW_HOURS * 3600:
+                continue
 
-        p1 = team_tokens(poly.team1)
-        p2 = team_tokens(poly.team2)
-        a = team_tokens(sb.home_team)
-        b = team_tokens(sb.away_team)
-
-        # direct mapping score and swapped mapping score
-        direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
-        swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
-
+        direct, swapped = team_similarity_scores(poly.team1, poly.team2, sb.home_team, sb.away_team)
         score = max(direct, swapped)
-        if score < (2 * MATCH_MIN_OVERLAP):
+        if score < MATCH_MIN_SIMILARITY:
             continue
 
-        if score > best_score or (score == best_score and delta < best_delta):
+        better_time = False
+        if delta is not None and best_delta is not None:
+            better_time = delta < best_delta
+        elif delta is not None and best_delta is None:
+            better_time = True
+
+        better_books = sb.books_used > best_books_used
+
+        if score > best_score or (score == best_score and (better_time or better_books)):
             best_match = MatchResult(
                 index=idx,
                 game=sb,
@@ -1380,6 +1402,7 @@ def match_sportsbook_game(
             )
             best_score = score
             best_delta = delta
+            best_books_used = sb.books_used
 
     return best_match
 
@@ -1442,7 +1465,7 @@ def compute_value_rankings(
         if not matched:
             if pm.start_time is None:
                 skipped_reasons.append(
-                    f"Missing Polymarket start time: {pm.team1} vs {pm.team2} ({pm.slug})"
+                    f"No sportsbook match (Polymarket start time missing): {pm.team1} vs {pm.team2} ({pm.slug})"
                 )
             unmatched_polys.append(pm)
             continue
@@ -1452,13 +1475,8 @@ def compute_value_rankings(
 
         sb_league = normalize_league(sb.league or "")
         # Determine which sportsbook side maps to which Polymarket outcome using the same token overlap approach.
-        p1 = team_tokens(pm.team1)
-        p2 = team_tokens(pm.team2)
-        a = team_tokens(sb.home_team)
-        b = team_tokens(sb.away_team)
-        direct = overlap_coeff(p1, a) + overlap_coeff(p2, b)
-        swapped = overlap_coeff(p1, b) + overlap_coeff(p2, a)
-        if max(direct, swapped) < (2 * MATCH_MIN_OVERLAP):
+        direct, swapped = team_similarity_scores(pm.team1, pm.team2, sb.home_team, sb.away_team)
+        if max(direct, swapped) < MATCH_MIN_SIMILARITY:
             skipped_reasons.append(
                 f"Low match confidence: {sb.home_team} vs {sb.away_team} <-> {pm.team1} vs {pm.team2}"
             )
@@ -1480,7 +1498,7 @@ def compute_value_rankings(
         sb_start_utc = sb.start_time.isoformat().replace("+00:00", "Z") if sb.start_time else ""
         poly_start_et = fmt_start_time(pm.start_time)
         sb_start_et = fmt_start_time(sb.start_time)
-        match_delta_hours = matched.delta_seconds / 3600.0
+        match_delta_hours = matched.delta_seconds / 3600.0 if matched.delta_seconds is not None else None
         match_overlap_score = matched.overlap_score
         # Always show Polymarket's team strings exactly (what you asked for).
         matchup = f"{pm.team1} vs {pm.team2}"
@@ -1969,7 +1987,7 @@ def format_discord_message(
 
             lines.append(
                 f"{i}) {league_prefix}{row['matchup']} @ {row.get('start_time_et','?')} "
-                f"(Δt={match_delta_hours:.1f}h, overlap={overlap_score:.2f}) — "
+                f"(Δt={fmt_delta_hours(match_delta_hours)}, overlap={overlap_score:.2f}) — "
                 f"{row['recommended_side']} | PM {pm_ml_s} ({pmp:.1%}) vs Fair {sb_ml} ({sbp:.1%}) | "
                 f"Edge {edge:+.1%} | books={books_used} | id={row.get('poly_market_id','?')} | "
                 f"type={row.get('poly_sports_market_type','?')}{tag_s}"
@@ -2007,7 +2025,7 @@ def format_discord_message(
 
         sb_range = f"{_fmt_range(min_odds, min_book)}→{_fmt_range(max_odds, max_book)}"
         price_side = r.get("poly_price_side_used", "mid")
-        match_delta = r.get("match_time_delta_hours", 0.0)
+        match_delta = r.get("match_time_delta_hours")
         poly_type = textwrap.shorten(str(r.get("poly_sports_market_type") or ""), width=18, placeholder="…")
         poly_prob = r.get("poly_prob_norm", r.get("polymarket_prob", 0.0))
         sb_prob = r.get("sb_fair_prob", r.get("sportsbook_fair_prob", 0.0))
@@ -2022,7 +2040,7 @@ def format_discord_message(
         liq_s = f"${liq:,.0f}" if isinstance(liq, (int, float)) else "-"
         start_time = r.get("poly_start_time_et") or r.get("start_time_et")
         lines.append(
-            f"{i}) {league_prefix}{r['matchup']} ({start_time}, Δt={match_delta:.1f}h, {poly_type}) | "
+            f"{i}) {league_prefix}{r['matchup']} ({start_time}, Δt={fmt_delta_hours(match_delta)}, {poly_type}) | "
             f"BUY {recommended_team} | Poly {poly_prob:.1%} ({poly_ml_s}, {price_side}) vs "
             f"Books {sb_prob:.1%} ({sb_ml_s}, N={books_used}) | Edge {r['edge_abs']:+.1%} | "
             f"Poly Vol24h {vol_s} Liq {liq_s} | SB {sb_range} | {r['polymarket_url']}"
