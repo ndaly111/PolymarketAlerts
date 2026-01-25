@@ -20,9 +20,10 @@ jobs:
     env:
       TZ: America/New_York
       PYTHONPATH: ${{ github.workspace }}
-      FORECAST_SOURCE: nws_hourly_max
+      # Use MOS archive for error models (historical data)
+      FORECAST_SOURCE: mos_gfs_18z_archive
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
-      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+      WEATHER_SNAPSHOT_HOUR_LOCAL: "12"
       # Use pure Gaussian smoothing with 1% tail cutoff for smooth probability curves
       WEATHER_ERROR_PURE_GAUSSIAN: "true"
       WEATHER_ERROR_MIN_TAIL_PROB: "0.01"

@@ -22,8 +22,40 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+import math
+
 from weather.lib import db as db_lib
 from weather.lib.fair import normalize_pmf, shift_pmf, summarize_pmf
+
+
+def _build_fallback_gaussian_pmf(center: int, std: float = 4.0, min_tail_prob: float = 0.01) -> Dict[int, float]:
+    """Build a Gaussian PMF when no error model exists. Default std=4°F is typical NWS error."""
+    denom = 2.0 * (std ** 2)
+
+    def gaussian_density(k: int) -> float:
+        return math.exp(-((float(k) - center) ** 2) / denom)
+
+    out: Dict[int, float] = {center: gaussian_density(center)}
+
+    # Extend in both directions until tail < min_tail_prob
+    for direction in [-1, 1]:
+        k = center + direction
+        while True:
+            density = gaussian_density(k)
+            out[k] = density
+            total = sum(out.values())
+            if direction == -1:
+                tail = sum(out[j] for j in out if j <= k) / total
+            else:
+                tail = sum(out[j] for j in out if j >= k) / total
+            if tail < min_tail_prob:
+                break
+            k += direction
+            if abs(k - center) > 30:
+                break
+
+    total = sum(out.values())
+    return {k: v / total for k, v in sorted(out.items())}
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,15 +100,31 @@ def main() -> int:
         help="Optional target date_local YYYY-MM-DD (default: today in each city TZ)",
     )
     p.add_argument("--forecast-source", default="nws_hourly_max", help="Forecast source to price from.")
+    p.add_argument(
+        "--error-model-source",
+        default=os.getenv("WEATHER_ERROR_MODEL_SOURCE", ""),
+        help="Source for error models (default: same as forecast-source, or mos_gfs_18z_archive if set).",
+    )
+    p.add_argument(
+        "--error-model-hour",
+        type=int,
+        default=int(os.getenv("WEATHER_ERROR_MODEL_HOUR", "0")),
+        help="Snapshot hour for error models (default: same as snapshot hour, or 12 for MOS).",
+    )
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     fallback_source = os.getenv("WEATHER_FALLBACK_SOURCE", "").strip() or f"{args.forecast_source}_fallback"
+
+    # Error model source/hour - defaults to MOS archive if available, else same as forecast
+    error_model_source = args.error_model_source.strip() or str(args.forecast_source)
+    error_model_hour = args.error_model_hour if args.error_model_hour > 0 else snapshot_hour_local
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
     wrote = 0
 
     print(f"[info] Looking for snapshots: source={args.forecast_source}, hour={snapshot_hour_local}")
+    print(f"[info] Error model source: {error_model_source}, hour={error_model_hour}")
 
     for c in cities:
         if args.city and c.key != args.city:
@@ -106,15 +154,29 @@ def main() -> int:
             print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
             continue
 
-        model_source = str(args.forecast_source)
-        model_snapshot_hour_local = snapshot_hour_local
+        # Try error model from specified source first, then fallback to forecast source
         model = db_lib.fetch_error_model(
             db_path,
             city_key=c.key,
             month=month,
-            snapshot_hour_local=model_snapshot_hour_local,
-            source=model_source,
+            snapshot_hour_local=error_model_hour,
+            source=error_model_source,
         )
+        model_source = error_model_source
+        model_snapshot_hour_local = error_model_hour
+
+        # If no model from error_model_source, try forecast source
+        if not model and error_model_source != str(args.forecast_source):
+            model = db_lib.fetch_error_model(
+                db_path,
+                city_key=c.key,
+                month=month,
+                snapshot_hour_local=snapshot_hour_local,
+                source=str(args.forecast_source),
+            )
+            if model:
+                model_source = str(args.forecast_source)
+                model_snapshot_hour_local = snapshot_hour_local
 
         forecast_high = int(snap["forecast_high_f"])
         if model:
@@ -123,7 +185,8 @@ def main() -> int:
             error_model_n_samples = int(model["n_samples"])
             error_model_updated_at_utc = model["updated_at_utc"]
         else:
-            pmf_high = {int(forecast_high): 1.0}
+            # Fallback: use Gaussian with std=4°F (typical NWS forecast error)
+            pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=4.0)
             error_model_n_samples = 0
             error_model_updated_at_utc = None
         summary = summarize_pmf(pmf_high)

@@ -45,6 +45,9 @@ jobs:
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
+      # Error models built from MOS archive data
+      WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive
+      WEATHER_ERROR_MODEL_HOUR: "12"
       WEATHER_BUY_FEE_CENTS: "2"
       WEATHER_MIN_EV: "0.02"
       WEATHER_MIN_Q: "0.05"
