@@ -1,0 +1,148 @@
+name: Kalshi - Explore Shapes (Weather/Sports)
+
+on:
+  workflow_dispatch:
+    inputs:
+      category:
+        description: "What to explore"
+        type: choice
+        options:
+          - Weather
+          - Sports
+        default: Weather
+      depth:
+        description: "Sampling depth"
+        type: choice
+        options:
+          - quick
+          - deep
+        default: quick
+      status:
+        description: "Filter events/markets by status"
+        type: choice
+        options:
+          - open
+          - closed
+          - settled
+          - any
+        default: open
+      series_tickers:
+        description: "Advanced. Optional comma-separated series tickers to restrict."
+        required: false
+        default: ""
+      max_series:
+        description: "Max series to sample"
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "5"
+          - "10"
+          - "20"
+        default: "5"
+      max_events_per_series:
+        description: "Max events per series"
+        type: choice
+        options:
+          - "3"
+          - "6"
+          - "12"
+          - "25"
+          - "40"
+        default: "6"
+      max_markets_per_event:
+        description: "Max markets per event (used when truncating nested markets)"
+        type: choice
+        options:
+          - "10"
+          - "25"
+          - "50"
+          - "100"
+          - "200"
+        default: "25"
+      max_orderbooks:
+        description: "Max orderbooks to fetch (0 disables)"
+        type: choice
+        options:
+          - "0"
+          - "10"
+          - "25"
+          - "50"
+          - "100"
+        default: "0"
+      category_param:
+        description: "Advanced. Exact category value to send to /series (overrides auto-detect)."
+        required: false
+        default: ""
+      auth_mode:
+        description: "Auth mode for requests"
+        type: choice
+        options:
+          - public
+          - signed
+        default: public
+      orderbook_depth:
+        description: "Orderbook depth to request when enabled"
+        type: choice
+        options:
+          - "1"
+          - "5"
+          - "20"
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Explore Kalshi shapes
+        env:
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
+          KALSHI_KEY_ID: ${{ secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          KALSHI_BASE: ${{ vars.KALSHI_BASE }}
+        run: |
+          python kalshi_explore.py \
+            --category "${{ inputs.category }}" \
+            --depth "${{ inputs.depth }}" \
+            --status "${{ inputs.status }}" \
+            --series-tickers "${{ inputs.series_tickers }}" \
+            --max-series "${{ inputs.max_series }}" \
+            --max-events-per-series "${{ inputs.max_events_per_series }}" \
+            --max-markets-per-event "${{ inputs.max_markets_per_event }}" \
+            --max-orderbooks "${{ inputs.max_orderbooks }}" \
+            --category-param "${{ inputs.category_param }}" \
+            --auth-mode "${{ inputs.auth_mode }}" \
+            --orderbook-depth "${{ inputs.orderbook_depth }}" \
+            --out-dir "artifacts/kalshi_explore"
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Kalshi Explore Summary" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f artifacts/kalshi_explore/overview.md ]; then
+            cat artifacts/kalshi_explore/overview.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "(No overview.md produced)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi_explore_${{ inputs.category }}_${{ inputs.depth }}
+          path: artifacts/kalshi_explore
