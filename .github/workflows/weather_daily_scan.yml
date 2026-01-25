@@ -10,6 +10,10 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
+      post_forecast_distribution:
+        description: "Post forecast distribution summary (manual runs)"
+        required: false
+        default: "true"
       run_mode:
         description: "Execution mode"
         type: choice
@@ -71,7 +75,12 @@ jobs:
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "is_430=false" >> "$GITHUB_OUTPUT"
+            # Allow manual runs to post the forecast distribution when requested.
+            if [[ "${{ github.event.inputs.post_forecast_distribution }}" == "true" ]]; then
+              echo "is_430=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "is_430=false" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 
