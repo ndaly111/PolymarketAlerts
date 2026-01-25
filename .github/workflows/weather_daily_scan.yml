@@ -169,7 +169,6 @@ jobs:
             --db "$WEATHER_DB_PATH"
 
       - name: Post forecast distribution to Discord
-        # Always post forecast distribution (morning forecast is useful even without edge detection)
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -181,7 +180,8 @@ jobs:
           python -m weather.scripts.post_forecast_distribution_discord \
             --forecast-source "$FORECAST_SOURCE" \
             --date "${{ steps.run_date.outputs.date }}" \
-            --min-prob 0.05
+            --min-prob 0.05 \
+            --require-data
 
       - name: Collect Kalshi weather markets
         id: kalshi_markets
@@ -235,7 +235,7 @@ jobs:
             ${REQUIRE_ASK}
 
       - name: Post edges to Discord
-        if: steps.run_type.outputs.mode == 'full_scan'
+        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true'
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -244,13 +244,10 @@ jobs:
             echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
             exit 0
           fi
-          if [[ "${{ steps.kalshi_markets.outputs.ok }}" != "true" ]]; then
-            echo "[skip] No Kalshi markets found, skipping edge post."
-            exit 0
-          fi
           python -m weather.scripts.post_weather_edges_discord \
             --forecast-source "$FORECAST_SOURCE" \
-            --date "${{ steps.run_date.outputs.date }}"
+            --date "${{ steps.run_date.outputs.date }}" \
+            --require-edges
 
       - name: Upload daily scan outputs
         uses: actions/upload-artifact@v4
