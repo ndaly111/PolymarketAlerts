@@ -1,0 +1,59 @@
+name: Kalshi Dump Series (one-off)
+
+on:
+  workflow_dispatch:
+    inputs:
+      category:
+        description: "Optional Kalshi category filter (e.g. Weather, Sports)"
+        required: false
+        default: ""
+      status:
+        description: "Optional series status filter (e.g. active, open)"
+        required: false
+        default: ""
+      series_limit:
+        description: "Max series to fetch (script paginates if a cursor is present)"
+        required: false
+        default: "2000"
+
+jobs:
+  dump-series:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ensure these exist even if requirements.txt is missing or incomplete.
+          pip install -q requests cryptography
+
+      - name: Dump Kalshi series metadata
+        env:
+          # Auth (your repo secrets)
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+
+          # Optional base override; defaults to elections host + /trade-api/v2 normalization
+          KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+        run: |
+          python kalshi_dump_series.py \
+            --category "${{ github.event.inputs.category }}" \
+            --status "${{ github.event.inputs.status }}" \
+            --limit "${{ github.event.inputs.series_limit }}" \
+            --out-json out/kalshi_series_dump.json
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-series-dump
+          path: out/kalshi_series_dump.json
+          if-no-files-found: warn
+          retention-days: 14

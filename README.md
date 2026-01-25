@@ -96,3 +96,25 @@ Optional:
 - `KALSHI_BASE` (repo variable recommended): Kalshi trade API base URL. If you set only the host, the script will append `/trade-api/v2`.
 
 Manual inputs let you change sport keys, edge thresholds, lookahead window, fee cents, and (optionally) the Kalshi series tickers.
+
+---
+
+## Kalshi series metadata dump
+
+The `kalshi_dump_series.py` script fetches Kalshi series metadata and writes a JSON dump for inspection.
+
+### Run in GitHub Actions
+
+Workflow: `.github/workflows/kalshi_dump_series.yml`
+
+Inputs:
+- `category` (optional): Kalshi category filter (e.g. `Weather`, `Sports`)
+- `status` (optional): series status filter (e.g. `active`, `open`)
+- `series_limit` (default `2000`): maximum series to fetch
+
+Secrets used:
+- `KALSHI_KEY_ID` (or `KALSHI_API_KEY_ID`)
+- `KALSHI_PRIVATE_KEY`
+
+Optional:
+- `KALSHI_BASE` (repo variable recommended): Kalshi trade API base URL. If you set only the host, the script will append `/trade-api/v2`.
