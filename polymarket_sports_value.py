@@ -2143,15 +2143,19 @@ def main() -> None:
     write_value_reports(rows)
     write_unmatched_reports(unmatched_polys, unmatched_books)
 
-    msg = format_discord_message(
-        rows,
-        polymarket_count=len(polys),
-        sportsbook_count=len(books),
-        poly_debug=poly_debug,
-        debug_rows_all=debug_rows_all,
-        debug_counts=debug_counts,
-    )
-    post_discord(msg)
+    # Only post to Discord if there are qualifying edges (or DEBUG_MODE is on)
+    if rows or DEBUG_MODE:
+        msg = format_discord_message(
+            rows,
+            polymarket_count=len(polys),
+            sportsbook_count=len(books),
+            poly_debug=poly_debug,
+            debug_rows_all=debug_rows_all,
+            debug_counts=debug_counts,
+        )
+        post_discord(msg)
+    else:
+        print(f"No qualifying edges found ({len(polys)} Polymarket markets, {len(books)} sportsbook events); skipping Discord post.")
 
 
 if __name__ == "__main__":
