@@ -39,7 +39,8 @@ class KalshiClient:
 
     @classmethod
     def from_env(cls, auth_mode: str = "public") -> "KalshiClient":
-        base = os.getenv("KALSHI_BASE", "https://api.elections.kalshi.com/trade-api/v2")
+        default_base = "https://api.elections.kalshi.com/trade-api/v2"
+        base = os.getenv("KALSHI_BASE", default_base).strip() or default_base
         key_id = os.getenv("KALSHI_API_KEY_ID") or os.getenv("KALSHI_KEY_ID")
         private_key = os.getenv("KALSHI_PRIVATE_KEY")
         auth_enabled = auth_mode == "signed"
