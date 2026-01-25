@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,7 @@ DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "
 @dataclass(frozen=True)
 class City:
     key: str
+    label: str
 
 
 def _now_utc_iso() -> str:
@@ -54,7 +56,12 @@ def load_city_keys(config_path: Path) -> List[City]:
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     out: List[City] = []
     for row in data.get("cities", []):
-        out.append(City(key=str(row["key"]).strip()))
+        out.append(
+            City(
+                key=str(row["key"]).strip(),
+                label=str(row.get("label", "")).strip(),
+            )
+        )
     return out
 
 
@@ -140,38 +147,72 @@ def fetch_markets_for_series(client: KalshiClient, series_ticker: str, limit: in
     return items
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--config", default=str(DEFAULT_CONFIG))
-    p.add_argument("--db", default=str(DEFAULT_DB))
-    p.add_argument(
-        "--series-tickers",
-        default=os.getenv("WEATHER_KALSHI_SERIES_TICKERS", ""),
-        help="Comma-separated Kalshi series tickers (or set WEATHER_KALSHI_SERIES_TICKERS).",
-    )
-    p.add_argument("--limit", default="2000", help="Hard cap on markets pulled per series.")
-    p.add_argument(
-        "--require-city-match",
-        action="store_true",
-        help="Only store markets whose ticker/event_ticker contains a known city_key.",
-    )
-    args = p.parse_args()
+def fetch_weather_series(client: KalshiClient, limit: int = 2000) -> List[Dict[str, Any]]:
+    params: Dict[str, Any] = {"limit": min(int(limit), 1000), "category": "Weather"}
+    items, last_resp, _pages = paginate(client, "/series", "series", params, hard_limit=int(limit))
+    if not items and isinstance(last_resp, dict):
+        alt = last_resp.get("items")
+        if isinstance(alt, list):
+            items = [it for it in alt if isinstance(it, dict)]
+    return items
 
-    series_tickers = [s.strip() for s in str(args.series_tickers).split(",") if s.strip()]
-    if not series_tickers:
-        raise SystemExit("No series tickers provided. Use --series-tickers or WEATHER_KALSHI_SERIES_TICKERS.")
 
-    cities = load_city_keys(Path(args.config))
-    city_keys = [c.key for c in cities]
+def _series_ticker(series: Dict[str, Any]) -> str:
+    return _pick_first_str(series.get("ticker"), series.get("series_ticker"), series.get("seriesTicker"))
 
-    client = KalshiClient.from_env()
-    db_lib.ensure_schema(Path(args.db))
-    snapshot_time_utc = _now_utc_iso()
+
+def _series_title(series: Dict[str, Any]) -> str:
+    return _pick_first_str(series.get("title"), series.get("name"), series.get("series_title"), series.get("seriesTitle"))
+
+
+def discover_series_tickers(client: KalshiClient, cities: List[City]) -> List[str]:
+    series = fetch_weather_series(client)
+    if not series:
+        return []
+
+    city_tokens = {c.key.upper() for c in cities if c.key}
+    city_tokens.update({c.label.upper() for c in cities if c.label})
+    filtered: List[str] = []
+
+    for s in series:
+        ticker = _series_ticker(s)
+        title = _series_title(s)
+        hay = f"{ticker} {title}".upper()
+        if not hay.strip():
+            continue
+
+        if any(token in hay for token in city_tokens) and "HIGH" in hay:
+            if ticker:
+                filtered.append(ticker)
+
+    # Preserve order, de-dupe.
+    seen = set()
+    out: List[str] = []
+    for t in filtered:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def collect_markets(
+    client: KalshiClient,
+    series_tickers: List[str],
+    city_tokens: Dict[str, str],
+    require_city_match: bool,
+    db_path: Path,
+    snapshot_time_utc: str,
+    limit: int,
+) -> Dict[str, int]:
     wrote = 0
     skipped = 0
+    total_markets = 0
 
     for series in series_tickers:
-        markets = fetch_markets_for_series(client, series, limit=int(args.limit))
+        markets = fetch_markets_for_series(client, series, limit=limit)
+        if markets:
+            total_markets += len(markets)
         for m in markets:
             norm = extract_market_fields(m)
             market_ticker = norm["market_ticker"]
@@ -183,12 +224,12 @@ def main() -> int:
             hay = f"{market_ticker} {event_ticker}".upper()
 
             city_key = ""
-            for ck in city_keys:
-                if ck.upper() in hay:
-                    city_key = ck
+            for token in sorted(city_tokens.keys(), key=len, reverse=True):
+                if token in hay:
+                    city_key = city_tokens[token]
                     break
 
-            if args.require_city_match and not city_key:
+            if require_city_match and not city_key:
                 skipped += 1
                 continue
             if not city_key:
@@ -197,7 +238,7 @@ def main() -> int:
             target_date_local = infer_target_date_local_from_ticker(hay)
 
             db_lib.insert_kalshi_weather_market_snapshot(
-                Path(args.db),
+                db_path,
                 snapshot_time_utc=snapshot_time_utc,
                 city_key=city_key,
                 target_date_local=target_date_local,
@@ -215,19 +256,93 @@ def main() -> int:
             )
             wrote += 1
 
-    print(
-        json.dumps(
-            {
-                "snapshot_time_utc": snapshot_time_utc,
-                "series_tickers": series_tickers,
-                "rows_written": wrote,
-                "rows_skipped": skipped,
-                "db": str(args.db),
-            },
-            indent=2,
-            sort_keys=True,
-        )
+    return {"rows_written": wrote, "rows_skipped": skipped, "total_markets": total_markets}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", default=str(DEFAULT_CONFIG))
+    p.add_argument("--db", default=str(DEFAULT_DB))
+    p.add_argument(
+        "--series-tickers",
+        default=os.getenv("WEATHER_KALSHI_SERIES_TICKERS", ""),
+        help="Comma-separated Kalshi series tickers (or set WEATHER_KALSHI_SERIES_TICKERS).",
     )
+    p.add_argument("--limit", default="2000", help="Hard cap on markets pulled per series.")
+    p.add_argument(
+        "--require-city-match",
+        action="store_true",
+        help="Only store markets whose ticker/event_ticker contains a known city_key.",
+    )
+    p.add_argument(
+        "--require-markets",
+        action="store_true",
+        help="Exit non-zero if no markets are written after fallback discovery.",
+    )
+    p.add_argument("--out-json", default="", help="Optional path to write JSON output.")
+    args = p.parse_args()
+
+    series_tickers = [s.strip() for s in str(args.series_tickers).split(",") if s.strip()]
+
+    cities = load_city_keys(Path(args.config))
+    city_tokens: Dict[str, str] = {}
+    for city in cities:
+        if city.key:
+            city_tokens[city.key.upper()] = city.key
+        if city.label:
+            city_tokens[city.label.upper()] = city.key
+        if "LAX" in city.key.upper() or "LOS ANGELES" in city.label.upper():
+            city_tokens.setdefault("LAX", city.key)
+            city_tokens.setdefault("LOS ANGELES", city.key)
+
+    client = KalshiClient.from_env()
+    db_lib.ensure_schema(Path(args.db))
+    snapshot_time_utc = _now_utc_iso()
+    db_path = Path(args.db)
+
+    if not series_tickers:
+        series_tickers = discover_series_tickers(client, cities)
+        if series_tickers:
+            print(f"[kalshi] discovered series tickers (no input): {', '.join(series_tickers)}", file=sys.stderr)
+
+    used_series = list(series_tickers)
+    stats = collect_markets(
+        client=client,
+        series_tickers=series_tickers,
+        city_tokens=city_tokens,
+        require_city_match=args.require_city_match,
+        db_path=db_path,
+        snapshot_time_utc=snapshot_time_utc,
+        limit=int(args.limit),
+    )
+
+    if stats["total_markets"] == 0 or stats["rows_written"] == 0:
+        discovered = discover_series_tickers(client, cities)
+        if discovered:
+            print(f"[kalshi] discovered series tickers: {', '.join(discovered)}", file=sys.stderr)
+            used_series = list(discovered)
+            stats = collect_markets(
+                client=client,
+                series_tickers=discovered,
+                city_tokens=city_tokens,
+                require_city_match=args.require_city_match,
+                db_path=db_path,
+                snapshot_time_utc=snapshot_time_utc,
+                limit=int(args.limit),
+            )
+
+    payload = {
+        "snapshot_time_utc": snapshot_time_utc,
+        "series_tickers": used_series,
+        "rows_written": stats["rows_written"],
+        "rows_skipped": stats["rows_skipped"],
+        "db": str(args.db),
+    }
+    if args.out_json:
+        Path(args.out_json).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.require_markets and stats["rows_written"] == 0:
+        return 2
     return 0
 
 
