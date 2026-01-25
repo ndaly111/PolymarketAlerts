@@ -23,8 +23,9 @@ jobs:
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
       WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
-      WEATHER_ERROR_GAUSS_MIX: "0.35"
-      WEATHER_ERROR_GAUSS_SUPPORT_STD: "4"
+      # Use pure Gaussian smoothing with 1% tail cutoff for smooth probability curves
+      WEATHER_ERROR_PURE_GAUSSIAN: "true"
+      WEATHER_ERROR_MIN_TAIL_PROB: "0.01"
 
     steps:
       - name: Checkout
@@ -48,8 +49,8 @@ jobs:
           python weather/scripts/build_error_models.py \
             --min-samples 10 \
             --forecast-source "$FORECAST_SOURCE" \
-            --gaussian-mix "$WEATHER_ERROR_GAUSS_MIX" \
-            --gaussian-support-std "$WEATHER_ERROR_GAUSS_SUPPORT_STD" \
+            --pure-gaussian \
+            --min-tail-prob "$WEATHER_ERROR_MIN_TAIL_PROB" \
             --db "$WEATHER_DB_PATH"
 
       - name: Commit DB (if changed)
