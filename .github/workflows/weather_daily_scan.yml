@@ -68,14 +68,19 @@ jobs:
         id: gate
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "is_430=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          NOW_HHMM="$(date +%H%M)"
-          if (( NOW_HHMM >= 500 && NOW_HHMM <= 2000 )); then
+          NOW_HHMM="$(TZ=America/New_York date +%H%M)"
+          echo "is_430=false" >> "$GITHUB_OUTPUT"
+          if [[ "$NOW_HHMM" == "0430" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "is_430=true" >> "$GITHUB_OUTPUT"
+          elif (( NOW_HHMM >= 500 && NOW_HHMM <= 2000 )); then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -187,6 +192,26 @@ jobs:
           python -m weather.scripts.compute_fair_prices \
             --forecast-source "$FORECAST_SOURCE" \
             --db "$WEATHER_DB_PATH"
+
+      - name: Post 4:30 forecast distribution
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.is_430 == 'true'
+        env:
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEATHER_DISCORD_WEBHOOK:-}" ]; then
+            echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
+            exit 0
+          fi
+          POST_ARGS=()
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            POST_ARGS+=(--require-data)
+          fi
+          python -m weather.scripts.post_forecast_distribution_discord \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}" \
+            --min-prob 0.05 \
+            "${POST_ARGS[@]}"
 
       - name: Collect Kalshi weather markets
         id: kalshi_markets
