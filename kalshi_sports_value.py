@@ -136,13 +136,43 @@ def _normalize_epoch_seconds(value: Any) -> Optional[int]:
 
 
 def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
-    """Return market close time (unix seconds) if present.
+    """Return the *effective* market timestamp (unix seconds) when available.
 
-    Kalshi endpoints may return either:
-      - close_time: ISO8601 string
-      - close_ts: integer unix seconds
-    We support both, and fall back to None if unavailable.
+    IMPORTANT:
+      For Kalshi sports markets, ``close_time`` / ``expiration_time`` can be a
+      *settlement/expiration* timestamp that may be days or weeks after the game.
+      The field ``expected_expiration_time`` is usually the best proxy for the
+      underlying game start.
+
+    We therefore prefer (in order):
+      1) expected_expiration_ts / expected_expiration_time
+      2) expiration_ts / expiration_time
+      3) close_ts / close_time
+
+    The rest of the pipeline uses this value for "within lookahead" filtering
+    and Odds API time-skew checks, so choosing the right field is critical.
     """
+
+    # Prefer the game-time proxy when present.
+    for k in ("expected_expiration_ts", "expected_expiration_time", "expectedExpirationTime"):
+        try:
+            if k in market and market[k] is not None:
+                ts = _normalize_epoch_seconds(market[k])
+                if ts is not None:
+                    return ts
+        except Exception:
+            pass
+
+    for k in ("expiration_ts", "expiration_time", "expirationTime"):
+        try:
+            if k in market and market[k] is not None:
+                ts = _normalize_epoch_seconds(market[k])
+                if ts is not None:
+                    return ts
+        except Exception:
+            pass
+
+    # Fall back to close time.
     try:
         if "close_ts" in market and market["close_ts"] is not None:
             return _normalize_epoch_seconds(market["close_ts"])
@@ -373,28 +403,45 @@ SPREAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+WIN_BY_RE = re.compile(
+    r"^(?P<team>.+?)\s+wins?\s+by\s+(?P<side>over|under)\s*(?P<points>[0-9]+(?:\.[0-9]+)?)\s*(?:pts?|points?)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
-    """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
-    t = str(title)
-    t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
-    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
-    if ":" in t:
-        t_tail = t.split(":")[-1].strip()
-        if len(t_tail) >= 5:
-            t = t_tail
-    t = " ".join(t.split())
-    m = re.search(
-        r"(?i)\b(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$",
-        t,
-    )
-    if not m:
-        return None
-    a = str(m.group(1)).strip()
-    b = str(m.group(3)).strip()
-    if not a or not b:
-        return None
-    return a, b
+    """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'.
+
+    Kalshi event titles sometimes contain colons for descriptors, e.g.
+      - "NCAAB: Xavier at Creighton"
+      - "Xavier at Creighton: Spread"
+    A naive "substring after the last colon" breaks the second form, so we try
+    a few candidates and return the first that parses.
+    """
+    raw = str(title or "")
+    raw = re.sub(r"[\(\[].*?[\)\]]", " ", raw)
+    raw = raw.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
+    raw = " ".join(raw.split())
+
+    cands = [raw]
+    if ":" in raw:
+        # Common patterns: "LEAGUE: A at B" or "A at B: Spread"
+        after_first = raw.split(":", 1)[1].strip()
+        before_last = raw.rsplit(":", 1)[0].strip()
+        for t in (after_first, before_last):
+            if t and t not in cands:
+                cands.append(t)
+
+    rx = re.compile(r"(?i)(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$")
+    for t in cands:
+        m = rx.search(t)
+        if not m:
+            continue
+        a = str(m.group(1)).strip()
+        b = str(m.group(3)).strip()
+        if a and b and a.lower() != b.lower():
+            return a, b
+    return None
 
 
 def derive_matchup_from_subtitles(line_type: str, yes_sub: str, no_sub: str) -> Optional[Tuple[str, str]]:
@@ -444,16 +491,29 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
     if lt == "spread":
         # Common forms: "Brooklyn -1", "BKN -1.5"
         m = SPREAD_RE.match(s)
-        if not m:
+        if m:
+            team = m.group("team").strip()
+            spread = float(m.group("spread"))
+            return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+
+        # Kalshi alt-spread phrasing: "TEAM wins by over 9.5 Points"
+        wm = WIN_BY_RE.match(s)
+        if wm:
+            team = wm.group("team").strip()
+            side = wm.group("side").lower()
+            pts = float(wm.group("points"))
+            # "wins by over X" aligns best with covering approximately -X.
+            if side == "over":
+                spread = -pts
+                return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+            # If Kalshi ever emits "wins by under X", we can't safely map it to a standard spread.
             return None
-        team = m.group("team").strip()
-        spread = float(m.group("spread"))
-        return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+
+        return None
 
     if lt == "h2h":
         # Common forms: "Brooklyn", "Brooklyn wins"
-        team = s
-        team = re.sub(r"\b(wins|win|to win)\b", "", team, flags=re.IGNORECASE).strip()
+        team = re.sub(r"(?i)\b(wins|win|to win)\b", "", s).strip()
         if not team:
             return None
         return {"team": team, "label": team}
@@ -463,12 +523,19 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
 
 def infer_line_type(series_ticker: str, market_ticker: str, market_title: str) -> Optional[str]:
     raw = f"{series_ticker} {market_ticker} {market_title}".lower()
-    if "total" in raw or TOTAL_RE.search(raw):
-        return "total"
-    if "spread" in raw:
+    st_u = str(series_ticker or "").upper()
+
+    # Spread signals must come before totals because Kalshi spread props often contain "over 9.5".
+    if "spread" in raw or "wins by" in raw or "win by" in raw or "margin" in raw or "SPREAD" in st_u:
         return "spread"
-    # Many moneyline series use GAME
-    if "game" in raw or "moneyline" in raw or "money line" in raw or re.search(r"\bh2h\b", raw):
+
+    # Totals: require an explicit keyword or a strong ticker hint.
+    if "total" in raw or "TOTAL" in st_u or "OVERUNDER" in st_u or "OU" in st_u:
+        if "total" in raw or TOTAL_RE.search(raw):
+            return "total"
+
+    # Many moneyline series use GAME; also allow "h2h".
+    if "game" in raw or "moneyline" in raw or "money line" in raw or "h2h" in raw:
         return "h2h"
     return None
 
@@ -481,6 +548,10 @@ def infer_line_type_from_subtitles(yes_sub: str, no_sub: str) -> Optional[str]:
         return None
 
     hay = f"{ys} {ns}".upper()
+
+    # Kalshi spread markets often look like: "TEAM wins by over 9.5 Points"
+    if "WINS BY" in hay or "WIN BY" in hay or "MARGIN" in hay:
+        return "spread"
 
     # Totals usually look like: "Over 42.5" / "Under 42.5"
     if ("OVER" in hay or "UNDER" in hay) and re.search(r"\d", hay):
@@ -1767,12 +1838,15 @@ def scan() -> int:
     for st in series:
         try:
             print(f"Fetching markets for series={st} (close_window_enabled={close_window_enabled})")
+            use_api_bounds = api_close_filter and not (no_filters or debug_wide_scan or lookahead_hours <= 0)
+            api_min = min_close_ts_effective if use_api_bounds else None
+            api_max = max_close_ts_effective if use_api_bounds else None
             markets = list_markets_for_series(
                 session,
                 st,
                 status="",
-                min_close_ts=None,
-                max_close_ts=None,
+                min_close_ts=api_min,
+                max_close_ts=api_max,
                 mve_filter=mve_filter,
             )
         except Exception as exc:
