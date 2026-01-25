@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dump Kalshi series metadata to JSON for inspection."""
+"""Dump Kalshi markets metadata to JSON for inspection."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from kalshi_inspect import KalshiClient, paginate
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dump Kalshi series metadata to JSON.")
-    parser.add_argument("--category", default="", help="Optional Kalshi category filter (e.g. Weather, Sports)")
-    parser.add_argument("--status", default="", help="Optional series status filter (e.g. active, open)")
-    parser.add_argument("--limit", type=int, default=2000, help="Max number of series to fetch")
+    parser = argparse.ArgumentParser(description="Dump Kalshi markets metadata to JSON.")
+    parser.add_argument("--series-ticker", default="", help="Optional series ticker filter")
+    parser.add_argument("--status", default="", help="Optional market status filter (e.g. open)")
+    parser.add_argument("--limit", type=int, default=2000, help="Max number of markets to fetch")
     parser.add_argument("--out-json", required=True, help="Path to write JSON output")
     return parser.parse_args()
 
@@ -35,7 +35,7 @@ def api_error_message(pages: List[Dict[str, Any]], last_response: Optional[Dict[
             if isinstance(last_response, dict):
                 snippet = json.dumps(last_response, ensure_ascii=False)[:800]
             return (
-                "Kalshi /series request failed. "
+                "Kalshi /markets request failed. "
                 f"status={status} params={page.get('params')} response_snippet={snippet}"
             )
     return None
@@ -49,17 +49,17 @@ def main() -> int:
         return 2
 
     limit = max(0, int(args.limit))
-    category = args.category.strip()
+    series_ticker = args.series_ticker.strip()
     status = args.status.strip()
 
     params: Dict[str, Any] = {"limit": min(limit, 1000)}
-    if category:
-        params["category"] = category
+    if series_ticker:
+        params["series_ticker"] = series_ticker
     if status:
         params["status"] = status
 
     client = KalshiClient.from_env()
-    series, meta, last = paginate(client, "/series", "series", params, hard_limit=limit)
+    markets, meta, last = paginate(client, "/markets", "markets", params, hard_limit=limit)
 
     pages = meta.get("pages", []) if isinstance(meta, dict) else []
     last_response = last[0] if isinstance(last, list) and last else {}
@@ -70,23 +70,23 @@ def main() -> int:
 
     payload = {
         "meta": {
-            "endpoint": "/series",
+            "endpoint": "/markets",
             "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
-            "category": category or None,
+            "series_ticker": series_ticker or None,
             "status": status or None,
             "limit": limit,
-            "count": len(series),
+            "count": len(markets),
         },
-        "items": series,
+        "items": markets,
     }
 
     ensure_parent_dir(args.out_json)
     with open(args.out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    print("[kalshi] series dump complete")
-    print(f"category={category}")
-    print(f"count={len(series)}")
+    print("[kalshi] markets dump complete")
+    print(f"series_ticker={series_ticker}")
+    print(f"count={len(markets)}")
     print(f"output={args.out_json}")
 
     return 0
