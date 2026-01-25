@@ -89,7 +89,7 @@ Workflow: `.github/workflows/kalshi_sports_value.yml`
 Secrets used:
 - `THE_ODDS_API` (or `ODDS_API_KEY`)
 - `DISCORD_WEBHOOK_URL` (or `DISCORD_SPORTS_ALERT`)
-- `KALSHI_KEY_ID` (Kalshi API key id)
+- `KALSHI_API_KEY_ID` (Kalshi API key id)
 - `KALSHI_PRIVATE_KEY` (Kalshi RSA private key PEM)
 
 Optional:
@@ -113,7 +113,7 @@ Inputs:
 - `series_limit` (default `2000`): maximum series to fetch
 
 Secrets used:
-- `KALSHI_KEY_ID` (or `KALSHI_API_KEY_ID`)
+- `KALSHI_API_KEY_ID` (or `KALSHI_KEY_ID`)
 - `KALSHI_PRIVATE_KEY`
 
 Optional:
