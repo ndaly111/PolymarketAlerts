@@ -1,0 +1,93 @@
+name: Kalshi dump (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: "Endpoint to dump"
+        required: true
+        type: choice
+        options:
+          - series
+          - markets
+      category:
+        description: "Optional category filter for /series"
+        required: false
+        type: string
+      series_ticker:
+        description: "Optional series ticker for /markets"
+        required: false
+        type: string
+      status:
+        description: "Optional status filter"
+        required: false
+        type: string
+      limit:
+        description: "Max items to fetch"
+        required: false
+        default: "2000"
+        type: string
+      out_name:
+        description: "Output filename prefix"
+        required: false
+        default: "kalshi-dump"
+        type: string
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+
+      - name: Run dump
+        id: run_dump
+        shell: bash
+        run: |
+          set -e
+          out_dir="weather/outputs/kalshi"
+          mkdir -p "$out_dir"
+          out_name="${{ inputs.out_name }}"
+          if [[ -z "$out_name" ]]; then
+            out_name="kalshi-dump"
+          fi
+
+          case "${{ inputs.endpoint }}" in
+            series)
+              out_json="$out_dir/${out_name}_series.json"
+              cmd=(python kalshi_dump_series.py --limit "${{ inputs.limit }}" --out-json "$out_json")
+              if [[ -n "${{ inputs.category }}" ]]; then
+                cmd+=(--category "${{ inputs.category }}")
+              fi
+              if [[ -n "${{ inputs.status }}" ]]; then
+                cmd+=(--status "${{ inputs.status }}")
+              fi
+              ;;
+            markets)
+              out_json="$out_dir/${out_name}_markets.json"
+              cmd=(python kalshi_dump_markets.py --limit "${{ inputs.limit }}" --out-json "$out_json")
+              if [[ -n "${{ inputs.series_ticker }}" ]]; then
+                cmd+=(--series-ticker "${{ inputs.series_ticker }}")
+              fi
+              if [[ -n "${{ inputs.status }}" ]]; then
+                cmd+=(--status "${{ inputs.status }}")
+              fi
+              ;;
+            *)
+              echo "Unknown endpoint: ${{ inputs.endpoint }}"
+              exit 2
+              ;;
+          esac
+
+          echo "Running: ${cmd[*]}"
+          "${cmd[@]}"
+          echo "out_json=$out_json" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kalshi-dump
+          path: weather/outputs/kalshi
