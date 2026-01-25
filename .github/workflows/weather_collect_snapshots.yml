@@ -1,28 +1,22 @@
-name: Weather - Collect Forecast Snapshots (Canonical 04:00 Local)
+name: Weather - Collect Forecast Snapshots
 
 on:
   workflow_dispatch:
     inputs:
-      no_gate:
-        description: "Skip time gate (collect now regardless of local hour)"
+      overwrite:
+        description: "Overwrite existing snapshots for today"
         required: false
         default: "false"
         type: boolean
   schedule:
-    # Cron is UTC. Trigger at 04:00 local across ET/CT/MT/PT for DST + standard time.
-    # ET: 08–09 UTC, CT: 09–10 UTC, MT: 10–11 UTC, PT: 11–12 UTC.
-    - cron: "0 8 * * *"
+    # Run at 9 UTC (~4-5 AM ET depending on DST)
+    # Using --skip-if-date-exists makes this idempotent
     - cron: "0 9 * * *"
-    - cron: "0 10 * * *"
-    - cron: "0 11 * * *"
-    - cron: "0 12 * * *"
 
 permissions:
   contents: write
 
 concurrency:
-  # Canonical data builder: do NOT cancel in-progress runs or we can miss
-  # the 04:00 local window for some cities.
   group: weather-collect-snapshots
   cancel-in-progress: false
 
@@ -34,10 +28,6 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
-      # Canonical snapshot hour (local per city)
-      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
-      WEATHER_SNAPSHOT_MINUTE_MAX: "59"
-      WEATHER_SNAPSHOT_LATE_WINDOW_HOURS: "3"
       NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
 
     steps:
@@ -53,28 +43,16 @@ jobs:
           python-version: "3.11"
           install-root-requirements: "true"
 
-      - name: Collect canonical snapshots
+      - name: Collect forecast snapshots
         shell: bash
         run: |
           set -e
-          EXTRA_ARGS=""
-          if [[ "${{ github.event.inputs.no_gate }}" == "true" ]]; then
-            EXTRA_ARGS="--no-gate"
+          ARGS="--no-gate --skip-if-date-exists --use-local-hour"
+          if [[ "${{ github.event.inputs.overwrite }}" == "true" ]]; then
+            ARGS="--no-gate --overwrite --use-local-hour"
           fi
-          python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH" $EXTRA_ARGS
-
-      - name: Snapshot coverage summary (non-blocking)
-        continue-on-error: true
-        shell: bash
-        run: |
-          export TZ=America/New_York
-          python weather/scripts/check_forecast_snapshot_freshness.py \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --target-date "$(date +%F)" \
-            --min-pct 0.0 \
-            --min-count 0 \
-            --db "$WEATHER_DB_PATH"
+          echo "Running: python -m weather.scripts.collect_forecast_snapshot --db $WEATHER_DB_PATH $ARGS"
+          python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH" $ARGS
 
       - name: Commit DB (if changed)
         shell: bash
@@ -84,17 +62,12 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add "$WEATHER_DB_PATH"
-            git commit -m "weather: collect canonical forecast snapshots"
-            ok=0
+            git commit -m "weather: collect forecast snapshots"
             for i in 1 2 3; do
-              git pull --rebase && git push && ok=1 && break
-              echo "Push failed (attempt $i). Retrying..."
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
               sleep 2
             done
-            if [[ "$ok" != "1" ]]; then
-              echo "WARN: Could not push snapshots after 3 attempts."
-              exit 1
-            fi
           else
             echo "No DB changes to commit."
           fi
