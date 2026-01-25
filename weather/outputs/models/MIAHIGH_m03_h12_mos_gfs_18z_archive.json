@@ -1,0 +1,36 @@
+{
+  "city_key": "MIAHIGH",
+  "forecast_source": "mos_gfs_18z_archive",
+  "month": 3,
+  "n_samples": 93,
+  "pmf_error": {
+    "-1": 0.17346639572063954,
+    "-2": 0.10802067694861955,
+    "-3": 0.050854862739098707,
+    "-4": 0.01810056495861806,
+    "-5": 0.00487063770399924,
+    "0": 0.21059975766041467,
+    "1": 0.19330114718454178,
+    "2": 0.13413590626810576,
+    "3": 0.07037035084947404,
+    "4": 0.027910552709170377,
+    "5": 0.008369147257318046
+  },
+  "pmf_support": {
+    "count": 11,
+    "max": 5,
+    "min": -5
+  },
+  "smoothing": {
+    "error_mean": 0.1935483870967742,
+    "error_std": 1.8908839857745607,
+    "gaussian_mix": 1.0,
+    "gaussian_support_std": null,
+    "laplace_alpha": 0.0,
+    "min_tail_prob": 0.01,
+    "pure_gaussian": true,
+    "use_tail_cutoff": true
+  },
+  "snapshot_hour_local": 12,
+  "updated_at_utc": "2026-01-25T23:49:18.594736+00:00"
+}

@@ -1,0 +1,36 @@
+{
+  "city_key": "LAXHIGH",
+  "forecast_source": "mos_gfs_18z_archive",
+  "month": 6,
+  "n_samples": 90,
+  "pmf_error": {
+    "-1": 0.1883639719855117,
+    "-2": 0.10940743617926467,
+    "-3": 0.04535691400004541,
+    "-4": 0.013421090706554915,
+    "-5": 0.0028345216651170587,
+    "0": 0.23147095017928482,
+    "1": 0.20302186130390396,
+    "2": 0.1270974308202814,
+    "3": 0.056790853323124696,
+    "4": 0.018112052689443166,
+    "5": 0.004122917147468248
+  },
+  "pmf_support": {
+    "count": 11,
+    "max": 5,
+    "min": -5
+  },
+  "smoothing": {
+    "error_mean": 0.1111111111111111,
+    "error_std": 1.7220430014274997,
+    "gaussian_mix": 1.0,
+    "gaussian_support_std": null,
+    "laplace_alpha": 0.0,
+    "min_tail_prob": 0.01,
+    "pure_gaussian": true,
+    "use_tail_cutoff": true
+  },
+  "snapshot_hour_local": 12,
+  "updated_at_utc": "2026-01-25T23:49:18.594736+00:00"
+}
