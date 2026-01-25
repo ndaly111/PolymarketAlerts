@@ -90,6 +90,74 @@ def _gaussian_pmf_int_support(mean: float, std: float, support_std: float) -> Di
     return {k: v / z for k, v in out.items()}
 
 
+def _gaussian_pmf_with_tail_cutoff(
+    mean: float, std: float, min_tail_prob: float = 0.01
+) -> Dict[int, float]:
+    """
+    Build a discrete Gaussian PMF extending tails until cumulative probability < min_tail_prob.
+
+    This creates a smooth distribution centered on `mean` with spread `std`, extending
+    in 1-degree increments in each direction until the tail probability drops below
+    the threshold (default 1%).
+
+    Args:
+        mean: Center of the distribution (typically 0 for error model)
+        std: Standard deviation
+        min_tail_prob: Stop extending when tail cumulative prob < this (default 0.01 = 1%)
+
+    Returns:
+        Normalized PMF as {int_value: probability}
+    """
+    if std <= 0:
+        return {int(round(mean)): 1.0}
+
+    # Start from the mean and extend outward
+    center = int(round(mean))
+    denom = 2.0 * (std ** 2)
+
+    def gaussian_density(k: int) -> float:
+        return math.exp(-((float(k) - mean) ** 2) / denom)
+
+    # Build PMF by extending in both directions until tails are < min_tail_prob
+    out: Dict[int, float] = {center: gaussian_density(center)}
+
+    # Extend left (lower temperatures)
+    k = center - 1
+    cumulative_left = 0.0
+    while True:
+        density = gaussian_density(k)
+        out[k] = density
+        # Normalize temporarily to check tail probability
+        total = sum(out.values())
+        cumulative_left = sum(out[j] for j in out if j <= k) / total
+        if cumulative_left < min_tail_prob:
+            break
+        k -= 1
+        # Safety limit
+        if k < center - 50:
+            break
+
+    # Extend right (higher temperatures)
+    k = center + 1
+    cumulative_right = 0.0
+    while True:
+        density = gaussian_density(k)
+        out[k] = density
+        # Normalize temporarily to check tail probability
+        total = sum(out.values())
+        cumulative_right = sum(out[j] for j in out if j >= k) / total
+        if cumulative_right < min_tail_prob:
+            break
+        k += 1
+        # Safety limit
+        if k > center + 50:
+            break
+
+    # Final normalization
+    total = sum(out.values())
+    return {k: v / total for k, v in sorted(out.items())}
+
+
 def _mix_pmfs(pmf_a: Dict[int, float], pmf_b: Dict[int, float], mix_b: float) -> Dict[int, float]:
     """Return (1-mix_b)*A + mix_b*B over union support, normalized."""
     w = _clamp(mix_b, 0.0, 1.0)
@@ -136,7 +204,25 @@ def main() -> int:
         "--gaussian-support-std",
         type=float,
         default=float(os.getenv("WEATHER_ERROR_GAUSS_SUPPORT_STD", "4")),
-        help="Gaussian PMF support width in std devs (e.g., 4).",
+        help="Gaussian PMF support width in std devs (e.g., 4). Ignored if --use-tail-cutoff.",
+    )
+    p.add_argument(
+        "--use-tail-cutoff",
+        action="store_true",
+        default=os.getenv("WEATHER_ERROR_USE_TAIL_CUTOFF", "").lower() in ("1", "true", "yes"),
+        help="Use tail probability cutoff instead of fixed std range for Gaussian smoothing.",
+    )
+    p.add_argument(
+        "--min-tail-prob",
+        type=float,
+        default=float(os.getenv("WEATHER_ERROR_MIN_TAIL_PROB", "0.01")),
+        help="Minimum tail probability (default 0.01 = 1%%). Extend until tail < this.",
+    )
+    p.add_argument(
+        "--pure-gaussian",
+        action="store_true",
+        default=os.getenv("WEATHER_ERROR_PURE_GAUSSIAN", "").lower() in ("1", "true", "yes"),
+        help="Use pure Gaussian distribution (no empirical mixing). Fits mean/std from data.",
     )
     args = p.parse_args()
 
@@ -149,6 +235,15 @@ def main() -> int:
     wrote = 0
     gauss_mix = _clamp(float(args.gaussian_mix), 0.0, 1.0)
     gauss_support_std = _clamp(float(args.gaussian_support_std), 1.0, 12.0)
+    use_tail_cutoff = bool(args.use_tail_cutoff)
+    min_tail_prob = _clamp(float(args.min_tail_prob), 0.001, 0.1)
+    pure_gaussian = bool(args.pure_gaussian)
+
+    # Pure Gaussian mode overrides mixing settings
+    if pure_gaussian:
+        gauss_mix = 1.0
+        use_tail_cutoff = True
+        print(f"[info] Pure Gaussian mode: using fitted Gaussian with tail cutoff at {min_tail_prob:.1%}")
 
     for city in city_keys:
         for month in range(1, 13):
@@ -165,10 +260,21 @@ def main() -> int:
             if not pmf_emp:
                 continue
             mu, sigma = _moments_from_counts(counts)
-            pmf = pmf_emp
-            if gauss_mix > 0.0:
-                pmf_g = _gaussian_pmf_int_support(mu, sigma, support_std=gauss_support_std)
+
+            # Build the final PMF based on smoothing settings
+            if pure_gaussian:
+                # Pure Gaussian: ignore empirical, just use fitted distribution
+                pmf = _gaussian_pmf_with_tail_cutoff(mu, sigma, min_tail_prob=min_tail_prob)
+            elif gauss_mix > 0.0:
+                # Hybrid: mix empirical with Gaussian
+                if use_tail_cutoff:
+                    pmf_g = _gaussian_pmf_with_tail_cutoff(mu, sigma, min_tail_prob=min_tail_prob)
+                else:
+                    pmf_g = _gaussian_pmf_int_support(mu, sigma, support_std=gauss_support_std)
                 pmf = _mix_pmfs(pmf_emp, pmf_g, mix_b=gauss_mix)
+            else:
+                # Pure empirical
+                pmf = pmf_emp
             if not pmf:
                 continue
 
@@ -190,13 +296,17 @@ def main() -> int:
                 "forecast_source": str(args.forecast_source),
                 "n_samples": n,
                 "smoothing": {
-                    "laplace_alpha": float(args.laplace),
+                    "pure_gaussian": pure_gaussian,
+                    "laplace_alpha": float(args.laplace) if not pure_gaussian else 0.0,
                     "gaussian_mix": float(gauss_mix),
-                    "gaussian_support_std": float(gauss_support_std),
+                    "use_tail_cutoff": use_tail_cutoff,
+                    "min_tail_prob": float(min_tail_prob) if use_tail_cutoff else None,
+                    "gaussian_support_std": float(gauss_support_std) if not use_tail_cutoff else None,
                     "error_mean": float(mu),
                     "error_std": float(sigma),
                 },
-                "pmf_error": {str(k): v for k, v in pmf.items()},
+                "pmf_error": {str(k): v for k, v in sorted(pmf.items())},
+                "pmf_support": {"min": min(pmf.keys()), "max": max(pmf.keys()), "count": len(pmf)},
                 "updated_at_utc": updated,
             }
             source_slug = str(args.forecast_source).replace("/", "_")
