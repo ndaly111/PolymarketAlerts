@@ -189,6 +189,7 @@ jobs:
             --db "$WEATHER_DB_PATH"
 
       - name: Collect Kalshi weather markets
+        id: kalshi_markets
         if: steps.gate.outputs.run == 'true'
         env:
           KALSHI_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
@@ -197,13 +198,26 @@ jobs:
           WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
         run: |
           set -euo pipefail
+          mkdir -p weather/outputs
           python -m weather.scripts.collect_kalshi_weather_markets \
             --series-tickers "${WEATHER_KALSHI_SERIES_TICKERS}" \
             --require-city-match \
-            --db "$WEATHER_DB_PATH"
+            --db "$WEATHER_DB_PATH" \
+            --out-json weather/outputs/kalshi_collect.json
+          python - <<'PY'
+          import json
+          import os
+
+          path = "weather/outputs/kalshi_collect.json"
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+          ok = "true" if data.get("rows_written", 0) > 0 else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"ok={ok}\n")
+          PY
 
       - name: Compute edges
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.kalshi_markets.outputs.ok == 'true'
         env:
           WEATHER_DEBUG: ${{ steps.mode.outputs.debug }}
         run: |
@@ -226,7 +240,7 @@ jobs:
             ${REQUIRE_ASK}
 
       - name: Post edges to Discord
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' && steps.kalshi_markets.outputs.ok == 'true'
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
