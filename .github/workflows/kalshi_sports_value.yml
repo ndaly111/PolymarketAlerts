@@ -2,9 +2,8 @@ name: Kalshi vs Sportsbook - Lines Value Scan
 
 on:
   schedule:
-    # 6:05 AM America/New_York year-round (DST-safe via dual cron + gate)
-    - cron: "5 10 * * *"  # 6:05 AM EDT
-    - cron: "5 11 * * *"  # 6:05 AM EST
+    # Hourly scan
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -80,6 +79,10 @@ on:
         options: ["0", "1"]
         default: "0"
 
+concurrency:
+  group: kalshi-sports-value
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -98,32 +101,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install -q requests cryptography python-dateutil
 
-      - name: Gate schedule to 6:05 AM America/New_York
-        id: gate
-        if: github.event_name == 'schedule'
-        run: |
-          python - <<'PY'
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-          import os
-
-          ny = ZoneInfo("America/New_York")
-          now = datetime.now(tz=ny)
-          should_run = (now.hour == 6 and 5 <= now.minute < 15)
-
-          out = os.environ.get("GITHUB_OUTPUT")
-          if out:
-              with open(out, "a", encoding="utf-8") as f:
-                  f.write(f"run={'true' if should_run else 'false'}\n")
-          else:
-              print("WARNING: GITHUB_OUTPUT not set; cannot emit step output.")
-
-          print("NY time:", now.isoformat())
-          print("Gate decision:", should_run)
-          PY
-
       - name: Run Kalshi scan
-        if: github.event_name != 'schedule' || steps.gate.outputs.run == 'true'
         env:
           THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
