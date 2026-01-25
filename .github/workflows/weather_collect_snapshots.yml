@@ -1,6 +1,13 @@
 name: Weather - Collect Forecast Snapshots (Canonical 04:00 Local)
 
 on:
+  workflow_dispatch:
+    inputs:
+      no_gate:
+        description: "Skip time gate (collect now regardless of local hour)"
+        required: false
+        default: "false"
+        type: boolean
   schedule:
     # Cron is UTC. Trigger at 04:00 local across ET/CT/MT/PT for DST + standard time.
     # ET: 08–09 UTC, CT: 09–10 UTC, MT: 10–11 UTC, PT: 11–12 UTC.
@@ -50,7 +57,11 @@ jobs:
         shell: bash
         run: |
           set -e
-          python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH"
+          EXTRA_ARGS=""
+          if [[ "${{ github.event.inputs.no_gate }}" == "true" ]]; then
+            EXTRA_ARGS="--no-gate"
+          fi
+          python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH" $EXTRA_ARGS
 
       - name: Snapshot coverage summary (non-blocking)
         continue-on-error: true
