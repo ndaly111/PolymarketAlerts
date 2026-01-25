@@ -16,6 +16,11 @@ ODDS_SPORT_KEY_TO_PREFIX: Dict[str, str] = {
     "basketball_ncaab": "ncaab",
 }
 
+# Kalshi uses slightly different sport prefixes for some leagues.
+KALSHI_SPORT_PREFIX_ALIASES: Dict[str, str] = {
+    "ncaab": "ncaamb",
+}
+
 # Fix known ID mismatches between Odds and Kalshi caches
 ODDS_TO_KALSHI_ID: Dict[str, Dict[str, str]] = {
     "mlb": {"ath": "a", "chw": "cws", "wsh": "was"},
@@ -85,13 +90,32 @@ def _to_kalshi_id(sport_prefix: str, raw_id: str) -> str:
     return overrides.get(raw_id, raw_id)
 
 
+def _kalshi_sport_prefix(sport_prefix: str) -> str:
+    return KALSHI_SPORT_PREFIX_ALIASES.get(sport_prefix, sport_prefix)
+
+
+def _kalshi_slug_lookup(sport_prefix: str, slug: str, kalshi_map: Dict[str, str]) -> Optional[str]:
+    if not slug:
+        return None
+    pref = _kalshi_sport_prefix(sport_prefix)
+    candidates = [slug, slug.replace("_", "")]
+    parts = [p for p in slug.split("_") if p]
+    if parts:
+        candidates.append(parts[-1])
+    if len(parts) >= 2:
+        candidates.append("_".join(parts[-2:]))
+    for c in candidates:
+        v = kalshi_map.get(f"{pref}:{c}")
+        if v:
+            return v
+    return None
+
+
 def odds_team_id(sport_key: Optional[str], team_name: Optional[str]) -> Optional[str]:
     sport = sport_prefix_from_odds_key(sport_key)
     if not sport:
         return None
-    _, odds_map = load_team_maps()
-    if not odds_map:
-        return None
+    kalshi_map, odds_map = load_team_maps()
     slug = slugify(team_name)
     if not slug:
         return None
@@ -108,6 +132,18 @@ def odds_team_id(sport_key: Optional[str], team_name: Optional[str]) -> Optional
         v = odds_map.get(f"{sport}:{slug3}")
         if v:
             return _to_kalshi_id(sport, v)
+    if kalshi_map:
+        v = _kalshi_slug_lookup(sport, slug, kalshi_map)
+        if v:
+            return v
+        if slug2 != slug:
+            v = _kalshi_slug_lookup(sport, slug2, kalshi_map)
+            if v:
+                return v
+        if slug3 != slug:
+            v = _kalshi_slug_lookup(sport, slug3, kalshi_map)
+            if v:
+                return v
     return None
 
 
@@ -138,16 +174,9 @@ def kalshi_team_id(sport_prefix: str, team_text: Optional[str]) -> Optional[str]
     if sport_prefix == "mlb" and slug == "as":
         return "a"
 
-    candidates = [slug, slug.replace("_", "")]
-    parts = [p for p in slug.split("_") if p]
-    if parts:
-        candidates.append(parts[-1])
-    if len(parts) >= 2:
-        candidates.append("_".join(parts[-2:]))
-    for c in candidates:
-        v = kalshi_map.get(f"{sport_prefix}:{c}")
-        if v:
-            return v
+    v = _kalshi_slug_lookup(sport_prefix, slug, kalshi_map)
+    if v:
+        return v
     if odds_map:
         inferred = _substring_odds_id(sport_prefix, slug, odds_map)
         if inferred:
