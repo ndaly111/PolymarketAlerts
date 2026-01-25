@@ -197,13 +197,18 @@ def format_city_message(
     for m in markets:
         raw = m.get("raw") if isinstance(m.get("raw"), dict) else {}
         title = _market_title_from_raw(raw) or m.get("market_ticker") or "Unknown"
+        market_ticker = m.get("market_ticker") or ""
+
+        # Strip markdown formatting from title before parsing
+        clean_title = title.replace("**", "").replace("*", "")
 
         # Parse event spec from title
-        spec = parse_event_spec_from_title(title)
+        spec = parse_event_spec_from_title(clean_title)
         if not spec:
             # Still show unparseable markets in debug mode
             market_rows.append({
-                "event_str": title[:30] + "..." if len(title) > 30 else title,
+                "event_str": clean_title[:30] + "..." if len(clean_title) > 30 else clean_title,
+                "market_ticker": market_ticker,
                 "q": None,
                 "best_side": None,
                 "best_ev": None,
@@ -221,10 +226,8 @@ def format_city_message(
         # Get prices from snapshot row
         yes_bid, yes_ask, no_bid, no_ask = best_bid_ask_from_snapshot_row(m)
 
-        # Calculate fair probability
-        q = prob_event(pmf, spec)
-        if q is None or q == 0.0:
-            q = 0.5  # Default if outside support
+        # Calculate fair probability (use actual model value, even if 0%)
+        q = prob_event(pmf, spec) or 0.0
 
         # Calculate EV for both sides
         ev_y = ev_yes(q, yes_ask / 100.0, fee_open) if yes_ask else None
@@ -246,6 +249,7 @@ def format_city_message(
 
         market_rows.append({
             "event_str": event_str,
+            "market_ticker": market_ticker,
             "q": q,
             "best_side": best_side,
             "best_ev": best_ev,
@@ -262,6 +266,7 @@ def format_city_message(
 
     for row in market_rows:
         event_str = row["event_str"]
+        market_ticker = row.get("market_ticker", "")
         q = row["q"]
         best_side = row["best_side"]
         best_ev = row["best_ev"]
@@ -277,12 +282,16 @@ def format_city_message(
                 lines.append(f"  YES: {yes_ask}¢")
             if no_ask is not None:
                 lines.append(f"  NO: {no_ask}¢")
+            if market_ticker:
+                lines.append(f"  `{market_ticker}`")
             lines.append("")
             continue
 
         if best_ev is None:
             lines.append(f"⚫ **{event_str}** (no price)")
             lines.append(f"  Fair: {q*100:.1f}%")
+            if market_ticker:
+                lines.append(f"  `{market_ticker}`")
             lines.append("")
             continue
 
@@ -312,6 +321,9 @@ def format_city_message(
         elif best_side == "NO" and no_bid is not None and no_ask is not None:
             spread = no_ask - no_bid
             lines.append(f"  Spread: {spread}¢ (bid {no_bid}¢ / ask {no_ask}¢)")
+
+        if market_ticker:
+            lines.append(f"  `{market_ticker}`")
 
         lines.append("")
 
