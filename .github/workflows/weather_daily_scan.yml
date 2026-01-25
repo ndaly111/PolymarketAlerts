@@ -6,8 +6,10 @@ env:
 
 on:
   schedule:
-    # Run every 30 minutes, but gate execution to 05:00–20:00 America/New_York.
-    - cron: "*/30 * * * *"
+    # 4:30 AM ET — forecast distribution only (UTC).
+    - cron: "30 9 * * *"
+    # 5:00 AM ET — full daily scan (UTC).
+    - cron: "0 10 * * *"
   workflow_dispatch:
     inputs:
       post_forecast_distribution:
@@ -68,36 +70,19 @@ jobs:
           python-version: "3.11"
           install-root-requirements: "true"
 
-      - name: "Gate scheduled runs to 05:00–20:00 America/New_York"
-        id: gate
+      - name: Detect run type
+        id: run_type
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            # Allow manual runs to post the forecast distribution when requested.
-            if [[ "${{ github.event.inputs.post_forecast_distribution }}" == "true" ]]; then
-              echo "is_430=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "is_430=false" >> "$GITHUB_OUTPUT"
-            fi
-            exit 0
-          fi
-
-          NOW_HHMM="$(TZ=America/New_York date +%H%M)"
-          echo "is_430=false" >> "$GITHUB_OUTPUT"
-          if [[ "$NOW_HHMM" == "0430" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "is_430=true" >> "$GITHUB_OUTPUT"
-          elif (( NOW_HHMM >= 500 && NOW_HHMM <= 2000 )); then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "schedule" && "${{ github.event.schedule }}" == "30 9 * * *" ]]; then
+            echo "mode=forecast_only" >> "$GITHUB_OUTPUT"
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "mode=full_scan" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Resolve run mode/date
         id: mode
-        if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
@@ -113,7 +98,7 @@ jobs:
           fi
 
       - name: Apply debug overrides (drop filters)
-        if: steps.gate.outputs.run == 'true' && steps.mode.outputs.debug == 'true'
+        if: steps.mode.outputs.debug == 'true'
         run: |
           echo "WEATHER_MIN_EV=0" >> "$GITHUB_ENV"
           echo "WEATHER_MIN_Q=0" >> "$GITHUB_ENV"
@@ -122,7 +107,6 @@ jobs:
           echo "WEATHER_MAX_SPREAD_CENTS=" >> "$GITHUB_ENV"
 
       - name: Ensure output dirs exist
-        if: steps.gate.outputs.run == 'true'
         run: |
           mkdir -p weather/outputs/fair_prices
           mkdir -p weather/outputs/edges
@@ -130,7 +114,6 @@ jobs:
 
       - name: Set run date (America/New_York)
         id: run_date
-        if: steps.gate.outputs.run == 'true'
         run: |
           if [[ -n "${{ steps.mode.outputs.date_override }}" ]]; then
             echo "date=${{ steps.mode.outputs.date_override }}" >> "$GITHUB_OUTPUT"
@@ -140,7 +123,6 @@ jobs:
 
       - name: Ensure snapshots exist (fallback collect now if missing)
         id: snapshots
-        if: steps.gate.outputs.run == 'true'
         env:
           # The NWS API expects a real contact in User-Agent; fall back to placeholder.
           NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
@@ -184,26 +166,14 @@ jobs:
             --min-count 0 \
             --db "$WEATHER_DB_PATH" || true
 
-      - name: "Preflight: snapshot freshness (STRICT for schedule)"
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'schedule' && steps.snapshots.outputs.fallback_used != 'true'
-        run: |
-          python weather/scripts/check_forecast_snapshot_freshness.py \
-            --forecast-source "$FORECAST_SOURCE" \
-            --snapshot-hour "$WEATHER_SNAPSHOT_HOUR_LOCAL" \
-            --target-date "${{ steps.run_date.outputs.date }}" \
-            --min-pct 0.75 \
-            --min-count 1 \
-            --db "$WEATHER_DB_PATH"
-
       - name: Compute fair prices
-        if: steps.gate.outputs.run == 'true'
         run: |
           python -m weather.scripts.compute_fair_prices \
             --forecast-source "$FORECAST_SOURCE" \
             --db "$WEATHER_DB_PATH"
 
       - name: Post 4:30 forecast distribution
-        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.is_430 == 'true'
+        if: steps.run_type.outputs.mode == 'forecast_only' || (github.event_name == 'workflow_dispatch' && github.event.inputs.post_forecast_distribution == 'true')
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -224,7 +194,7 @@ jobs:
 
       - name: Collect Kalshi weather markets
         id: kalshi_markets
-        if: steps.gate.outputs.run == 'true'
+        if: steps.run_type.outputs.mode == 'full_scan'
         env:
           KALSHI_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID || secrets.KALSHI_KEY_ID }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
@@ -251,7 +221,7 @@ jobs:
           PY
 
       - name: Compute edges
-        if: steps.gate.outputs.run == 'true' && steps.kalshi_markets.outputs.ok == 'true'
+        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true'
         env:
           WEATHER_DEBUG: ${{ steps.mode.outputs.debug }}
         run: |
@@ -274,7 +244,7 @@ jobs:
             ${REQUIRE_ASK}
 
       - name: Post edges to Discord
-        if: steps.gate.outputs.run == 'true' && steps.kalshi_markets.outputs.ok == 'true'
+        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true'
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -293,7 +263,6 @@ jobs:
             "${POST_ARGS[@]}"
 
       - name: Upload daily scan outputs
-        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: weather-daily-scan

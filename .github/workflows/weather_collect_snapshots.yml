@@ -2,11 +2,13 @@ name: Weather - Collect Forecast Snapshots (Canonical 04:00 Local)
 
 on:
   schedule:
-    # Cron is UTC. Run in a window that safely covers 04:00 local
-    # for ET/CT/MT/PT across DST changes.
-    # (ET 04:00 is ~08–09 UTC; PT 04:00 is ~11–12 UTC, depending on DST)
-    # Run frequently so we don't miss 04:00 local if a run is delayed.
-    - cron: "*/10 7-15 * * *"
+    # Cron is UTC. Trigger at 04:00 local across ET/CT/MT/PT for DST + standard time.
+    # ET: 08–09 UTC, CT: 09–10 UTC, MT: 10–11 UTC, PT: 11–12 UTC.
+    - cron: "0 8 * * *"
+    - cron: "0 9 * * *"
+    - cron: "0 10 * * *"
+    - cron: "0 11 * * *"
+    - cron: "0 12 * * *"
 
 permissions:
   contents: write

@@ -2,8 +2,8 @@ name: Polymarket Watch (neobrother)
 
 on:
   schedule:
-    # every 15 minutes
-    - cron: "*/15 * * * *"
+    # Every 15 minutes.
+    - cron: "0,15,30,45 * * * *"
   workflow_dispatch:
 
 concurrency:
