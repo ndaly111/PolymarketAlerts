@@ -262,8 +262,7 @@ def _kalshi_base_url() -> str:
 
 @lru_cache(maxsize=1)
 def _kalshi_private_key():
-    pem = os.getenv("KALSHI_PRIVATE_KEY") or ""
-    pem = pem.strip()
+    pem = (os.getenv("KALSHI_PRIVATE_KEY") or "").strip()
     if not pem:
         raise RuntimeError("Missing KALSHI_PRIVATE_KEY (PEM).")
     return serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
@@ -275,9 +274,9 @@ def _kalshi_signed_headers(method: str, full_path: str) -> Dict[str, str]:
       message = timestamp_ms + method + path
       headers: KALSHI-ACCESS-KEY, KALSHI-ACCESS-SIGNATURE, KALSHI-ACCESS-TIMESTAMP
     """
-    key_id = (os.getenv("KALSHI_KEY_ID") or os.getenv("KALSHI_API_KEY_ID") or "").strip()
+    key_id = (os.getenv("KALSHI_API_KEY_ID") or os.getenv("KALSHI_KEY_ID") or "").strip()
     if not key_id:
-        raise RuntimeError("Missing KALSHI_KEY_ID (or KALSHI_API_KEY_ID).")
+        raise RuntimeError("Missing KALSHI_API_KEY_ID (or KALSHI_KEY_ID).")
 
     # Kalshi uses millisecond timestamps in signing examples.
     ts = str(int(time.time() * 1000))

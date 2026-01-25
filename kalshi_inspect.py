@@ -162,9 +162,9 @@ def kalshi_private_key_pem() -> str:
 
 
 def kalshi_key_id() -> str:
-    kid = env_str("KALSHI_KEY_ID", "") or env_str("KALSHI_API_KEY_ID", "")
+    kid = env_str("KALSHI_API_KEY_ID", "") or env_str("KALSHI_KEY_ID", "")
     if not kid:
-        raise RuntimeError("Missing KALSHI_KEY_ID (or KALSHI_API_KEY_ID).")
+        raise RuntimeError("Missing KALSHI_API_KEY_ID (or KALSHI_KEY_ID).")
     return kid
 
 
