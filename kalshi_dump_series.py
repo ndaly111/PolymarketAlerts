@@ -41,6 +41,15 @@ def api_error_message(pages: List[Dict[str, Any]], last_response: Optional[Dict[
     return None
 
 
+def missing_kalshi_env() -> List[str]:
+    missing: List[str] = []
+    if not os.getenv("KALSHI_PRIVATE_KEY", "").strip():
+        missing.append("KALSHI_PRIVATE_KEY")
+    if not (os.getenv("KALSHI_API_KEY_ID", "").strip() or os.getenv("KALSHI_KEY_ID", "").strip()):
+        missing.append("KALSHI_API_KEY_ID (or KALSHI_KEY_ID)")
+    return missing
+
+
 def main() -> int:
     args = parse_args()
 
@@ -57,6 +66,30 @@ def main() -> int:
         params["category"] = category
     if status:
         params["status"] = status
+
+    missing = missing_kalshi_env()
+    if missing:
+        payload = {
+            "meta": {
+                "endpoint": "/series",
+                "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+                "category": category or None,
+                "status": status or None,
+                "limit": limit,
+                "count": 0,
+                "skipped": True,
+                "skip_reason": f"Missing env vars: {', '.join(missing)}",
+            },
+            "items": [],
+        }
+        ensure_parent_dir(args.out_json)
+        with open(args.out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        print("[kalshi] series dump skipped (missing credentials)")
+        print(f"missing={', '.join(missing)}")
+        print(f"output={args.out_json}")
+        return 0
 
     client = KalshiClient.from_env()
     series, meta, last = paginate(client, "/series", "series", params, hard_limit=limit)
