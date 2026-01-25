@@ -147,7 +147,7 @@ jobs:
             echo "fallback_used=true" >> "$GITHUB_OUTPUT"
             python -m weather.scripts.collect_forecast_snapshot \
               --no-gate \
-              --skip-if-date-exists \
+              --overwrite \
               --source "$FORECAST_SOURCE" \
               --target-date "${DATE}" \
               --db "$WEATHER_DB_PATH"
