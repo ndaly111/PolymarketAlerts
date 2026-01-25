@@ -76,6 +76,8 @@ def main() -> int:
     cities = load_cities(Path(args.config))
     wrote = 0
 
+    print(f"[info] Looking for snapshots: source={args.forecast_source}, hour={snapshot_hour_local}")
+
     for c in cities:
         if args.city and c.key != args.city:
             continue
@@ -101,6 +103,7 @@ def main() -> int:
             )
             snapshot_kind = "fallback" if snap else "missing"
         if not snap:
+            print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
             continue
 
         model_source = str(args.forecast_source)

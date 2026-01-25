@@ -235,7 +235,7 @@ jobs:
             ${REQUIRE_ASK}
 
       - name: Post edges to Discord
-        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true'
+        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true' && steps.mode.outputs.debug != 'true'
         env:
           WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -248,6 +248,22 @@ jobs:
             --forecast-source "$FORECAST_SOURCE" \
             --date "${{ steps.run_date.outputs.date }}" \
             --require-edges
+
+      - name: Post ALL markets to Discord (debug mode)
+        if: steps.run_type.outputs.mode == 'full_scan' && steps.kalshi_markets.outputs.ok == 'true' && steps.mode.outputs.debug == 'true'
+        env:
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEATHER_DISCORD_WEBHOOK:-}" ]; then
+            echo "WEATHER_DISCORD_WEBHOOK secret not set; skipping Discord post."
+            exit 0
+          fi
+          python -m weather.scripts.debug_kalshi_markets \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}" \
+            --fee-cents "$WEATHER_BUY_FEE_CENTS" \
+            --db "$WEATHER_DB_PATH"
 
       - name: Upload daily scan outputs
         uses: actions/upload-artifact@v4

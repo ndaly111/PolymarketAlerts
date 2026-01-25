@@ -1,0 +1,67 @@
+name: Weather - Debug Kalshi Markets
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Target date YYYY-MM-DD (default: today)"
+        required: false
+        default: ""
+      city:
+        description: "Filter to single city key (optional)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (print only, no Discord)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: America/New_York
+      PYTHONPATH: ${{ github.workspace }}
+      FORECAST_SOURCE: nws_hourly_max
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+        with:
+          python-version: "3.11"
+          install-root-requirements: "true"
+
+      - name: Run debug script
+        env:
+          WEATHER_DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARGS="--forecast-source $FORECAST_SOURCE --db $WEATHER_DB_PATH"
+
+          if [[ -n "${{ github.event.inputs.target_date }}" ]]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.target_date }}"
+          fi
+
+          if [[ -n "${{ github.event.inputs.city }}" ]]; then
+            ARGS="$ARGS --city ${{ github.event.inputs.city }}"
+          fi
+
+          if [[ "${{ github.event.inputs.dry_run }}" == "true" ]] || [[ -z "${WEATHER_DISCORD_WEBHOOK:-}" ]]; then
+            ARGS="$ARGS --dry-run"
+            echo "Running in dry-run mode (output to stdout)"
+          fi
+
+          echo "Running: python -m weather.scripts.debug_kalshi_markets $ARGS"
+          python -m weather.scripts.debug_kalshi_markets $ARGS
