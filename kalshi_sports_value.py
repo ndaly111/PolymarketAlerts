@@ -544,6 +544,15 @@ def _has_real_bid(p: Optional[float]) -> bool:
         return False
 
 
+def _to_int(x: Any) -> Optional[int]:
+    if x is None:
+        return None
+    try:
+        return int(float(str(x).replace(",", "").strip()))
+    except Exception:
+        return None
+
+
 def best_buy_probs(market: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
     """Return (yes_buy_prob, no_buy_prob) based on ask prices.
 
@@ -593,15 +602,7 @@ def _price_to_prob(x: Any) -> Optional[float]:
         return None
 
 
-def best_buy_probs_from_orderbook(session: requests.Session, market_ticker: str) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Derive best-buy YES and NO probabilities from the CLOB (orderbook).
-    On Kalshi, the orderbook is bids for YES and bids for NO. Best-buy price for:
-      - YES is 1 - (best NO bid)
-      - NO  is 1 - (best YES bid)
-    """
-    ob = kalshi_get(session, f"/markets/{market_ticker}/orderbook", params={"depth": 1})
-
+def _extract_orderbook_levels(ob: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
     # Prefer floating-point orderbook if present.
     fp = (ob or {}).get("orderbook_fp") or {}
     yes_levels = fp.get("yes_dollars") or []
@@ -613,34 +614,103 @@ def best_buy_probs_from_orderbook(session: requests.Session, market_ticker: str)
         # Some responses include *_dollars inside `orderbook`
         yes_levels = raw.get("yes_dollars") or raw.get("yes") or []
         no_levels = raw.get("no_dollars") or raw.get("no") or []
+    return yes_levels, no_levels
 
-    def best_bid(levels: Any) -> Optional[float]:
-        """
-        Robust: docs show price levels are ordered, but we don't assume direction.
-        We take the max price level as the best bid.
-        """
-        best: Optional[float] = None
-        if not levels:
-            return None
-        for lvl in levels:
-            p = None
-            if isinstance(lvl, dict):
-                p = _price_to_prob(lvl.get("price") or lvl.get("p"))
-            elif isinstance(lvl, (list, tuple)) and len(lvl) >= 1:
+
+def _best_bid_level(levels: Any) -> Tuple[Optional[float], Optional[int]]:
+    """
+    Robust: docs show price levels are ordered, but we don't assume direction.
+    We take the max price level as the best bid, and sum quantity at that price.
+    """
+    best_price: Optional[float] = None
+    best_qty: Optional[int] = None
+    if not levels:
+        return None, None
+    for lvl in levels:
+        p: Optional[float] = None
+        qty_raw: Any = None
+        if isinstance(lvl, dict):
+            p = _price_to_prob(
+                lvl.get("price")
+                or lvl.get("p")
+                or lvl.get("price_dollars")
+                or lvl.get("price_cents")
+            )
+            qty_raw = (
+                lvl.get("quantity")
+                or lvl.get("qty")
+                or lvl.get("q")
+                or lvl.get("size")
+                or lvl.get("contracts")
+            )
+        elif isinstance(lvl, (list, tuple)):
+            if len(lvl) >= 1:
                 p = _price_to_prob(lvl[0])
-            if p is None or p <= 0.0:
-                continue
-            if best is None or p > best:
-                best = p
-        return best
+            if len(lvl) >= 2:
+                qty_raw = lvl[1]
+        if p is None or p <= 0.0:
+            continue
+        qty = _to_int(qty_raw) if qty_raw is not None else None
+        if best_price is None or p > best_price:
+            best_price = p
+            best_qty = qty
+        elif best_price is not None and abs(p - best_price) < 1e-9:
+            if best_qty is not None and qty is not None:
+                best_qty += qty
+            elif best_qty is None:
+                best_qty = None
+    return best_price, best_qty
 
-    yes_bid = best_bid(yes_levels)
-    no_bid = best_bid(no_levels)
+
+def best_buy_probs_from_orderbook(
+    session: requests.Session, market_ticker: str
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Derive best-buy YES and NO probabilities from the CLOB (orderbook).
+    On Kalshi, the orderbook is bids for YES and bids for NO. Best-buy price for:
+      - YES is 1 - (best NO bid)
+      - NO  is 1 - (best YES bid)
+    """
+    ob = kalshi_get(session, f"/markets/{market_ticker}/orderbook", params={"depth": 1})
+
+    yes_levels, no_levels = _extract_orderbook_levels(ob)
+
+    yes_bid, _yes_qty = _best_bid_level(yes_levels)
+    no_bid, _no_qty = _best_bid_level(no_levels)
 
     # Only derive an ask if the opposing bid is real; otherwise treat as unknown.
     yes_ask = (max(0.0, min(1.0, 1.0 - no_bid))) if _has_real_bid(no_bid) else None
     no_ask = (max(0.0, min(1.0, 1.0 - yes_bid))) if _has_real_bid(yes_bid) else None
     return yes_ask, no_ask
+
+
+def best_bids_from_orderbook(
+    session: requests.Session, market_ticker: str
+) -> Tuple[Optional[float], Optional[int], Optional[float], Optional[int]]:
+    """Return (yes_bid_prob, yes_bid_qty, no_bid_prob, no_bid_qty) from orderbook."""
+    ob = kalshi_get(session, f"/markets/{market_ticker}/orderbook", params={"depth": 1})
+    yes_levels, no_levels = _extract_orderbook_levels(ob or {})
+    yes_bid, yes_qty = _best_bid_level(yes_levels)
+    no_bid, no_qty = _best_bid_level(no_levels)
+    return yes_bid, yes_qty, no_bid, no_qty
+
+
+def min_edge_for_depth(
+    depth_contracts: Optional[int],
+    base_min_edge: float,
+    min_edge_thin: float,
+    min_edge_medium: float,
+    min_edge_deep: float,
+    thin_max_contracts: int,
+    medium_max_contracts: int,
+) -> float:
+    if depth_contracts is None:
+        return base_min_edge
+    if depth_contracts < thin_max_contracts:
+        return max(base_min_edge, min_edge_thin)
+    if depth_contracts < medium_max_contracts:
+        return max(base_min_edge, min_edge_medium)
+    return max(base_min_edge, min_edge_deep)
 
 
 def name_similarity(a: str, b: str) -> float:
@@ -1322,7 +1392,7 @@ def scan() -> int:
     fee_prob = fee_cents / 100.0
 
     lookahead_hours = env_int("KALSHI_LOOKAHEAD_HOURS", 72)
-    game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 24)
+    game_lookahead_hours = env_int("KALSHI_GAME_LOOKAHEAD_HOURS", 12)
     # IMPORTANT: Default min volume to 0. The GitHub workflow can (and should) set
     # a higher value via repo Variables once the pipeline is producing valid matches.
     min_volume = env_int("KALSHI_MIN_VOLUME", 0)
@@ -1344,7 +1414,17 @@ def scan() -> int:
     min_close_ts = now_ts - max(0, min_close_buffer_hours) * 3600
     mve_filter = env_str("KALSHI_MVE_FILTER", "all")
 
-    min_edge = env_float("MIN_EDGE", 0.03)
+    min_edge = env_float("MIN_EDGE", 0.02)
+    min_edge_thin = env_float("MIN_EDGE_THIN", 0.05)
+    min_edge_medium = env_float("MIN_EDGE_MED", 0.03)
+    min_edge_deep = env_float("MIN_EDGE_DEEP", 0.02)
+    min_edge_thin_max_contracts = env_int("MIN_EDGE_THIN_MAX_CONTRACTS", 10)
+    min_edge_medium_max_contracts = env_int("MIN_EDGE_MED_MAX_CONTRACTS", 50)
+    min_bid_contracts = env_int("MIN_BID_CONTRACTS", 5)
+    min_notional_cents = env_int("MIN_NOTIONAL_CENTS", 0)
+    max_executable_ask_cents = env_int("MAX_EXECUTABLE_ASK_CENTS", 98)
+    max_executable_ask_bypass_edge = env_float("MAX_EXECUTABLE_ASK_BYPASS_EDGE", 0.05)
+    orderbook_edge_buffer = env_float("ORDERBOOK_EDGE_BUFFER", 0.01)
     top_n = env_int("TOP_N", 25)
     no_filters = env_bool("KALSHI_NO_FILTERS", False) or env_bool("NO_FILTERS", False)
     debug_mode = env_bool("DEBUG_MODE", False) or env_bool("KALSHI_DEBUG_MODE", False)
@@ -1394,6 +1474,16 @@ def scan() -> int:
         "use_orderbook": use_orderbook,
         "min_edge": min_edge,
         "top_n": top_n,
+        "min_edge_thin": min_edge_thin,
+        "min_edge_medium": min_edge_medium,
+        "min_edge_deep": min_edge_deep,
+        "min_edge_thin_max_contracts": min_edge_thin_max_contracts,
+        "min_edge_medium_max_contracts": min_edge_medium_max_contracts,
+        "min_bid_contracts": min_bid_contracts,
+        "min_notional_cents": min_notional_cents,
+        "max_executable_ask_cents": max_executable_ask_cents,
+        "max_executable_ask_bypass_edge": max_executable_ask_bypass_edge,
+        "orderbook_edge_buffer": orderbook_edge_buffer,
         "debug_mode": debug_mode,
         "debug_wide_scan": debug_wide_scan,
         "no_filters": no_filters,
@@ -2297,22 +2387,65 @@ def scan() -> int:
 
             # Kalshi buy prices (asks)
             yes_buy, no_buy = best_buy_probs(m)
+            yes_bid = cents_to_prob(m.get("yes_bid"))
+            if yes_bid is None:
+                yes_bid = _price_to_prob(m.get("yes_bid_dollars"))
+            no_bid = cents_to_prob(m.get("no_bid"))
+            if no_bid is None:
+                no_bid = _price_to_prob(m.get("no_bid_dollars"))
+            yes_bid_qty: Optional[int] = None
+            no_bid_qty: Optional[int] = None
+
+            liquidity_checks_enabled = (
+                (min_bid_contracts > 0)
+                or (min_notional_cents > 0)
+                or (max_executable_ask_cents > 0)
+            )
+            fair_no = 1.0 - fair_prob_yes
+            # Rough edge check before expensive orderbook calls.
+            rough_all_in_yes = None if yes_buy is None else min(1.0, yes_buy + fee_prob)
+            rough_all_in_no = None if no_buy is None else min(1.0, no_buy + fee_prob)
+            rough_best_edge = None
+            if rough_all_in_yes is not None:
+                rough_best_edge = fair_prob_yes - rough_all_in_yes
+            if rough_all_in_no is not None:
+                edge_no = fair_no - rough_all_in_no
+                if rough_best_edge is None or edge_no > rough_best_edge:
+                    rough_best_edge = edge_no
             # Pricing:
             # - In normal mode, use orderbook only as a fallback when snapshot asks are missing.
             # - In DEBUG_MODE, do NOT automatically explode runtime by fetching every orderbook.
             #   Enable KALSHI_DEBUG_FORCE_ORDERBOOK=1 when you explicitly want that behavior.
             want_orderbook = False
             if use_orderbook and market_ticker:
-                want_orderbook = (yes_buy is None or no_buy is None) or (debug_force_orderbook and debug_mode)
+                want_orderbook = (
+                    yes_buy is None
+                    or no_buy is None
+                    or (yes_bid is None or no_bid is None)
+                    or (
+                        liquidity_checks_enabled
+                        and rough_best_edge is not None
+                        and rough_best_edge >= (min_edge - orderbook_edge_buffer)
+                    )
+                    or (debug_force_orderbook and debug_mode)
+                )
 
             if want_orderbook and orderbook_calls < orderbook_max_calls:
                 try:
                     orderbook_calls += 1
-                    ob_yes_buy, ob_no_buy = best_buy_probs_from_orderbook(session, market_ticker)
-                    if ob_yes_buy is not None:
-                        yes_buy = ob_yes_buy
-                    if ob_no_buy is not None:
-                        no_buy = ob_no_buy
+                    ob_yes_bid, ob_yes_qty, ob_no_bid, ob_no_qty = best_bids_from_orderbook(
+                        session, market_ticker
+                    )
+                    if ob_yes_bid is not None:
+                        yes_bid = ob_yes_bid
+                        yes_bid_qty = ob_yes_qty
+                    if ob_no_bid is not None:
+                        no_bid = ob_no_bid
+                        no_bid_qty = ob_no_qty
+                    if yes_buy is None and _has_real_bid(no_bid):
+                        yes_buy = max(0.0, 1.0 - float(no_bid))
+                    if no_buy is None and _has_real_bid(yes_bid):
+                        no_buy = max(0.0, 1.0 - float(yes_bid))
                 except Exception as exc:
                     if debug_log and len(debug_unmatched) < debug_max:
                         debug_unmatched.append(
@@ -2333,50 +2466,99 @@ def scan() -> int:
             all_in_yes = None if yes_buy is None else min(1.0, yes_buy + fee_prob)
             all_in_no = None if no_buy is None else min(1.0, no_buy + fee_prob)
 
-            fair_no = 1.0 - fair_prob_yes
+            implied_yes_ask_cents = None
+            implied_no_ask_cents = None
+            if _has_real_bid(no_bid):
+                implied_yes_ask_cents = int(round((1.0 - float(no_bid)) * 100))
+            if _has_real_bid(yes_bid):
+                implied_no_ask_cents = int(round((1.0 - float(yes_bid)) * 100))
 
-            # Evaluate both sides (if available)
-            best_side = None
-            best_edge = -1e9
-            best_all_in = None
-            best_fair_side = None
+            candidates: List[Dict[str, Any]] = []
+            saw_opposite_bid = False
+            saw_tradeable_side = False
+            for side in ("YES", "NO"):
+                if side == "YES":
+                    if all_in_yes is None:
+                        continue
+                    if not _has_real_bid(no_bid):
+                        continue
+                    saw_opposite_bid = True
+                    fair_side = fair_prob_yes
+                    all_in = all_in_yes
+                    edge = fair_prob_yes - all_in_yes
+                    depth_contracts = no_bid_qty
+                    implied_ask_cents = implied_yes_ask_cents
+                else:
+                    if all_in_no is None:
+                        continue
+                    if not _has_real_bid(yes_bid):
+                        continue
+                    saw_opposite_bid = True
+                    fair_side = fair_no
+                    all_in = all_in_no
+                    edge = fair_no - all_in_no
+                    depth_contracts = yes_bid_qty
+                    implied_ask_cents = implied_no_ask_cents
 
-            if all_in_yes is not None:
-                e = fair_prob_yes - all_in_yes
-                if e > best_edge:
-                    best_edge = e
-                    best_side = "YES"
-                    best_all_in = all_in_yes
-                    best_fair_side = fair_prob_yes
+                saw_tradeable_side = True
+                if min_bid_contracts > 0:
+                    if depth_contracts is not None and depth_contracts < min_bid_contracts:
+                        drops["bid_depth_below_min"] += 1
+                        continue
 
-            if all_in_no is not None:
-                e = fair_no - all_in_no
-                if e > best_edge:
-                    best_edge = e
-                    best_side = "NO"
-                    best_all_in = all_in_no
-                    best_fair_side = fair_no
+                if min_notional_cents > 0 and depth_contracts is not None and implied_ask_cents is not None:
+                    if depth_contracts * implied_ask_cents < min_notional_cents:
+                        drops["bid_notional_below_min"] += 1
+                        continue
 
-            if best_side is None or best_all_in is None or best_fair_side is None:
+                if implied_ask_cents is not None and max_executable_ask_cents > 0:
+                    if implied_ask_cents > max_executable_ask_cents and edge < max_executable_ask_bypass_edge:
+                        drops["ask_too_wide"] += 1
+                        continue
+
+                min_edge_effective = min_edge_for_depth(
+                    depth_contracts,
+                    min_edge,
+                    min_edge_thin,
+                    min_edge_medium,
+                    min_edge_deep,
+                    min_edge_thin_max_contracts,
+                    min_edge_medium_max_contracts,
+                )
+                if (not debug_show_all) and (not no_filters) and edge < min_edge_effective:
+                    drops["edge_below_liquidity_tier"] += 1
+                    continue
+
+                candidates.append(
+                    {
+                        "side": side,
+                        "edge": edge,
+                        "all_in": all_in,
+                        "fair_side": fair_side,
+                        "depth_contracts": depth_contracts,
+                        "implied_ask_cents": implied_ask_cents,
+                        "min_edge_effective": min_edge_effective,
+                    }
+                )
+
+            if not candidates:
+                if not saw_opposite_bid:
+                    drops["missing_opposite_bid"] += 1
+                elif saw_tradeable_side:
+                    drops["filtered_out_by_liquidity"] += 1
                 continue
+
+            best_candidate = max(candidates, key=lambda c: c["edge"])
+            best_side = str(best_candidate["side"])
+            best_edge = float(best_candidate["edge"])
+            best_all_in = float(best_candidate["all_in"])
+            best_fair_side = float(best_candidate["fair_side"])
+            depth_contracts = best_candidate["depth_contracts"]
+            implied_ask_cents = best_candidate["implied_ask_cents"]
+            min_edge_effective = float(best_candidate["min_edge_effective"])
 
             # In DEBUG_MODE we want to keep *matched* games even if the edge is below MIN_EDGE,
             # so we can validate matching + filtering correctness.
-            if (not debug_show_all) and (not no_filters) and best_edge < min_edge:
-                drops["edge_below_min"] += 1
-                if pipeline_report_enabled:
-                    _stage_inc(pipeline_stages, "drop_edge_below_min", 1)
-                    _stage_sample(
-                        pipeline_stages,
-                        "drop_edge_below_min",
-                        {
-                            "market": _short_market_view(m),
-                            "edge": float(best_edge),
-                            "min_edge": min_edge,
-                        },
-                        limit=10,
-                    )
-                continue
 
             if len(debug_matched) < debug_max:
                 best_score = float(ranked[0][0]) if ranked else None
@@ -2402,10 +2584,23 @@ def scan() -> int:
                             "all_in_yes": all_in_yes,
                             "all_in_no": all_in_no,
                         },
+                        "liquidity": {
+                            "yes_bid_prob": yes_bid,
+                            "no_bid_prob": no_bid,
+                            "yes_bid_qty": yes_bid_qty,
+                            "no_bid_qty": no_bid_qty,
+                            "depth_contracts": depth_contracts,
+                            "implied_ask_cents": implied_ask_cents,
+                            "min_bid_contracts": min_bid_contracts,
+                            "min_notional_cents": min_notional_cents,
+                            "max_executable_ask_cents": max_executable_ask_cents,
+                            "max_executable_ask_bypass_edge": max_executable_ask_bypass_edge,
+                        },
                         "decision": {
                             "side_to_buy": best_side,
                             "edge": float(best_edge),
                             "min_edge": min_edge,
+                            "min_edge_effective": min_edge_effective,
                         },
                     }
                 )
@@ -2426,7 +2621,7 @@ def scan() -> int:
                     line_type=lt,
                     line_label=str(line.get("label") or ""),
                     commence_time_iso=str(odds_event.get("commence_time") or ""),
-                    kalshi_volume=int(vol),
+                    kalshi_volume=int(vol) if vol is not None else 0,
                     books_used=books_used,
                     url=kalshi_market_url(market_ticker),
                 )
@@ -2553,7 +2748,8 @@ def scan() -> int:
             f"drop_time_skew={g('odds_match_time_skew')}",
             f"drop_fair={g('fair_prob_unavailable')}",
             f"drop_books={g('books_below_min')}",
-            f"drop_edge={g('edge_below_min')}",
+            f"drop_edge={g('edge_below_liquidity_tier')}",
+            f"drop_liquidity={g('filtered_out_by_liquidity')}",
         ]
         return " | ".join(parts)
 
@@ -2568,6 +2764,14 @@ def scan() -> int:
             f"Source: `{sportsbook_source}` | min_books={min_books_effective}\n"
             "Books shown per play reflect available lines\n"
         )
+        edge_note = (
+            f"edge≥{min_edge*100:.1f}pp (tiered: <{min_edge_thin_max_contracts}c→{min_edge_thin*100:.1f}pp, "
+            f"<{min_edge_medium_max_contracts}c→{min_edge_medium*100:.1f}pp)"
+        )
+        liq_note = f"liq≥{min_bid_contracts}c" if min_bid_contracts > 0 else "liq:any"
+        if min_notional_cents > 0:
+            liq_note = f"{liq_note}, ${min_notional_cents/100:.0f}+"
+
         if not rows:
             vol_note = f"vol≥{min_volume_effective}"
             if min_volume_effective > 0 and include_unknown_volume:
@@ -2578,7 +2782,7 @@ def scan() -> int:
                 webhook,
                 (
                     f"{header_line}\n"
-                    f"**Kalshi value**: no plays found (min {min_edge*100:.1f}pp, "
+                    f"**Kalshi value**: no plays found ({edge_note}, {liq_note}, "
                     f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, {vol_note})."
                     f"\n_{_diag_summary()}_"
                 ),
@@ -2600,8 +2804,8 @@ def scan() -> int:
         lines.append(header_line)
         lines.append(
             (
-                f"**Kalshi value**: {len(rows)} plays (min {min_edge*100:.1f}pp, fee +{fee_cents}¢, "
-                f"games ≤{game_lookahead_hours}h, vol≥{min_volume_effective})."
+                f"**Kalshi value**: {len(rows)} plays ({edge_note}, {liq_note}, "
+                f"fee +{fee_cents}¢, games ≤{game_lookahead_hours}h, vol≥{min_volume_effective})."
             )
         )
 
