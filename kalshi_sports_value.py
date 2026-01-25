@@ -21,7 +21,7 @@ import re
 import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 from functools import lru_cache
 from pathlib import Path
@@ -118,6 +118,32 @@ def iso_to_ts(value: str) -> Optional[int]:
     return int(dt.timestamp()) if dt else None
 
 
+try:
+    ET_TZ = ZoneInfo("America/New_York")
+except Exception:
+    ET_TZ = timezone.utc
+
+
+def _date_ymd_from_ts(ts: Optional[float], tz: tzinfo = ET_TZ) -> Optional[str]:
+    if ts is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(float(ts), tz=tz)
+    except Exception:
+        return None
+    return dt.strftime("%Y-%m-%d")
+
+
+def _date_ymd_from_iso(value: Optional[str], tz: tzinfo = ET_TZ) -> Optional[str]:
+    dt = _parse_iso(str(value or ""))
+    if not dt:
+        return None
+    try:
+        return dt.astimezone(tz).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
 def _normalize_epoch_seconds(value: Any) -> Optional[int]:
     """Normalize epoch timestamps that may be seconds, ms, us, or ns into seconds."""
     if value is None:
@@ -153,6 +179,48 @@ def market_close_ts(market: Dict[str, Any]) -> Optional[int]:
             return _normalize_epoch_seconds(market["close_time"])
     except Exception:
         pass
+    return None
+
+
+def event_start_ts_from_event(event: Dict[str, Any]) -> Optional[int]:
+    """
+    Best-effort extraction of "event start time" from a Kalshi /events/{ticker} payload.
+    Different endpoints/versions may use different keys; we try several common ones.
+    """
+    if not isinstance(event, dict):
+        return None
+
+    if isinstance(event.get("event"), dict):
+        event = event["event"]
+
+    for key in (
+        "start_ts",
+        "start_time",
+        "event_start_ts",
+        "event_start_time",
+        "commence_ts",
+        "commence_time",
+        "begin_ts",
+        "begin_time",
+        "scheduled_start_ts",
+        "scheduled_start_time",
+    ):
+        val = event.get(key)
+        ts = _normalize_epoch_seconds(val)
+        if ts is not None:
+            return ts
+
+    return None
+
+
+def market_event_ticker(market: Dict[str, Any]) -> Optional[str]:
+    """Extract the event ticker from a market object (best effort)."""
+    if not isinstance(market, dict):
+        return None
+    for key in ("event_ticker", "eventTicker"):
+        v = market.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return None
 
 
@@ -376,25 +444,53 @@ SPREAD_RE = re.compile(
 
 def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
     """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
-    t = str(title)
+    t = str(title or "")
+    if not t:
+        return None
+
+    def _clean_team_fragment(raw: str) -> str:
+        s = re.sub(r"[\(\[].*?[\)\]]", " ", raw)
+        s = re.sub(
+            r"(?i)\b(moneyline|money line|ml|spread|total|over|under|h2h|line|game|match|odds)\b",
+            " ",
+            s,
+        )
+        s = re.sub(r"(?i)\b(wins?|to win|beat|defeat)\b", " ", s)
+        s = re.sub(r"[|/]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip(" -–—:|")
+        return s.strip()
+
     t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
-    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v ", " vs ").strip()
+    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v. ", " vs ").replace(" v ", " vs ")
+    t = " ".join(t.split()).strip()
     if ":" in t:
         t_tail = t.split(":")[-1].strip()
         if len(t_tail) >= 5:
             t = t_tail
-    t = " ".join(t.split())
-    m = re.search(
+
+    patterns = [
+        r"(?i)\bwill\s+(.+?)\s+(?:beat|defeat|win(?:\s+against|\s+over|\s+vs)?)\s+(.+?)(?:\?|$)",
+        r"(?i)\b(.+?)\s+(?:beat|defeat|win(?:\s+against|\s+over|\s+vs)?)\s+(.+?)(?:\?|$)",
         r"(?i)\b(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$",
-        t,
-    )
-    if not m:
-        return None
-    a = str(m.group(1)).strip()
-    b = str(m.group(3)).strip()
-    if not a or not b:
-        return None
-    return a, b
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, t)
+        if not m:
+            continue
+        if len(m.groups()) >= 3 and m.group(2).lower() in ("at", "vs", "versus"):
+            a_raw, b_raw = m.group(1), m.group(3)
+        else:
+            a_raw, b_raw = m.group(1), m.group(2)
+        a = _clean_team_fragment(str(a_raw or ""))
+        b = _clean_team_fragment(str(b_raw or ""))
+        if not a or not b:
+            continue
+        if a.lower() == b.lower():
+            continue
+        return a, b
+
+    return None
 
 
 def derive_matchup_from_subtitles(line_type: str, yes_sub: str, no_sub: str) -> Optional[Tuple[str, str]]:
@@ -413,6 +509,8 @@ def derive_matchup_from_subtitles(line_type: str, yes_sub: str, no_sub: str) -> 
     if line_type == "h2h":
         y2 = re.sub(r"(?i)\b(wins?|to\s*win)\b", "", y).strip()
         n2 = re.sub(r"(?i)\b(wins?|to\s*win)\b", "", n).strip()
+        y2 = re.sub(r"(?i)\b(moneyline|line|game|match)\b", "", y2).strip()
+        n2 = re.sub(r"(?i)\b(moneyline|line|game|match)\b", "", n2).strip()
         if y2 and n2 and y2.lower() != n2.lower():
             return y2, n2
 
@@ -2061,6 +2159,7 @@ def scan() -> int:
             # Resolve event title (to get matchup).
             # Only trust subtitle if it parses as a matchup; otherwise fetch the event title.
             event_title = ""
+            kalshi_event_payload: Optional[Dict[str, Any]] = None
             if subtitle and parse_matchup(subtitle):
                 event_title = subtitle
             if event_ticker:
@@ -2068,10 +2167,14 @@ def scan() -> int:
                 if not event_title and cached_title:
                     event_title = cached_title
                 if not event_title:
-                    ev = get_event(session, event_ticker)
+                    kalshi_event_payload = get_event(session, event_ticker)
                     fetched_title = ""
-                    if ev and isinstance(ev, dict):
-                        eobj = ev.get("event") if "event" in ev else ev
+                    if kalshi_event_payload and isinstance(kalshi_event_payload, dict):
+                        eobj = (
+                            kalshi_event_payload.get("event")
+                            if "event" in kalshi_event_payload
+                            else kalshi_event_payload
+                        )
                         fetched_title = str((eobj or {}).get("title") or "")
                     if fetched_title:
                         event_title_cache[event_ticker] = fetched_title
@@ -2135,6 +2238,13 @@ def scan() -> int:
                 elif id_match_rejected:
                     match_id_skew_reject += 1
 
+            evt_ticker2 = market_event_ticker(m)
+            kalshi_event = kalshi_event_payload
+            if kalshi_event is None and evt_ticker2:
+                kalshi_event = get_event(session, evt_ticker2)
+            kalshi_start_ts = event_start_ts_from_event(kalshi_event) if kalshi_event else None
+            kalshi_ref_ts = kalshi_start_ts if kalshi_start_ts is not None else close_ts
+
             if not odds_event:
                 # Constrain fuzzy matching to inferred sport candidates to avoid cross-sport/date matches.
                 scoped_events = odds_events
@@ -2144,6 +2254,15 @@ def scan() -> int:
                         for e in odds_events
                         if sport_prefix_from_odds_key(str(e.get("sport_key") or "")) in sport_candidates
                     ]
+                kalshi_date = _date_ymd_from_ts(kalshi_ref_ts)
+                if kalshi_date:
+                    date_scoped = [
+                        e
+                        for e in scoped_events
+                        if _date_ymd_from_iso(e.get("commence_time")) == kalshi_date
+                    ]
+                    if date_scoped:
+                        scoped_events = date_scoped
                 ranked = rank_event_matches(scoped_events, team_a, team_b, top_k=5)
                 match_threshold = 0.0 if debug_loose else 1.30
                 if not debug_loose and odds_event_id_index and sport_candidates:
@@ -2155,12 +2274,12 @@ def scan() -> int:
                         match_threshold = 1.60
                 odds_event = ranked[0][1] if ranked and ranked[0][0] >= match_threshold else None
                 if odds_event:
-                    # Reject fuzzy matches whose game time is wildly different than the Kalshi close time.
+                    # Reject fuzzy matches whose game time is wildly different than the Kalshi reference time.
                     # This prevents e.g. a "2025NOV" Kalshi market matching to a "today" Odds event.
-                    if close_ts is not None and match_max_time_skew_hours > 0:
+                    if kalshi_ref_ts is not None and match_max_time_skew_hours > 0:
                         commence_ts = iso_to_ts(str(odds_event.get("commence_time") or ""))
                         if commence_ts is not None:
-                            skew = abs(int(commence_ts) - int(close_ts))
+                            skew = abs(int(commence_ts) - int(kalshi_ref_ts))
                             if skew > int(match_max_time_skew_hours * 3600):
                                 drops["odds_match_time_skew"] += 1
                                 if pipeline_report_enabled:
@@ -2172,6 +2291,7 @@ def scan() -> int:
                                             "market": _short_market_view(m),
                                             "matchup": {"a": team_a, "b": team_b},
                                             "close_ts": close_ts,
+                                            "kalshi_ref_ts": kalshi_ref_ts,
                                             "odds_commence_time": odds_event.get("commence_time"),
                                             "skew_seconds": skew,
                                         },
@@ -2186,6 +2306,7 @@ def scan() -> int:
                                             "kalshi_event_title": event_title or market_title,
                                             "matchup": {"a": team_a, "b": team_b},
                                             "close_ts": close_ts,
+                                            "kalshi_ref_ts": kalshi_ref_ts,
                                             "odds_commence_time": odds_event.get("commence_time"),
                                             "odds_sport_key": odds_event.get("sport_key"),
                                             "odds_id": odds_event.get("id"),
