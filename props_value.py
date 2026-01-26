@@ -50,7 +50,7 @@ def env_float(name: str, default: float) -> float:
     return float(value)
 
 MIN_EDGE = env_float("MIN_EDGE", 0.05)  # 5% edge threshold
-MIN_BOOKS = env_int("MIN_BOOKS", 1)
+MIN_BOOKS = env_int("MIN_BOOKS", 2)  # Require at least 2 sportsbooks for reliable consensus
 TOP_N = env_int("TOP_N", 20)
 DEBUG_MODE = env_int("DEBUG_MODE", 0)
 DRY_RUN = env_int("DRY_RUN", 0)
@@ -195,28 +195,45 @@ def format_edge_report(matches: List[Dict[str, Any]]) -> str:
         return "No edges found above threshold."
 
     lines = [
-        f"{'Player':<20} {'Stat':<10} {'K-Line':>6} {'O-Line':>6} {'Side':<5} {'Edge':>6} "
-        f"{'Kalshi':>6} {'Books':>6} {'#Bk':>3}",
-        "-" * 80,
+        f"{'Player':<18} {'Stat':<8} {'Line':>5} {'Side':<5} {'Edge':>6} "
+        f"{'Kalshi':>6} {'Books':>6} {'#Bk':>3} {'Matchup':<15}",
+        "-" * 95,
     ]
 
     for m in matches:
-        player = m.get("player_name", "")[:19]
-        stat = m.get("stat_type", "")[:9]
+        player = m.get("player_name", "")[:17]
+        stat = m.get("stat_type", "")[:7]
         k_line = m.get("kalshi_line", 0)
-        o_line = m.get("odds_line", 0)
         side = m.get("best_side", "")[:4]
         edge = m.get("best_edge", 0)
         kalshi_prob = m.get("kalshi_over_prob", 0) if m.get("best_side") == "OVER" else m.get("kalshi_under_prob", 0)
         odds_prob = m.get("odds_over_prob", 0) if m.get("best_side") == "OVER" else m.get("odds_under_prob", 0)
         books = m.get("odds_books_used", 0)
+        away = m.get("away_team", "")[:7]
+        home = m.get("home_team", "")[:7]
+        matchup = f"{away}@{home}" if away or home else ""
 
         lines.append(
-            f"{player:<20} {stat:<10} {k_line:>6.1f} {o_line:>6.1f} {side:<5} {edge:>+5.1%} "
-            f"{kalshi_prob:>5.1%} {odds_prob:>5.1%} {books:>3}"
+            f"{player:<18} {stat:<8} {k_line:>4.0f}+ {side:<5} {edge:>+5.1%} "
+            f"{kalshi_prob:>5.1%} {odds_prob:>5.1%} {books:>3} {matchup:<15}"
         )
 
+    lines.append("")
+    lines.append("Line = Kalshi threshold (e.g., 8+ means 8 or more)")
+    lines.append("Edge = Sportsbook fair prob - Kalshi prob (positive = value on Kalshi)")
+
     return "\n".join(lines)
+
+
+def format_matchup(home_team: str, away_team: str, max_len: int = 15) -> str:
+    """Format matchup as 'AWAY @ HOME', truncated to fit."""
+    if not home_team and not away_team:
+        return ""
+    # Use team abbreviations if available, otherwise truncate
+    away = away_team[:6] if len(away_team) > 6 else away_team
+    home = home_team[:6] if len(home_team) > 6 else home_team
+    matchup = f"{away}@{home}"
+    return matchup[:max_len]
 
 
 def format_discord_report(matches: List[Dict[str, Any]]) -> str:
@@ -228,20 +245,24 @@ def format_discord_report(matches: List[Dict[str, Any]]) -> str:
     lines = [f"**Kalshi Props Value** ({now_str})", "```"]
 
     for m in matches:
-        player = m.get("player_name", "")[:16]
-        stat = m.get("stat_type", "")[:6]
+        player = m.get("player_name", "")[:14]
+        stat = m.get("stat_type", "")[:5]
         k_line = m.get("kalshi_line", 0)
         side = m.get("best_side", "")
         edge = m.get("best_edge", 0)
         kalshi_prob = m.get("kalshi_over_prob", 0) if side == "OVER" else m.get("kalshi_under_prob", 0)
         odds_prob = m.get("odds_over_prob", 0) if side == "OVER" else m.get("odds_under_prob", 0)
+        matchup = format_matchup(m.get("home_team", ""), m.get("away_team", ""))
+        books = m.get("odds_books_used", 0)
 
+        # Format: Player | Stat Line+ | Side | Edge | Kalshi vs Books | Matchup
         lines.append(
-            f"{player:<16} {stat:<6} {k_line:>4.0f}+ {side:<5} {edge:>+5.1%} "
-            f"(K:{kalshi_prob:.0%} vs B:{odds_prob:.0%})"
+            f"{player:<14} {stat:<5} {k_line:>3.0f}+ {side:<5} {edge:>+5.1%} "
+            f"K:{kalshi_prob:>3.0%} B:{odds_prob:>3.0%} ({books}bk) {matchup}"
         )
 
     lines.append("```")
+    lines.append("_Line = player must hit X+ (e.g., 8+ pts). Edge = Books fair% - Kalshi%_")
     return "\n".join(lines)
 
 
