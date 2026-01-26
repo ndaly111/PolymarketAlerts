@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
 # Major leagues + college
-DEFAULT_SPORT_KEYS = [
+BASE_SPORT_KEYS = [
     "americanfootball_nfl",
     "basketball_nba",
     "baseball_mlb",
@@ -15,6 +15,48 @@ DEFAULT_SPORT_KEYS = [
     "americanfootball_ncaaf",
     "basketball_ncaab",
 ]
+
+# Tennis tournaments (ATP + WTA)
+TENNIS_SPORT_KEYS = [
+    # ATP
+    "tennis_atp_aus_open_singles",
+    "tennis_atp_canadian_open",
+    "tennis_atp_china_open",
+    "tennis_atp_cincinnati_open",
+    "tennis_atp_dubai",
+    "tennis_atp_french_open",
+    "tennis_atp_indian_wells",
+    "tennis_atp_italian_open",
+    "tennis_atp_madrid_open",
+    "tennis_atp_miami_open",
+    "tennis_atp_monte_carlo_masters",
+    "tennis_atp_paris_masters",
+    "tennis_atp_qatar_open",
+    "tennis_atp_shanghai_masters",
+    "tennis_atp_us_open",
+    "tennis_atp_wimbledon",
+    # WTA
+    "tennis_wta_aus_open_singles",
+    "tennis_wta_canadian_open",
+    "tennis_wta_china_open",
+    "tennis_wta_cincinnati_open",
+    "tennis_wta_dubai",
+    "tennis_wta_french_open",
+    "tennis_wta_indian_wells",
+    "tennis_wta_italian_open",
+    "tennis_wta_madrid_open",
+    "tennis_wta_miami_open",
+    "tennis_wta_qatar_open",
+    "tennis_wta_us_open",
+    "tennis_wta_wimbledon",
+    "tennis_wta_wuhan_open",
+]
+
+# Environment toggle for tennis (default ON)
+INCLUDE_TENNIS = os.getenv("INCLUDE_TENNIS", "1").strip().lower() in ("1", "true", "yes")
+
+# Build DEFAULT_SPORT_KEYS based on config
+DEFAULT_SPORT_KEYS = BASE_SPORT_KEYS + (TENNIS_SPORT_KEYS if INCLUDE_TENNIS else [])
 
 # ---- Odds math helpers ----
 
