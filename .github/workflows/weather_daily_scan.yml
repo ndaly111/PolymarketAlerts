@@ -165,10 +165,25 @@ jobs:
             --min-count 0 \
             --db "$WEATHER_DB_PATH" || true
 
+      - name: Collect fresh "live" snapshot for pricing
+        env:
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+        run: |
+          set -euo pipefail
+          DATE="${{ steps.run_date.outputs.date }}"
+          echo "[live-snapshot] Collecting fresh NWS forecast for pricing (current hour)"
+          python -m weather.scripts.collect_forecast_snapshot \
+            --no-gate \
+            --use-local-hour \
+            --source "$FORECAST_SOURCE" \
+            --target-date "${DATE}" \
+            --db "$WEATHER_DB_PATH"
+
       - name: Compute fair prices
         run: |
           python -m weather.scripts.compute_fair_prices \
             --forecast-source "$FORECAST_SOURCE" \
+            --use-latest \
             --db "$WEATHER_DB_PATH"
 
       - name: Post forecast distribution to Discord

@@ -111,10 +111,17 @@ def main() -> int:
         default=int(os.getenv("WEATHER_ERROR_MODEL_HOUR", "0")),
         help="Snapshot hour for error models (default: same as snapshot hour, or 12 for MOS).",
     )
+    p.add_argument(
+        "--use-latest",
+        action="store_true",
+        help="Use the latest snapshot by timestamp instead of a fixed snapshot hour. "
+             "This ensures pricing uses the most current NWS forecast.",
+    )
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     fallback_source = os.getenv("WEATHER_FALLBACK_SOURCE", "").strip() or f"{args.forecast_source}_fallback"
+    use_latest = args.use_latest
 
     # Error model source/hour - defaults to MOS archive if available, else same as forecast
     error_model_source = args.error_model_source.strip() or str(args.forecast_source)
@@ -123,7 +130,10 @@ def main() -> int:
     cities = load_cities(Path(args.config))
     wrote = 0
 
-    print(f"[info] Looking for snapshots: source={args.forecast_source}, hour={snapshot_hour_local}")
+    if use_latest:
+        print(f"[info] Using LATEST snapshot by timestamp: source={args.forecast_source}")
+    else:
+        print(f"[info] Looking for snapshots: source={args.forecast_source}, hour={snapshot_hour_local}")
     print(f"[info] Error model source: {error_model_source}, hour={error_model_hour}")
 
     for c in cities:
@@ -134,14 +144,26 @@ def main() -> int:
         target_date_local = args.date.strip() or now_local.date().isoformat()
         month = int(target_date_local.split("-")[1])
 
-        snap = db_lib.fetch_forecast_snapshot(
-            db_path,
-            city_key=c.key,
-            target_date_local=target_date_local,
-            snapshot_hour_local=snapshot_hour_local,
-            source=str(args.forecast_source),
-        )
-        snapshot_kind = "canonical"
+        # Fetch snapshot: use latest by timestamp if --use-latest, else fixed hour
+        if use_latest:
+            snap = db_lib.fetch_latest_forecast_snapshot(
+                db_path,
+                city_key=c.key,
+                target_date_local=target_date_local,
+                source=str(args.forecast_source),
+            )
+            snapshot_kind = "latest" if snap else None
+        else:
+            snap = db_lib.fetch_forecast_snapshot(
+                db_path,
+                city_key=c.key,
+                target_date_local=target_date_local,
+                snapshot_hour_local=snapshot_hour_local,
+                source=str(args.forecast_source),
+            )
+            snapshot_kind = "canonical"
+
+        # Fallback to fallback_source if primary not found
         if not snap:
             snap = db_lib.fetch_latest_forecast_snapshot(
                 db_path,
@@ -151,7 +173,10 @@ def main() -> int:
             )
             snapshot_kind = "fallback" if snap else "missing"
         if not snap:
-            print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
+            if use_latest:
+                print(f"[skip] {c.key}: no snapshot for date={target_date_local} source={args.forecast_source}")
+            else:
+                print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
             continue
 
         # Try error model from specified source first, then fallback to forecast source
