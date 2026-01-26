@@ -96,6 +96,76 @@ def _select_entries(pmf: List[Tuple[int, float]], min_prob: float, fallback: int
     return sorted(top, key=lambda item: item[0])
 
 
+def _compute_over_under(pmf: List[Tuple[int, float]]) -> List[Tuple[int, float, float]]:
+    """
+    Convert exact PMF to cumulative over/under probabilities.
+
+    Returns list of (threshold, P(>=threshold), P(<threshold)).
+    """
+    if not pmf:
+        return []
+
+    # Sort by temperature
+    pmf_sorted = sorted(pmf, key=lambda x: x[0])
+
+    # Compute cumulative from high to low for P(>=threshold)
+    total = sum(p for _, p in pmf_sorted)
+    if total <= 0:
+        return []
+
+    # Normalize
+    pmf_norm = [(t, p / total) for t, p in pmf_sorted]
+
+    result = []
+    cumulative_over = 1.0
+
+    for i, (temp, prob) in enumerate(pmf_norm):
+        # P(>= temp) = sum of all probs at temp and above
+        over = cumulative_over
+        under = 1.0 - over
+        result.append((temp, over, under))
+        cumulative_over -= prob
+
+    return result
+
+
+def _select_over_under_entries(
+    over_under: List[Tuple[int, float, float]],
+    forecast_high: Optional[int],
+    range_below: int = 3,
+    range_above: int = 3,
+) -> List[Tuple[int, float, float]]:
+    """
+    Select thresholds around the forecast high.
+
+    Shows range_below entries below forecast and range_above entries at/above.
+    """
+    if not over_under:
+        return []
+
+    if forecast_high is None:
+        # If no forecast, show middle entries
+        mid = len(over_under) // 2
+        start = max(0, mid - range_below)
+        end = min(len(over_under), mid + range_above + 1)
+        return over_under[start:end]
+
+    # Find entries around forecast_high
+    temps = [t for t, _, _ in over_under]
+
+    # Find closest to forecast
+    try:
+        idx = temps.index(forecast_high)
+    except ValueError:
+        # Forecast not in list, find closest
+        idx = min(range(len(temps)), key=lambda i: abs(temps[i] - forecast_high))
+
+    start = max(0, idx - range_below)
+    end = min(len(over_under), idx + range_above + 1)
+
+    return over_under[start:end]
+
+
 def _render_city_blocks(out_dir: Path, min_prob: float) -> Optional[str]:
     if not out_dir.exists():
         return None
@@ -115,13 +185,18 @@ def _render_city_blocks(out_dir: Path, min_prob: float) -> Optional[str]:
 
         pmf_raw = obj.get("pmf_high_f") or {}
         pmf = _parse_pmf(pmf_raw)
-        entries = _select_entries(pmf, min_prob=min_prob)
-        if not entries:
+        if not pmf:
             continue
 
         label = str(obj.get("label") or obj.get("city_key") or p.stem)
         target_date = _format_date_mdy(str(obj.get("target_date_local") or "").strip())
         forecast_high = obj.get("forecast_high_f")
+
+        # Convert to over/under cumulative probabilities
+        over_under = _compute_over_under(pmf)
+        entries = _select_over_under_entries(over_under, forecast_high)
+        if not entries:
+            continue
 
         if target_date:
             header = f"{label} {target_date}"
@@ -131,11 +206,13 @@ def _render_city_blocks(out_dir: Path, min_prob: float) -> Optional[str]:
         if forecast_high is not None:
             lines.append(f"Forecast H: {forecast_high}")
         lines.append("")
+        lines.append("Threshold | Over  | Under")
+        lines.append("----------|-------|------")
 
-        for temp, prob in entries:
-            odds = _prob_to_american_odds(prob)
-            pct = int(round(prob * 100.0))
-            lines.append(f"{temp} - {pct}% ({odds})")
+        for temp, over, under in entries:
+            over_pct = int(round(over * 100.0))
+            under_pct = int(round(under * 100.0))
+            lines.append(f"   {temp:3d}°F  | {over_pct:3d}%  | {under_pct:3d}%")
 
         blocks.append("\n".join(lines).rstrip())
         any_city = True
