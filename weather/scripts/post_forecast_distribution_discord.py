@@ -204,14 +204,24 @@ def _render_city_blocks(out_dir: Path, min_prob: float) -> Optional[str]:
             header = label
         lines: List[str] = [header]
 
-        if forecast_high is not None:
-            lines.append(f"Forecast H: {forecast_high}°F")
-
         # Show intraday adjustment info if available
         intraday = obj.get("intraday_adjustment")
+        max_obs = intraday.get("max_observed_f") if intraday else None
+
+        # Effective forecast = max of (forecast_high, max_observed)
+        # because the high can't be lower than what we've already observed
+        effective_high = forecast_high
+        if forecast_high is not None and max_obs is not None:
+            effective_high = max(forecast_high, max_obs)
+
+        if effective_high is not None:
+            if max_obs is not None and max_obs > (forecast_high or 0):
+                lines.append(f"Forecast H: {effective_high}°F (observed, was {forecast_high}°F)")
+            else:
+                lines.append(f"Forecast H: {effective_high}°F")
+
         if intraday:
             progress = intraday.get("progress")
-            max_obs = intraday.get("max_observed_f")
             if progress is not None:
                 reduction_pct = int(round(progress * 100))
                 if max_obs is not None:
