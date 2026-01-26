@@ -224,6 +224,56 @@ def market_event_ticker(market: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def parse_game_date_from_ticker(ticker: str) -> Optional[int]:
+    """
+    Extract the game date from a Kalshi ticker and return as Unix timestamp.
+
+    Kalshi sports tickers often embed the game date in format like:
+    - KXNCAAMBGAME-26JAN27NEBMICH-NEB → "26JAN27" = 2026-Jan-27
+    - KXNBAGAME-26JAN25SASPHI-SAS → "26JAN25" = 2026-Jan-25
+
+    The pattern is typically: {YY}{MMM}{DD} where YY is 2-digit year, MMM is 3-letter month, DD is day.
+    Returns a Unix timestamp at midnight UTC for that date, or None if parsing fails.
+    """
+    if not isinstance(ticker, str) or not ticker:
+        return None
+
+    # Look for pattern like "26JAN27" or "25DEC20" in the ticker
+    # Pattern: 2-digit year, 3-letter month, 1-2 digit day
+    pattern = r'(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{1,2})'
+    match = re.search(pattern, ticker.upper())
+    if not match:
+        return None
+
+    try:
+        yy = int(match.group(1))
+        month_str = match.group(2)
+        day = int(match.group(3))
+
+        # Map month abbreviation to number
+        month_map = {
+            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+        }
+        month = month_map.get(month_str)
+        if not month:
+            return None
+
+        # Assume 20xx for 2-digit year (valid for 2000-2099)
+        year = 2000 + yy
+
+        # Validate day is reasonable
+        if day < 1 or day > 31:
+            return None
+
+        # Create datetime at midnight UTC and convert to timestamp
+        from datetime import datetime, timezone
+        dt = datetime(year, month, day, 0, 0, 0, tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
 # -----------------------------
 # Kalshi client
 # -----------------------------
@@ -2256,7 +2306,18 @@ def scan() -> int:
             if kalshi_event is None and evt_ticker2:
                 kalshi_event = get_event(session, evt_ticker2)
             kalshi_start_ts = event_start_ts_from_event(kalshi_event) if kalshi_event else None
-            kalshi_ref_ts = kalshi_start_ts if kalshi_start_ts is not None else close_ts
+
+            # Fallback chain for game reference time:
+            # 1. Event start time from Kalshi event endpoint
+            # 2. Game date parsed from market ticker (e.g., "26JAN27" → Jan 27, 2026)
+            # 3. Market close time (settlement, often days/weeks after game - worst fallback)
+            kalshi_ref_ts = kalshi_start_ts
+            if kalshi_ref_ts is None:
+                ticker_date_ts = parse_game_date_from_ticker(market_ticker)
+                if ticker_date_ts is not None:
+                    kalshi_ref_ts = ticker_date_ts
+            if kalshi_ref_ts is None:
+                kalshi_ref_ts = close_ts
 
             if not odds_event:
                 # Constrain fuzzy matching to inferred sport candidates to avoid cross-sport/date matches.
