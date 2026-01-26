@@ -77,6 +77,7 @@ SPORT_PROP_MARKETS = {
 # Default sport keys to fetch props for
 DEFAULT_SPORT_KEYS = [
     "basketball_nba",
+    "basketball_ncaab",
     "americanfootball_nfl",
     "baseball_mlb",
     "icehockey_nhl",
