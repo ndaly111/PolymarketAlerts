@@ -60,23 +60,26 @@ class KalshiAuthClient:
 
         return cls(key_id=key_id, private_key_pem=private_key, base_url=base_url)
 
-    def _sign_request(self, method: str, path: str, body: str = "") -> Dict[str, str]:
+    def _sign_request(self, method: str, path: str) -> Dict[str, str]:
         """
         Sign a request using RSA-PSS.
 
         Kalshi signature format:
         - Timestamp: milliseconds since epoch
-        - Message: timestamp + method + path + body
-        - Sign with RSA-PSS SHA256
+        - Message: timestamp + method + path (no query params, no body)
+        - Sign with RSA-PSS SHA256, salt_length=DIGEST_LENGTH
         """
         timestamp_ms = str(int(time.time() * 1000))
-        message = f"{timestamp_ms}{method.upper()}{path}{body}"
+
+        # Strip query parameters for signing
+        path_for_signing = path.split("?")[0]
+        message = f"{timestamp_ms}{method.upper()}{path_for_signing}"
 
         signature = self.private_key.sign(
             message.encode("utf-8"),
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=hashes.SHA256.digest_size,
             ),
             hashes.SHA256(),
         )
@@ -100,15 +103,8 @@ class KalshiAuthClient:
         url = f"{self.base_url}{path}"
         body_str = json.dumps(json_body) if json_body else ""
 
-        # For GET requests with params, path includes query string for signing
-        if params and method.upper() == "GET":
-            from urllib.parse import urlencode
-            query = urlencode(params)
-            sign_path = f"{path}?{query}"
-        else:
-            sign_path = path
-
-        headers = self._sign_request(method.upper(), sign_path, body_str)
+        # Sign with just the path (no query params, no body)
+        headers = self._sign_request(method.upper(), path)
 
         try:
             if method.upper() == "GET":
