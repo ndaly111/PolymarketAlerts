@@ -11,8 +11,30 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from oddsapi_props import fetch_all_props, normalize_player_name
 from kalshi_props import fetch_kalshi_props, kalshi_props_by_player
+
+
+def make_session() -> requests.Session:
+    """Create a requests session with retry logic."""
+    s = requests.Session()
+    retries = Retry(
+        total=6,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.headers.update({"Accept": "application/json", "User-Agent": "props-value/1.0"})
+    return s
+
+
+SESSION = make_session()
 
 # Environment config
 def env_int(name: str, default: int) -> int:
@@ -31,6 +53,12 @@ MIN_EDGE = env_float("MIN_EDGE", 0.05)  # 5% edge threshold
 MIN_BOOKS = env_int("MIN_BOOKS", 1)
 TOP_N = env_int("TOP_N", 20)
 DEBUG_MODE = env_int("DEBUG_MODE", 0)
+DRY_RUN = env_int("DRY_RUN", 0)
+
+# Discord config
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+DISCORD_MENTION = os.getenv("DISCORD_MENTION", "").strip()
+DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
 
 
 LINE_TOLERANCE = env_float("LINE_TOLERANCE", 0.5)  # Max line difference to match
@@ -191,6 +219,55 @@ def format_edge_report(matches: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def format_discord_report(matches: List[Dict[str, Any]]) -> str:
+    """Format matches for Discord (compact, fits in message limit)."""
+    if not matches:
+        return "No prop edges found above threshold."
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines = [f"**Kalshi Props Value** ({now_str})", "```"]
+
+    for m in matches:
+        player = m.get("player_name", "")[:16]
+        stat = m.get("stat_type", "")[:6]
+        k_line = m.get("kalshi_line", 0)
+        side = m.get("best_side", "")
+        edge = m.get("best_edge", 0)
+        kalshi_prob = m.get("kalshi_over_prob", 0) if side == "OVER" else m.get("kalshi_under_prob", 0)
+        odds_prob = m.get("odds_over_prob", 0) if side == "OVER" else m.get("odds_under_prob", 0)
+
+        lines.append(
+            f"{player:<16} {stat:<6} {k_line:>4.0f}+ {side:<5} {edge:>+5.1%} "
+            f"(K:{kalshi_prob:.0%} vs B:{odds_prob:.0%})"
+        )
+
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def post_discord(text: str) -> None:
+    """Post a message to Discord via webhook."""
+    if not DISCORD_WEBHOOK_URL:
+        print("DISCORD_WEBHOOK_URL not set, skipping Discord post.")
+        return
+
+    content = f"{DISCORD_MENTION}\n{text}" if DISCORD_MENTION else text
+
+    if DRY_RUN:
+        print("[DRY_RUN] Would post to Discord:")
+        print(content)
+        return
+
+    # Discord limit is 2000 chars, keep some margin
+    if len(content) > 1900:
+        content = content[:1890] + "\n…(trimmed)"
+
+    payload = {"content": content, "allowed_mentions": {"parse": ["users", "roles", "everyone"]}}
+    r = SESSION.post(DISCORD_WEBHOOK_URL, json=payload, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Discord webhook HTTP {r.status_code}: {r.text[:200]}")
+
+
 def main():
     print("=" * 60)
     print("PROPS VALUE SCANNER")
@@ -222,6 +299,15 @@ def main():
     # Print report
     print(format_edge_report(ranked))
     print()
+
+    # Post to Discord if we have edges
+    if ranked:
+        discord_matches = ranked[:DISCORD_TOP_N]
+        discord_text = format_discord_report(discord_matches)
+        post_discord(discord_text)
+        print(f"Posted {len(discord_matches)} edges to Discord.")
+    else:
+        print("No edges to post to Discord.")
 
     # Debug: show some unmatched if requested
     if DEBUG_MODE and matches:
