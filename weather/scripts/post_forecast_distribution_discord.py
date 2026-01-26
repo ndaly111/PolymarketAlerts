@@ -203,8 +203,22 @@ def _render_city_blocks(out_dir: Path, min_prob: float) -> Optional[str]:
         else:
             header = label
         lines: List[str] = [header]
+
         if forecast_high is not None:
-            lines.append(f"Forecast H: {forecast_high}")
+            lines.append(f"Forecast H: {forecast_high}°F")
+
+        # Show intraday adjustment info if available
+        intraday = obj.get("intraday_adjustment")
+        if intraday:
+            progress = intraday.get("progress")
+            max_obs = intraday.get("max_observed_f")
+            if progress is not None:
+                reduction_pct = int(round(progress * 100))
+                if max_obs is not None:
+                    lines.append(f"Dispersion: {reduction_pct}% reduced | Max obs: {max_obs}°F")
+                else:
+                    lines.append(f"Dispersion: {reduction_pct}% reduced")
+
         lines.append("")
         lines.append("Threshold | Over  | Under")
         lines.append("----------|-------|------")
