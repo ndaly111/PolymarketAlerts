@@ -19,7 +19,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 
-KALSHI_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_API_HOST = "https://api.elections.kalshi.com"
+KALSHI_API_PATH_PREFIX = "/trade-api/v2"
 
 
 class KalshiAuthClient:
@@ -29,10 +30,12 @@ class KalshiAuthClient:
         self,
         key_id: str,
         private_key_pem: str,
-        base_url: str = KALSHI_API_BASE,
+        host: str = KALSHI_API_HOST,
+        path_prefix: str = KALSHI_API_PATH_PREFIX,
     ):
         self.key_id = key_id
-        self.base_url = base_url.rstrip("/")
+        self.host = host.rstrip("/")
+        self.path_prefix = path_prefix.rstrip("/")
         self.private_key = serialization.load_pem_private_key(
             private_key_pem.encode("utf-8"),
             password=None,
@@ -48,7 +51,20 @@ class KalshiAuthClient:
         """Create client from environment variables."""
         key_id = os.getenv("KALSHI_API_KEY_ID") or os.getenv("KALSHI_KEY_ID")
         private_key = os.getenv("KALSHI_PRIVATE_KEY")
-        base_url = os.getenv("KALSHI_BASE", KALSHI_API_BASE)
+
+        # Support both formats:
+        # - KALSHI_BASE=https://api.elections.kalshi.com/trade-api/v2 (legacy)
+        # - KALSHI_HOST + KALSHI_PATH_PREFIX (new)
+        base_url = os.getenv("KALSHI_BASE", "")
+        if base_url:
+            # Parse legacy KALSHI_BASE into host + path_prefix
+            from urllib.parse import urlparse
+            parsed = urlparse(base_url)
+            host = f"{parsed.scheme}://{parsed.netloc}"
+            path_prefix = parsed.path.rstrip("/") or KALSHI_API_PATH_PREFIX
+        else:
+            host = os.getenv("KALSHI_HOST", KALSHI_API_HOST)
+            path_prefix = os.getenv("KALSHI_PATH_PREFIX", KALSHI_API_PATH_PREFIX)
 
         if not key_id or not private_key:
             raise RuntimeError(
@@ -58,21 +74,21 @@ class KalshiAuthClient:
         # Handle escaped newlines in env var
         private_key = private_key.replace("\\n", "\n")
 
-        return cls(key_id=key_id, private_key_pem=private_key, base_url=base_url)
+        return cls(key_id=key_id, private_key_pem=private_key, host=host, path_prefix=path_prefix)
 
-    def _sign_request(self, method: str, path: str) -> Dict[str, str]:
+    def _sign_request(self, method: str, full_path: str) -> Dict[str, str]:
         """
         Sign a request using RSA-PSS.
 
         Kalshi signature format:
         - Timestamp: milliseconds since epoch
-        - Message: timestamp + method + path (no query params, no body)
+        - Message: timestamp + method + full_path (including /trade-api/v2, no query params)
         - Sign with RSA-PSS SHA256, salt_length=DIGEST_LENGTH
         """
         timestamp_ms = str(int(time.time() * 1000))
 
-        # Strip query parameters for signing
-        path_for_signing = path.split("?")[0]
+        # Strip query parameters for signing (but keep the full path prefix)
+        path_for_signing = full_path.split("?")[0]
         message = f"{timestamp_ms}{method.upper()}{path_for_signing}"
 
         signature = self.private_key.sign(
@@ -100,11 +116,13 @@ class KalshiAuthClient:
         json_body: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, Any]]:
         """Make an authenticated request."""
-        url = f"{self.base_url}{path}"
+        # Build full path with prefix (e.g., /trade-api/v2/portfolio/balance)
+        full_path = f"{self.path_prefix}{path}"
+        url = f"{self.host}{full_path}"
         body_str = json.dumps(json_body) if json_body else ""
 
-        # Sign with just the path (no query params, no body)
-        headers = self._sign_request(method.upper(), path)
+        # Sign with full path (including /trade-api/v2 prefix, no query params)
+        headers = self._sign_request(method.upper(), full_path)
 
         try:
             if method.upper() == "GET":
