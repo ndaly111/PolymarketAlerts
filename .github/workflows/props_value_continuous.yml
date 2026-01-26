@@ -1,25 +1,24 @@
-name: Kalshi Props Value Scan
+name: Kalshi Props Value - Continuous Scan
 
 on:
-  schedule:
-    # Every 30 minutes, 5am-8pm ET only (10:00-01:00 UTC, accounting for DST variation)
-    # Skip 01:00-09:59 UTC (roughly 8pm-5am ET)
-    - cron: "0,30 10-23 * * *"  # 10:00-23:59 UTC
-    - cron: "0,30 0 * * *"       # 00:00-00:59 UTC
   workflow_dispatch:
     inputs:
+      duration_hours:
+        description: "How long to run (hours)"
+        required: false
+        default: "4"
+      kalshi_refresh_seconds:
+        description: "Kalshi refresh interval (seconds)"
+        required: false
+        default: "120"
+      odds_refresh_seconds:
+        description: "Odds API refresh interval (seconds)"
+        required: false
+        default: "1800"
       min_edge:
         description: "Minimum edge threshold (e.g., 0.05 = 5%)"
         required: false
         default: "0.05"
-      top_n:
-        description: "Number of results to show"
-        required: false
-        default: "20"
-      discord_top_n:
-        description: "Number of results to post to Discord"
-        required: false
-        default: "8"
       min_books:
         description: "Minimum sportsbooks required"
         required: false
@@ -33,20 +32,16 @@ on:
         type: choice
         options: ["0", "1"]
         default: "0"
-      debug_mode:
-        description: "Debug mode (verbose output)"
-        type: choice
-        options: ["0", "1"]
-        default: "0"
 
 concurrency:
-  group: props-value
+  group: props-value-continuous
   cancel-in-progress: true
 
 jobs:
-  scan:
+  continuous-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Allow up to 6 hours (GitHub max is 6h)
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
@@ -61,18 +56,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run props value scan
+      - name: Run continuous props scan
         env:
           THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROPS_ALERT || secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_MENTION: ${{ vars.DISCORD_PROPS_MENTION || vars.DISCORD_MENTION || '' }}
 
+          CONTINUOUS_MODE: "1"
+          CONTINUOUS_DURATION_HOURS: ${{ github.event.inputs.duration_hours || '4' }}
+          KALSHI_REFRESH_SECONDS: ${{ github.event.inputs.kalshi_refresh_seconds || '120' }}
+          ODDS_REFRESH_SECONDS: ${{ github.event.inputs.odds_refresh_seconds || '1800' }}
+
           MIN_EDGE: ${{ github.event.inputs.min_edge || vars.PROPS_MIN_EDGE || '0.05' }}
-          TOP_N: ${{ github.event.inputs.top_n || vars.PROPS_TOP_N || '20' }}
-          DISCORD_TOP_N: ${{ github.event.inputs.discord_top_n || vars.PROPS_DISCORD_TOP_N || '8' }}
+          TOP_N: ${{ vars.PROPS_TOP_N || '20' }}
+          DISCORD_TOP_N: ${{ vars.PROPS_DISCORD_TOP_N || '8' }}
           MIN_BOOKS: ${{ github.event.inputs.min_books || vars.PROPS_MIN_BOOKS || '2' }}
           KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction || vars.PROPS_KELLY_FRACTION || '0.5' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
-          DEBUG_MODE: ${{ github.event.inputs.debug_mode || '0' }}
         run: |
           python props_value.py
