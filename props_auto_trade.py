@@ -3,10 +3,10 @@
 Automated props trading script.
 
 Workflow:
-1. Initial scan: find 10%+ EV opportunities
+1. Initial scan: find 5%+ EV opportunities
 2. Check if already have position → skip if yes
 3. Re-fetch Kalshi orderbook (get actual ask)
-4. Re-fetch Odds API (min 3 books)
+4. Re-fetch Odds API (min 2 books)
 5. Filters: Kalshi ask ≤ 67¢, Books fair prob ≥ 33%
 6. Recalculate edge with fresh data
 7. If edge ≥ 5%, place limit order at ask for 1 contract
@@ -31,9 +31,9 @@ from props_value import match_props, filter_and_rank
 
 
 # --- Configuration ---
-MIN_INITIAL_EV = float(os.getenv("MIN_INITIAL_EV", "0.10"))  # 10% for initial scan
+MIN_INITIAL_EV = float(os.getenv("MIN_INITIAL_EV", "0.05"))  # 5% for initial scan
 MIN_FINAL_EV = float(os.getenv("MIN_FINAL_EV", "0.05"))  # 5% after re-verification
-MIN_BOOKS = int(os.getenv("MIN_BOOKS", "3"))  # Require 3+ books
+MIN_BOOKS = int(os.getenv("MIN_BOOKS", "2"))  # Require 2+ books
 MAX_KALSHI_ASK_CENTS = int(os.getenv("MAX_KALSHI_ASK", "67"))  # ≤ 67¢ (better than -200)
 MIN_FAIR_PROB = float(os.getenv("MIN_FAIR_PROB", "0.333"))  # ≥ 33% (better than +200)
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
@@ -471,7 +471,7 @@ def main() -> int:
         print(f"Failed to initialize Kalshi client: {e}")
         return 1
 
-    # Step 1: Initial scan for 10%+ EV opportunities
+    # Step 1: Initial scan for 5%+ EV opportunities
     print("\n--- Step 1: Initial Scan ---")
     print("Fetching Kalshi props...")
     kalshi_props = fetch_kalshi_props()
