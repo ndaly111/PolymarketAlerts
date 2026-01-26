@@ -1,0 +1,58 @@
+name: Weather - Collect Intraday Observations
+
+on:
+  schedule:
+    # Every 30 minutes during US market hours (10 UTC to 01 UTC = 5am-8pm ET)
+    - cron: "0,30 10-23 * * *"
+    - cron: "0,30 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-intraday-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
+      NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
+        with:
+          python-version: "3.11"
+          install-root-requirements: "true"
+
+      - name: Collect intraday observations
+        run: |
+          python -m weather.scripts.collect_intraday_observations \
+            --db "$WEATHER_DB_PATH"
+
+      - name: Commit DB (if changed)
+        run: |
+          if [[ -n "$(git status --porcelain "$WEATHER_DB_PATH")" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$WEATHER_DB_PATH"
+            git commit -m "weather: collect intraday observations"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 2
+            done
+          else
+            echo "No DB changes to commit."
+          fi

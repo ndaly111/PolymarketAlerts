@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -58,3 +58,100 @@ def fetch_json(s: requests.Session, url: str) -> Dict[str, Any]:
 
 def polite_sleep():
     time.sleep(0.2)
+
+
+# ---------------------------------------------------------------------------
+# Station and observation functions for intraday tracking
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NwsStation:
+    station_id: str
+    name: str
+    distance_km: Optional[float]
+
+
+@dataclass(frozen=True)
+class NwsObservation:
+    station_id: str
+    timestamp_utc: str
+    temperature_f: int
+    raw: Dict[str, Any]
+
+
+def get_nearby_stations(
+    s: requests.Session,
+    lat: float,
+    lon: float,
+    limit: int = 5,
+) -> List[NwsStation]:
+    """
+    Fetch nearby observation stations for a lat/lon point.
+
+    Uses: https://api.weather.gov/points/{lat},{lon}/stations
+
+    Returns list of stations ordered by distance (nearest first).
+    """
+    url = f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}/stations"
+    try:
+        r = s.get(url)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    features = data.get("features", [])
+    stations: List[NwsStation] = []
+    for feat in features[:limit]:
+        props = feat.get("properties", {})
+        station_id = props.get("stationIdentifier", "")
+        name = props.get("name", "")
+        if station_id:
+            stations.append(NwsStation(
+                station_id=station_id,
+                name=name,
+                distance_km=None,  # NWS returns ordered by proximity
+            ))
+    return stations
+
+
+def get_latest_observation(
+    s: requests.Session,
+    station_id: str,
+) -> Optional[NwsObservation]:
+    """
+    Fetch the latest observation from a station.
+
+    Uses: https://api.weather.gov/stations/{stationId}/observations/latest
+
+    Returns NwsObservation or None if unavailable.
+    Temperature is converted from Celsius to Fahrenheit.
+    """
+    url = f"https://api.weather.gov/stations/{station_id}/observations/latest"
+    try:
+        r = s.get(url)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return None
+
+    props = data.get("properties", {})
+    timestamp = props.get("timestamp")
+
+    # Temperature in NWS API is in Celsius under "temperature.value"
+    temp_obj = props.get("temperature", {})
+    temp_c = temp_obj.get("value")
+
+    if temp_c is None or timestamp is None:
+        return None
+
+    # Convert C to F
+    temp_f = int(round(temp_c * 9 / 5 + 32))
+
+    return NwsObservation(
+        station_id=station_id,
+        timestamp_utc=timestamp,
+        temperature_f=temp_f,
+        raw=data,
+    )

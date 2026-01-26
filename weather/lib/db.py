@@ -175,6 +175,60 @@ def ensure_schema(db_path: Path) -> None:
             """
         )
 
+        # Intraday temperature observations for progress tracking
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intraday_observations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              target_date_local TEXT NOT NULL,
+              observation_time_utc TEXT NOT NULL,
+              observation_time_local TEXT NOT NULL,
+              station_id TEXT NOT NULL,
+              current_temp_f INTEGER NOT NULL,
+              morning_temp_f INTEGER,
+              max_observed_f INTEGER NOT NULL,
+              forecast_high_f INTEGER NOT NULL,
+              progress REAL NOT NULL,
+              qc_flags TEXT NOT NULL,
+              raw_json TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_intraday_obs_unique
+            ON intraday_observations(city_key, target_date_local, observation_time_utc);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_intraday_obs_latest
+            ON intraday_observations(city_key, target_date_local, observation_time_utc DESC);
+            """
+        )
+
+        # Station mapping cache for NWS observation stations
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS city_stations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              station_id TEXT NOT NULL,
+              station_name TEXT NOT NULL,
+              distance_km REAL,
+              priority INTEGER NOT NULL DEFAULT 1,
+              updated_at_utc TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_city_stations_unique
+            ON city_stations(city_key, station_id);
+            """
+        )
+
 
 def upsert_forecast_snapshot(
     db_path: Path,
@@ -728,3 +782,201 @@ def fetch_error_model(
     pmf_raw = json.loads(pmf_json) if pmf_json else {}
     pmf = {int(k): float(v) for k, v in pmf_raw.items()}
     return {"n_samples": int(n_samples), "pmf": pmf, "updated_at_utc": updated_at_utc}
+
+
+# ---------------------------------------------------------------------------
+# Intraday observation functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_intraday_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    observation_time_utc: str,
+    observation_time_local: str,
+    station_id: str,
+    current_temp_f: int,
+    morning_temp_f: int,
+    max_observed_f: int,
+    forecast_high_f: int,
+    progress: float,
+    qc_flags: Iterable[str],
+    raw: Dict[str, Any],
+) -> None:
+    """Insert or update an intraday observation."""
+    ensure_schema(db_path)
+    qc = ",".join(sorted(set(qc_flags))) if qc_flags else ""
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO intraday_observations
+              (city_key, target_date_local, observation_time_utc, observation_time_local,
+               station_id, current_temp_f, morning_temp_f, max_observed_f, forecast_high_f,
+               progress, qc_flags, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, target_date_local, observation_time_utc) DO UPDATE SET
+              observation_time_local=excluded.observation_time_local,
+              station_id=excluded.station_id,
+              current_temp_f=excluded.current_temp_f,
+              morning_temp_f=excluded.morning_temp_f,
+              max_observed_f=excluded.max_observed_f,
+              forecast_high_f=excluded.forecast_high_f,
+              progress=excluded.progress,
+              qc_flags=excluded.qc_flags,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                city_key,
+                target_date_local,
+                observation_time_utc,
+                observation_time_local,
+                station_id,
+                int(current_temp_f),
+                int(morning_temp_f),
+                int(max_observed_f),
+                int(forecast_high_f),
+                float(progress),
+                qc,
+                raw_json,
+            ),
+        )
+
+
+def fetch_latest_intraday_state(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch the most recent intraday observation for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, target_date_local, observation_time_utc, observation_time_local,
+              station_id, current_temp_f, morning_temp_f, max_observed_f, forecast_high_f,
+              progress, qc_flags
+            FROM intraday_observations
+            WHERE city_key = ? AND target_date_local = ?
+            ORDER BY observation_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "city_key": row[0],
+        "target_date_local": row[1],
+        "observation_time_utc": row[2],
+        "observation_time_local": row[3],
+        "station_id": row[4],
+        "current_temp_f": int(row[5]),
+        "morning_temp_f": int(row[6]) if row[6] is not None else None,
+        "max_observed_f": int(row[7]),
+        "forecast_high_f": int(row[8]),
+        "progress": float(row[9]),
+        "qc_flags": row[10],
+    }
+
+
+def fetch_first_intraday_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+) -> Optional[int]:
+    """Return the first observed temperature of the day (morning reference)."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT current_temp_f
+            FROM intraday_observations
+            WHERE city_key = ? AND target_date_local = ?
+            ORDER BY observation_time_utc ASC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local),
+        ).fetchone()
+    return int(row[0]) if row else None
+
+
+def fetch_max_intraday_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+) -> Optional[int]:
+    """Return the maximum observed temperature so far today."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(max_observed_f)
+            FROM intraday_observations
+            WHERE city_key = ? AND target_date_local = ?;
+            """,
+            (city_key, target_date_local),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+# ---------------------------------------------------------------------------
+# City station cache functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_city_station(
+    db_path: Path,
+    *,
+    city_key: str,
+    station_id: str,
+    station_name: str,
+    distance_km: Optional[float],
+    priority: int,
+    updated_at_utc: str,
+) -> None:
+    """Cache a station mapping for a city."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO city_stations
+              (city_key, station_id, station_name, distance_km, priority, updated_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, station_id) DO UPDATE SET
+              station_name=excluded.station_name,
+              distance_km=excluded.distance_km,
+              priority=excluded.priority,
+              updated_at_utc=excluded.updated_at_utc;
+            """,
+            (city_key, station_id, station_name, distance_km, priority, updated_at_utc),
+        )
+
+
+def fetch_preferred_station(
+    db_path: Path,
+    *,
+    city_key: str,
+) -> Optional[str]:
+    """Return the preferred (lowest priority) station for a city."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT station_id
+            FROM city_stations
+            WHERE city_key = ?
+            ORDER BY priority ASC
+            LIMIT 1;
+            """,
+            (city_key,),
+        ).fetchone()
+    return str(row[0]) if row else None

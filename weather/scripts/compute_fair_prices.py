@@ -25,7 +25,7 @@ import yaml
 import math
 
 from weather.lib import db as db_lib
-from weather.lib.fair import normalize_pmf, shift_pmf, summarize_pmf
+from weather.lib.fair import adjust_pmf_with_progress, normalize_pmf, shift_pmf, summarize_pmf
 
 
 def _build_fallback_gaussian_pmf(center: int, std: float = 4.0, min_tail_prob: float = 0.01) -> Dict[int, float]:
@@ -116,6 +116,12 @@ def main() -> int:
         action="store_true",
         help="Use the latest snapshot by timestamp instead of a fixed snapshot hour. "
              "This ensures pricing uses the most current NWS forecast.",
+    )
+    p.add_argument(
+        "--enable-intraday-adjustment",
+        action="store_true",
+        default=os.getenv("WEATHER_ENABLE_INTRADAY_ADJUSTMENT", "").lower() in ("1", "true", "yes"),
+        help="Apply intraday progress adjustment to PMF (truncation + dispersion shrink).",
     )
     args = p.parse_args()
 
@@ -214,6 +220,33 @@ def main() -> int:
             pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=4.0)
             error_model_n_samples = 0
             error_model_updated_at_utc = None
+
+        # Apply intraday adjustment if enabled and we have observation data
+        intraday_adjustment = None
+        if args.enable_intraday_adjustment:
+            intraday_state = db_lib.fetch_latest_intraday_state(
+                db_path,
+                city_key=c.key,
+                target_date_local=target_date_local,
+            )
+            if intraday_state:
+                pmf_high, intraday_meta = adjust_pmf_with_progress(
+                    pmf_high,
+                    max_observed=intraday_state["max_observed_f"],
+                    progress=intraday_state["progress"],
+                )
+                intraday_adjustment = {
+                    **intraday_meta,
+                    "observation_time_utc": intraday_state["observation_time_utc"],
+                    "current_temp_f": intraday_state["current_temp_f"],
+                    "baseline_temp_f": intraday_state["morning_temp_f"],
+                    "station_id": intraday_state["station_id"],
+                }
+                print(
+                    f"[intraday] {c.key}: progress={intraday_state['progress']:.1%} "
+                    f"max_observed={intraday_state['max_observed_f']}F"
+                )
+
         summary = summarize_pmf(pmf_high)
 
         out = {
@@ -246,6 +279,7 @@ def main() -> int:
                 "points_url": snap["points_url"],
                 "forecast_url": snap["forecast_url"],
             },
+            "intraday_adjustment": intraday_adjustment,
         }
 
         source_slug = str(args.forecast_source).replace("/", "_")

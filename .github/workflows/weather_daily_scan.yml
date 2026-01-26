@@ -55,6 +55,8 @@ jobs:
       WEATHER_MIN_OPEN_INTEREST: "0"
       WEATHER_MAX_SPREAD_CENTS: ""
       WEATHER_TOP_N: ${{ (github.event.inputs.top_n != '' && github.event.inputs.top_n) || '25' }}
+      # Enable intraday progress adjustment (truncate + shrink dispersion)
+      WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
 
     steps:
       - name: Checkout
@@ -177,6 +179,16 @@ jobs:
             --use-local-hour \
             --source "$FORECAST_SOURCE" \
             --target-date "${DATE}" \
+            --db "$WEATHER_DB_PATH"
+
+      - name: Collect intraday observations
+        env:
+          NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
+        run: |
+          set -euo pipefail
+          echo "[intraday] Collecting current temperature observations"
+          python -m weather.scripts.collect_intraday_observations \
+            --no-gate \
             --db "$WEATHER_DB_PATH"
 
       - name: Compute fair prices
