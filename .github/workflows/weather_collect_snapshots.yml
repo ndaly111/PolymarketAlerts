@@ -1,4 +1,4 @@
-name: Weather - Collect Forecast Snapshots
+name: Weather - Collect 4AM Baseline Snapshots
 
 on:
   workflow_dispatch:
@@ -9,9 +9,9 @@ on:
         default: "false"
         type: boolean
   schedule:
-    # Run at 9 UTC (~4-5 AM ET depending on DST)
-    # Using --skip-if-date-exists makes this idempotent
-    - cron: "0 9 * * *"
+    # Run at 9:05 UTC (4:05 AM ET) to collect hour=4 baseline snapshots
+    # This is the reference point for intraday progress calculations
+    - cron: "5 9 * * *"
 
 permissions:
   contents: write
@@ -28,6 +28,8 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
       FORECAST_SOURCE: nws_hourly_max
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
+      # Fixed hour=4 for all cities (baseline for intraday progress)
+      WEATHER_SNAPSHOT_HOUR_LOCAL: "4"
       NWS_USER_AGENT: "weather-edge-bot/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
 
     steps:
@@ -43,14 +45,16 @@ jobs:
           python-version: "3.11"
           install-root-requirements: "true"
 
-      - name: Collect forecast snapshots
+      - name: Collect 4AM baseline snapshots
         shell: bash
         run: |
           set -e
-          ARGS="--no-gate --skip-if-date-exists --use-local-hour"
+          # Do NOT use --use-local-hour; we want hour=4 for all cities
+          ARGS="--no-gate --skip-if-date-exists"
           if [[ "${{ github.event.inputs.overwrite }}" == "true" ]]; then
-            ARGS="--no-gate --overwrite --use-local-hour"
+            ARGS="--no-gate --overwrite"
           fi
+          echo "Collecting hour=4 baseline snapshots..."
           echo "Running: python -m weather.scripts.collect_forecast_snapshot --db $WEATHER_DB_PATH $ARGS"
           python -m weather.scripts.collect_forecast_snapshot --db "$WEATHER_DB_PATH" $ARGS
 
