@@ -50,10 +50,13 @@ def env_float(name: str, default: float) -> float:
     return float(value)
 
 MIN_EDGE = env_float("MIN_EDGE", 0.05)  # 5% edge threshold
-MIN_BOOKS = env_int("MIN_BOOKS", 1)
+MIN_BOOKS = env_int("MIN_BOOKS", 2)  # Require at least 2 books for reliable consensus
 TOP_N = env_int("TOP_N", 20)
 DEBUG_MODE = env_int("DEBUG_MODE", 0)
 DRY_RUN = env_int("DRY_RUN", 0)
+
+# Kelly criterion config
+KELLY_FRACTION = env_float("KELLY_FRACTION", 0.5)  # Half Kelly by default
 
 # Discord config
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -140,6 +143,38 @@ def match_props(
         over_edge = odds_over_prob - kalshi_over_prob
         under_edge = odds_under_prob - (1 - kalshi_over_prob)
 
+        # Determine best side and calculate EV/Kelly for that side
+        if over_edge > under_edge:
+            best_side = "OVER"
+            best_edge = over_edge
+            fair_prob = odds_over_prob
+            kalshi_price = kalshi_over_prob  # Price to buy YES (over)
+        else:
+            best_side = "UNDER"
+            best_edge = under_edge
+            fair_prob = odds_under_prob
+            kalshi_price = 1 - kalshi_over_prob  # Price to buy NO (under)
+
+        # EV per contract: Expected profit per $1 notional
+        # Buy at kalshi_price, win $1 with prob fair_prob
+        # EV = fair_prob * (1 - kalshi_price) - (1 - fair_prob) * kalshi_price
+        #    = fair_prob - kalshi_price = edge
+        ev_per_contract = best_edge  # In dollars (contracts pay $1)
+
+        # ROI: Return on capital risked
+        # ROI = EV / cost = edge / kalshi_price
+        roi = best_edge / kalshi_price if kalshi_price > 0 else 0
+
+        # Kelly criterion: optimal fraction of bankroll to bet
+        # For binary bet: kelly = (p * b - q) / b where p=win prob, q=lose prob, b=odds
+        # For Kalshi: b = (1 - price) / price (profit per dollar risked)
+        # kelly = (fair_prob * (1-price)/price - (1-fair_prob)) / ((1-price)/price)
+        #       = (fair_prob * (1-price) - (1-fair_prob) * price) / (1-price)
+        #       = (fair_prob - price) / (1 - price)
+        #       = edge / (1 - kalshi_price)
+        full_kelly = best_edge / (1 - kalshi_price) if kalshi_price < 1 else 0
+        kelly_bet = full_kelly * KELLY_FRACTION
+
         match = {
             # Player info
             "player_name": kp.get("player_name", ""),
@@ -170,8 +205,14 @@ def match_props(
             # Edge calculations
             "over_edge": over_edge,
             "under_edge": under_edge,
-            "best_edge": max(over_edge, under_edge),
-            "best_side": "OVER" if over_edge > under_edge else "UNDER",
+            "best_edge": best_edge,
+            "best_side": best_side,
+            # EV and Kelly
+            "ev_per_contract": ev_per_contract,
+            "roi": roi,
+            "full_kelly": full_kelly,
+            "kelly_bet": kelly_bet,
+            "bet_price": kalshi_price,  # The price you'd pay for the recommended side
         }
         matches.append(match)
 
@@ -195,53 +236,126 @@ def format_edge_report(matches: List[Dict[str, Any]]) -> str:
         return "No edges found above threshold."
 
     lines = [
-        f"{'Player':<20} {'Stat':<10} {'K-Line':>6} {'O-Line':>6} {'Side':<5} {'Edge':>6} "
-        f"{'Kalshi':>6} {'Books':>6} {'#Bk':>3}",
-        "-" * 80,
+        f"{'Player':<18} {'Stat':<7} {'Line':>5} {'Side':<5} {'Edge':>6} "
+        f"{'Kalshi':>7} {'Books':>7} {'EV':>5} {'½K':>5} {'#Bk':>3} {'Matchup':<20}",
+        "-" * 105,
     ]
 
     for m in matches:
-        player = m.get("player_name", "")[:19]
-        stat = m.get("stat_type", "")[:9]
+        player = m.get("player_name", "")[:17]
+        stat = m.get("stat_type", "")[:6]
         k_line = m.get("kalshi_line", 0)
-        o_line = m.get("odds_line", 0)
-        side = m.get("best_side", "")[:4]
+        side = m.get("best_side", "")
+
+        # Get probs for recommended side
+        if side == "OVER":
+            kalshi_prob = m.get("kalshi_over_prob", 0)
+            books_prob = m.get("odds_over_prob", 0)
+        else:
+            kalshi_prob = m.get("kalshi_under_prob", 0)
+            books_prob = m.get("odds_under_prob", 0)
+
         edge = m.get("best_edge", 0)
-        kalshi_prob = m.get("kalshi_over_prob", 0) if m.get("best_side") == "OVER" else m.get("kalshi_under_prob", 0)
-        odds_prob = m.get("odds_over_prob", 0) if m.get("best_side") == "OVER" else m.get("odds_under_prob", 0)
+        ev_cents = m.get("ev_per_contract", 0) * 100
+        kelly = round_kelly(m.get("kelly_bet", 0))
         books = m.get("odds_books_used", 0)
 
+        away = m.get("away_team", "")[:9]
+        home = m.get("home_team", "")[:9]
+        matchup = f"{away}@{home}" if away or home else ""
+
+        kalshi_str = prob_to_american(kalshi_prob)
+        books_str = prob_to_american(books_prob)
+        kelly_str = f"{kelly:.0%}" if kelly > 0 else "—"
+
         lines.append(
-            f"{player:<20} {stat:<10} {k_line:>6.1f} {o_line:>6.1f} {side:<5} {edge:>+5.1%} "
-            f"{kalshi_prob:>5.1%} {odds_prob:>5.1%} {books:>3}"
+            f"{player:<18} {stat:<7} {k_line:>4.0f}+ {side:<5} {edge:>+5.1%} "
+            f"{kalshi_str:>7} {books_str:>7} {ev_cents:>+4.0f}¢ {kelly_str:>5} {books:>3} {matchup:<20}"
         )
+
+    lines.append("")
+    lines.append(f"Kelly fraction: {KELLY_FRACTION:.0%} | Line = Kalshi threshold (8+ = 8 or more)")
 
     return "\n".join(lines)
 
 
+def prob_to_american(prob: float) -> str:
+    """Convert probability to American odds string."""
+    if prob <= 0 or prob >= 1:
+        return "N/A"
+    if prob >= 0.5:
+        odds = -100 * prob / (1 - prob)
+        return f"{int(odds):+d}"
+    else:
+        odds = 100 * (1 - prob) / prob
+        return f"+{int(odds)}"
+
+
+def round_kelly(kelly: float) -> float:
+    """Round Kelly down to nearest 5% increment, with 2.5% as an option."""
+    if kelly <= 0:
+        return 0
+    if kelly < 0.025:
+        return 0
+    if kelly < 0.05:
+        return 0.025
+    # Round down to nearest 5%
+    return (int(kelly * 20) / 20)
+
+
+def format_matchup(home_team: str, away_team: str) -> str:
+    """Format matchup as 'AWAY @ HOME'."""
+    if not home_team and not away_team:
+        return ""
+    away = away_team[:10] if len(away_team) > 10 else away_team
+    home = home_team[:10] if len(home_team) > 10 else home_team
+    return f"{away} @ {home}"
+
+
 def format_discord_report(matches: List[Dict[str, Any]]) -> str:
-    """Format matches for Discord (compact, fits in message limit)."""
+    """Format matches for Discord (readable multi-line format)."""
     if not matches:
         return "No prop edges found above threshold."
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"**Kalshi Props Value** ({now_str})", "```"]
+    lines = [f"**Kalshi Props Value** ({now_str})\n"]
 
     for m in matches:
-        player = m.get("player_name", "")[:16]
-        stat = m.get("stat_type", "")[:6]
+        player = m.get("player_name", "")
+        stat = m.get("stat_type", "")
         k_line = m.get("kalshi_line", 0)
+        o_line = m.get("odds_line", 0)
         side = m.get("best_side", "")
-        edge = m.get("best_edge", 0)
-        kalshi_prob = m.get("kalshi_over_prob", 0) if side == "OVER" else m.get("kalshi_under_prob", 0)
-        odds_prob = m.get("odds_over_prob", 0) if side == "OVER" else m.get("odds_under_prob", 0)
 
-        lines.append(
-            f"{player:<16} {stat:<6} {k_line:>4.0f}+ {side:<5} {edge:>+5.1%} "
-            f"(K:{kalshi_prob:.0%} vs B:{odds_prob:.0%})"
-        )
+        # Get the right probabilities for the recommended side
+        if side == "OVER":
+            kalshi_prob = m.get("kalshi_over_prob", 0)
+            books_prob = m.get("odds_over_prob", 0)
+        else:
+            kalshi_prob = m.get("kalshi_under_prob", 0)
+            books_prob = m.get("odds_under_prob", 0)
 
-    lines.append("```")
+        kalshi_american = prob_to_american(kalshi_prob)
+        books_american = prob_to_american(books_prob)
+
+        ev_cents = m.get("ev_per_contract", 0) * 100  # Convert to cents
+        kelly = round_kelly(m.get("kelly_bet", 0))
+        matchup = format_matchup(m.get("home_team", ""), m.get("away_team", ""))
+        books_count = m.get("odds_books_used", 0)
+
+        # Format: Bold player - stat
+        # Line: K 8+ vs B 7.5 | OVER
+        # Odds: Kalshi -150 vs Books -180 (3 books)
+        # EV: +8¢ | Kelly: 5%
+        lines.append(f"**{player}** - {stat}")
+        lines.append(f"Line: K {k_line:.0f}+ vs B {o_line:.1f}")
+        lines.append(f"{side} | Kalshi {kalshi_american} vs Books {books_american} ({books_count}bk)")
+        kelly_str = f"{kelly:.1%}" if kelly > 0 else "—"
+        lines.append(f"EV: {ev_cents:+.0f}¢ | ½K: {kelly_str}")
+        if matchup:
+            lines.append(f"_{matchup}_")
+        lines.append("")  # Blank line between entries
+
     return "\n".join(lines)
 
 

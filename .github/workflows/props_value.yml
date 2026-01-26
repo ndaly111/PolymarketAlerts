@@ -21,7 +21,11 @@ on:
       min_books:
         description: "Minimum sportsbooks required"
         required: false
-        default: "1"
+        default: "2"
+      kelly_fraction:
+        description: "Kelly fraction (0.5 = half Kelly)"
+        required: false
+        default: "0.5"
       dry_run:
         description: "Dry run (print to console, no Discord)"
         type: choice
@@ -64,7 +68,8 @@ jobs:
           MIN_EDGE: ${{ github.event.inputs.min_edge || vars.PROPS_MIN_EDGE || '0.05' }}
           TOP_N: ${{ github.event.inputs.top_n || vars.PROPS_TOP_N || '20' }}
           DISCORD_TOP_N: ${{ github.event.inputs.discord_top_n || vars.PROPS_DISCORD_TOP_N || '8' }}
-          MIN_BOOKS: ${{ github.event.inputs.min_books || vars.PROPS_MIN_BOOKS || '1' }}
+          MIN_BOOKS: ${{ github.event.inputs.min_books || vars.PROPS_MIN_BOOKS || '2' }}
+          KELLY_FRACTION: ${{ github.event.inputs.kelly_fraction || vars.PROPS_KELLY_FRACTION || '0.5' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
           DEBUG_MODE: ${{ github.event.inputs.debug_mode || '0' }}
         run: |
