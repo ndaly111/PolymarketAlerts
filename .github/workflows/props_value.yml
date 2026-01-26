@@ -1,0 +1,71 @@
+name: Kalshi Props Value Scan
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: "0,30 * * * *"
+  workflow_dispatch:
+    inputs:
+      min_edge:
+        description: "Minimum edge threshold (e.g., 0.05 = 5%)"
+        required: false
+        default: "0.05"
+      top_n:
+        description: "Number of results to show"
+        required: false
+        default: "20"
+      discord_top_n:
+        description: "Number of results to post to Discord"
+        required: false
+        default: "8"
+      min_books:
+        description: "Minimum sportsbooks required"
+        required: false
+        default: "1"
+      dry_run:
+        description: "Dry run (print to console, no Discord)"
+        type: choice
+        options: ["0", "1"]
+        default: "0"
+      debug_mode:
+        description: "Debug mode (verbose output)"
+        type: choice
+        options: ["0", "1"]
+        default: "0"
+
+concurrency:
+  group: props-value
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run props value scan
+        env:
+          THE_ODDS_API: ${{ secrets.THE_ODDS_API || secrets.ODDS_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_PROPS_ALERT || secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION: ${{ vars.DISCORD_PROPS_MENTION || vars.DISCORD_MENTION || '' }}
+
+          MIN_EDGE: ${{ github.event.inputs.min_edge || vars.PROPS_MIN_EDGE || '0.05' }}
+          TOP_N: ${{ github.event.inputs.top_n || vars.PROPS_TOP_N || '20' }}
+          DISCORD_TOP_N: ${{ github.event.inputs.discord_top_n || vars.PROPS_DISCORD_TOP_N || '8' }}
+          MIN_BOOKS: ${{ github.event.inputs.min_books || vars.PROPS_MIN_BOOKS || '1' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || '0' }}
+          DEBUG_MODE: ${{ github.event.inputs.debug_mode || '0' }}
+        run: |
+          python props_value.py
