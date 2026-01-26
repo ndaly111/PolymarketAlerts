@@ -97,23 +97,17 @@ def get_or_cache_station(
     return stations[0].station_id
 
 
-def get_baseline_temp(
+def get_morning_observed_temp(
     db_path: Path,
     city_key: str,
     target_date_local: str,
-    forecast_source: str,
 ) -> Optional[int]:
-    """Get the 4am baseline temperature from forecast snapshots."""
-    snap = db_lib.fetch_forecast_snapshot(
+    """Get the first observed temperature of the day (morning baseline)."""
+    return db_lib.fetch_first_intraday_observation(
         db_path,
         city_key=city_key,
         target_date_local=target_date_local,
-        snapshot_hour_local=4,
-        source=forecast_source,
     )
-    if snap:
-        return int(snap["forecast_high_f"])
-    return None
 
 
 def get_max_observed_today(
@@ -185,11 +179,12 @@ def main() -> int:
 
             current_temp = obs.temperature_f
 
-            # Get 4am baseline temp
-            baseline_temp = get_baseline_temp(db_path, c.key, target_date_local, args.forecast_source)
+            # Get morning baseline temp (first observation of the day)
+            baseline_temp = get_morning_observed_temp(db_path, c.key, target_date_local)
             if baseline_temp is None:
-                qc_flags.append("NO_BASELINE")
-                print(f"[warn] {c.key}: no 4am baseline for {target_date_local}, using current temp")
+                # First observation of the day - use current temp as baseline
+                qc_flags.append("FIRST_OBS")
+                print(f"[info] {c.key}: first observation of day, using current temp as baseline")
                 baseline_temp = current_temp
 
             # Get current forecast high (latest snapshot)
