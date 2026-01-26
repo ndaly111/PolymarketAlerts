@@ -8,8 +8,9 @@ from The Odds API to find mispriced props.
 
 import os
 import json
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -62,6 +63,12 @@ KELLY_FRACTION = env_float("KELLY_FRACTION", 0.5)  # Half Kelly by default
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 DISCORD_MENTION = os.getenv("DISCORD_MENTION", "").strip()
 DISCORD_TOP_N = env_int("DISCORD_TOP_N", 8)
+
+# Continuous mode config
+CONTINUOUS_MODE = env_int("CONTINUOUS_MODE", 0)
+KALSHI_REFRESH_SECONDS = env_int("KALSHI_REFRESH_SECONDS", 120)  # 2 minutes
+ODDS_REFRESH_SECONDS = env_int("ODDS_REFRESH_SECONDS", 1800)  # 30 minutes
+CONTINUOUS_DURATION_HOURS = env_float("CONTINUOUS_DURATION_HOURS", 4.0)  # Run for 4 hours
 
 
 LINE_TOLERANCE = env_float("LINE_TOLERANCE", 0.5)  # Max line difference to match
@@ -382,6 +389,113 @@ def post_discord(text: str) -> None:
         raise RuntimeError(f"Discord webhook HTTP {r.status_code}: {r.text[:200]}")
 
 
+def make_alert_key(m: Dict[str, Any]) -> str:
+    """Create a unique key for a prop alert to avoid duplicates."""
+    return f"{m.get('player_name_norm', '')}|{m.get('stat_type', '')}|{m.get('kalshi_line', 0)}|{m.get('best_side', '')}"
+
+
+def run_continuous():
+    """
+    Continuous scan mode: refresh Kalshi frequently, odds API less often.
+    Tracks already-alerted props to avoid duplicate Discord notifications.
+    """
+    print("=" * 60)
+    print("PROPS VALUE SCANNER - CONTINUOUS MODE")
+    print(f"Min edge: {MIN_EDGE:.0%} | Min books: {MIN_BOOKS}")
+    print(f"Kalshi refresh: {KALSHI_REFRESH_SECONDS}s | Odds refresh: {ODDS_REFRESH_SECONDS}s")
+    print(f"Duration: {CONTINUOUS_DURATION_HOURS}h")
+    print("=" * 60)
+    print()
+
+    start_time = time.time()
+    end_time = start_time + (CONTINUOUS_DURATION_HOURS * 3600)
+
+    # Cache for odds API data
+    odds_props: List[Dict[str, Any]] = []
+    last_odds_refresh = 0.0
+
+    # Track already-alerted props (reset when odds refresh)
+    alerted_keys: Set[str] = set()
+
+    iteration = 0
+    while time.time() < end_time:
+        iteration += 1
+        now = time.time()
+        elapsed_hours = (now - start_time) / 3600
+        remaining_hours = (end_time - now) / 3600
+
+        print(f"\n--- Iteration {iteration} | Elapsed: {elapsed_hours:.1f}h | Remaining: {remaining_hours:.1f}h ---")
+
+        # Refresh odds if needed
+        if now - last_odds_refresh >= ODDS_REFRESH_SECONDS:
+            print("Refreshing sportsbook odds...")
+            try:
+                odds_props = fetch_all_props(min_books=MIN_BOOKS)
+                print(f"  Found {len(odds_props)} props from Odds API")
+                last_odds_refresh = now
+                # Reset alerted keys when odds refresh (prices may have changed)
+                alerted_keys = set()
+            except Exception as e:
+                print(f"  ERROR fetching odds: {e}")
+                if not odds_props:
+                    print("  No cached odds available, waiting...")
+                    time.sleep(60)
+                    continue
+
+        # Always refresh Kalshi
+        print("Fetching Kalshi props...")
+        try:
+            kalshi_props = fetch_kalshi_props()
+            print(f"  Found {len(kalshi_props)} props from Kalshi")
+        except Exception as e:
+            print(f"  ERROR fetching Kalshi: {e}")
+            time.sleep(30)
+            continue
+
+        # Match and find edges
+        matches = match_props(odds_props, kalshi_props)
+        ranked = filter_and_rank(matches, min_edge=MIN_EDGE, top_n=TOP_N)
+        print(f"  {len(ranked)} props with edge >= {MIN_EDGE:.0%}")
+
+        # Find NEW edges (not already alerted)
+        new_edges = []
+        for m in ranked:
+            key = make_alert_key(m)
+            if key not in alerted_keys:
+                new_edges.append(m)
+                alerted_keys.add(key)
+
+        if new_edges:
+            print(f"  {len(new_edges)} NEW edges to alert!")
+            print(format_edge_report(new_edges[:10]))
+
+            # Post to Discord
+            discord_matches = new_edges[:DISCORD_TOP_N]
+            discord_text = format_discord_report(discord_matches)
+            # Add continuous mode indicator
+            discord_text = discord_text.replace(
+                "**Kalshi Props Value**",
+                "**Kalshi Props Value** 🔄"
+            )
+            try:
+                post_discord(discord_text)
+                print(f"  Posted {len(discord_matches)} new edges to Discord.")
+            except Exception as e:
+                print(f"  ERROR posting to Discord: {e}")
+        else:
+            print("  No new edges.")
+
+        # Wait for next iteration
+        sleep_time = min(KALSHI_REFRESH_SECONDS, end_time - time.time())
+        if sleep_time > 0:
+            print(f"Sleeping {sleep_time:.0f}s...")
+            time.sleep(sleep_time)
+
+    print("\n" + "=" * 60)
+    print("Continuous scan complete.")
+    print("=" * 60)
+
+
 def main():
     print("=" * 60)
     print("PROPS VALUE SCANNER")
@@ -432,4 +546,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if CONTINUOUS_MODE:
+        run_continuous()
+    else:
+        main()
