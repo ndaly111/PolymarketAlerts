@@ -8,7 +8,7 @@ import requests
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
-# Major leagues + college (mirrors oddsapi_moneyline.py)
+# Major leagues + college + tennis (mirrors oddsapi_moneyline.py)
 DEFAULT_SPORT_KEYS = [
     "americanfootball_nfl",
     "basketball_nba",
@@ -16,6 +16,31 @@ DEFAULT_SPORT_KEYS = [
     "icehockey_nhl",
     "americanfootball_ncaaf",
     "basketball_ncaab",
+    # Tennis - Grand Slams
+    "tennis_atp_aus_open_singles",
+    "tennis_atp_french_open",
+    "tennis_atp_wimbledon",
+    "tennis_atp_us_open",
+    "tennis_wta_aus_open_singles",
+    "tennis_wta_french_open",
+    "tennis_wta_wimbledon",
+    "tennis_wta_us_open",
+    # Tennis - Masters 1000
+    "tennis_atp_indian_wells",
+    "tennis_atp_miami_open",
+    "tennis_atp_monte_carlo_masters",
+    "tennis_atp_madrid_open",
+    "tennis_atp_italian_open",
+    "tennis_atp_canadian_open",
+    "tennis_atp_cincinnati_open",
+    "tennis_atp_shanghai_masters",
+    "tennis_atp_paris_masters",
+    "tennis_wta_indian_wells",
+    "tennis_wta_miami_open",
+    "tennis_wta_madrid_open",
+    "tennis_wta_italian_open",
+    "tennis_wta_canadian_open",
+    "tennis_wta_cincinnati_open",
 ]
 
 

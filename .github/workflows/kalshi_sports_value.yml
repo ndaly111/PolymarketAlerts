@@ -24,6 +24,7 @@ on:
           - ncaaf
           - ncaab
           - college
+          - tennis
           - custom
         default: all
       sport_keys_custom:
@@ -117,7 +118,8 @@ jobs:
           # Official base host default; override via repo var if you ever need to.
           KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
 
-          SPORT_KEYS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab') || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
+          # Tennis keys: Grand Slams + Masters 1000 (only active during tournaments)
+          SPORT_KEYS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'tennis' && 'tennis_atp_aus_open_singles,tennis_atp_french_open,tennis_atp_wimbledon,tennis_atp_us_open,tennis_wta_aus_open_singles,tennis_wta_french_open,tennis_wta_wimbledon,tennis_wta_us_open,tennis_atp_indian_wells,tennis_atp_miami_open,tennis_atp_monte_carlo_masters,tennis_atp_madrid_open,tennis_atp_italian_open,tennis_atp_canadian_open,tennis_atp_cincinnati_open,tennis_atp_shanghai_masters,tennis_atp_paris_masters,tennis_wta_indian_wells,tennis_wta_miami_open,tennis_wta_madrid_open,tennis_wta_italian_open,tennis_wta_canadian_open,tennis_wta_cincinnati_open' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab,tennis_atp_aus_open_singles,tennis_atp_french_open,tennis_atp_wimbledon,tennis_atp_us_open,tennis_wta_aus_open_singles,tennis_wta_french_open,tennis_wta_wimbledon,tennis_wta_us_open,tennis_atp_indian_wells,tennis_atp_miami_open,tennis_atp_monte_carlo_masters,tennis_atp_madrid_open,tennis_atp_italian_open,tennis_atp_canadian_open,tennis_atp_cincinnati_open,tennis_atp_shanghai_masters,tennis_atp_paris_masters,tennis_wta_indian_wells,tennis_wta_miami_open,tennis_wta_madrid_open,tennis_wta_italian_open,tennis_wta_canadian_open,tennis_wta_cincinnati_open') || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab,tennis_atp_aus_open_singles,tennis_atp_french_open,tennis_atp_wimbledon,tennis_atp_us_open,tennis_wta_aus_open_singles,tennis_wta_french_open,tennis_wta_wimbledon,tennis_wta_us_open,tennis_atp_indian_wells,tennis_atp_miami_open,tennis_atp_monte_carlo_masters,tennis_atp_madrid_open,tennis_atp_italian_open,tennis_atp_canadian_open,tennis_atp_cincinnati_open,tennis_atp_shanghai_masters,tennis_atp_paris_masters,tennis_wta_indian_wells,tennis_wta_miami_open,tennis_wta_madrid_open,tennis_wta_italian_open,tennis_wta_canadian_open,tennis_wta_cincinnati_open' }}
 
           TOP_N: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.top_n) || vars.KALSHI_TOP_N || '25' }}
           MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.02' }}
@@ -162,7 +164,7 @@ jobs:
           KALSHI_SERIES_TICKERS: ${{ vars.KALSHI_SERIES_TICKERS || '' }}
           KALSHI_SERIES_CATEGORY: ${{ vars.KALSHI_SERIES_CATEGORY || 'Sports' }}
           KALSHI_SPORTS_SERIES_INCLUDE_REGEX: ${{ vars.KALSHI_SPORTS_SERIES_INCLUDE_REGEX || '(GAME|MONEYLINE|H2H|SPREAD|TOTAL|OVER|UNDER)' }}
-          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ vars.KALSHI_SPORTS_SERIES_EXCLUDE_REGEX || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE|ATP|WTA|TENNIS|GOLF|MATCH\\s*BET)' }}
+          KALSHI_SPORTS_SERIES_EXCLUDE_REGEX: ${{ vars.KALSHI_SPORTS_SERIES_EXCLUDE_REGEX || '(PROP|PLAYER|MVP|CHAMP|TROPHY|AWARD|SEASON|FUTURE|FUTURES|WINS|EXACT|COMBO|PARLAY|PACK|SALE|COACH|TOP\\s*\\d|ALT|ALTERNATE|GOLF|MATCH\\s*BET)' }}
           KALSHI_MIN_CLOSE_BUFFER_HOURS: ${{ vars.KALSHI_MIN_CLOSE_BUFFER_HOURS || '0' }}
 
           # Ping Discord on manual runs even if 0 plays (so you know the job ran)
