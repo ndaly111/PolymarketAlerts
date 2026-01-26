@@ -2,8 +2,8 @@ name: Props Auto Trade
 
 on:
   schedule:
-    # Run every 15 min from 6am to 8pm EST (11:00-01:00 UTC)
-    - cron: "*/15 11-23 * * *"  # 6am-6:45pm EST
+    # Run every 15 min from 5am to 8pm EST (10:00-01:00 UTC)
+    - cron: "*/15 10-23 * * *"  # 5am-6:45pm EST
     - cron: "*/15 0 * * *"      # 7pm-7:45pm EST
     - cron: "0 1 * * *"         # 8pm EST (last run)
   workflow_dispatch:
