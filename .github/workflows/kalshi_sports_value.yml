@@ -35,9 +35,14 @@ on:
         required: false
         default: "25"
       min_edge:
-        description: "Minimum edge (probability points; 0.03 = 3pp)"
+        description: "Minimum edge (probability points; 0.02 = 2pp)"
         required: false
-        default: "0.03"
+        default: "0.02"
+      show_all_edges:
+        description: "Show ALL edges (bypass MIN_EDGE filter for debugging)"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
       min_volume:
         description: "Minimum Kalshi volume to include (0 disables volume filter)"
         required: false
@@ -115,7 +120,8 @@ jobs:
           SPORT_KEYS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.sport_preset == 'nfl' && 'americanfootball_nfl' || github.event.inputs.sport_preset == 'nba' && 'basketball_nba' || github.event.inputs.sport_preset == 'mlb' && 'baseball_mlb' || github.event.inputs.sport_preset == 'nhl' && 'icehockey_nhl' || github.event.inputs.sport_preset == 'ncaaf' && 'americanfootball_ncaaf' || github.event.inputs.sport_preset == 'ncaab' && 'basketball_ncaab' || github.event.inputs.sport_preset == 'college' && 'americanfootball_ncaaf,basketball_ncaab' || github.event.inputs.sport_preset == 'custom' && github.event.inputs.sport_keys_custom || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab') || 'americanfootball_nfl,basketball_nba,baseball_mlb,icehockey_nhl,americanfootball_ncaaf,basketball_ncaab' }}
 
           TOP_N: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.top_n) || vars.KALSHI_TOP_N || '25' }}
-          MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.03' }}
+          MIN_EDGE: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.min_edge) || vars.KALSHI_MIN_EDGE || '0.02' }}
+          SHOW_ALL_EDGES: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.show_all_edges) || 'false' }}
           # Single-mode debug control:
           # - prod  => normal behavior
           # - debug => keep filters, but show/debug more
@@ -136,7 +142,7 @@ jobs:
           KALSHI_MIN_VOLUME: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.min_volume || vars.KALSHI_MIN_VOLUME || '0' }}
 
           # Guard against cross-date fuzzy matches (hours difference between Odds commence_time and Kalshi close time).
-          KALSHI_MATCH_MAX_TIME_SKEW_HOURS: ${{ vars.KALSHI_MATCH_MAX_TIME_SKEW_HOURS || '12' }}
+          KALSHI_MATCH_MAX_TIME_SKEW_HOURS: ${{ vars.KALSHI_MATCH_MAX_TIME_SKEW_HOURS || '48' }}
           # Only loosen matching if you explicitly enable it for debugging.
           KALSHI_DEBUG_LOOSE_MATCH: ${{ vars.KALSHI_DEBUG_LOOSE_MATCH || 'false' }}
           # If DEBUG_MODE=true and you want orderbook requests even when prices exist, set to true.

@@ -800,7 +800,15 @@ def min_edge_for_depth(
     min_edge_deep: float,
     thin_max_contracts: int,
     medium_max_contracts: int,
+    use_tiered: bool = False,  # NEW: disabled by default
 ) -> float:
+    """Calculate minimum edge threshold.
+
+    If use_tiered=False (default), just returns base_min_edge.
+    If use_tiered=True, applies liquidity-based tiers (legacy behavior).
+    """
+    if not use_tiered:
+        return base_min_edge
     if depth_contracts is None:
         return base_min_edge
     if depth_contracts < thin_max_contracts:
@@ -1512,14 +1520,18 @@ def scan() -> int:
     mve_filter = env_str("KALSHI_MVE_FILTER", "all")
 
     min_edge = env_float("MIN_EDGE", 0.02)
-    min_edge_thin = env_float("MIN_EDGE_THIN", 0.05)
-    min_edge_medium = env_float("MIN_EDGE_MED", 0.03)
+    # Tiered edge thresholds (only used if USE_TIERED_EDGE=true)
+    use_tiered_edge = env_bool("USE_TIERED_EDGE", False)  # disabled by default - simpler filtering
+    min_edge_thin = env_float("MIN_EDGE_THIN", 0.03)
+    min_edge_medium = env_float("MIN_EDGE_MED", 0.025)
     min_edge_deep = env_float("MIN_EDGE_DEEP", 0.02)
     min_edge_thin_max_contracts = env_int("MIN_EDGE_THIN_MAX_CONTRACTS", 10)
     min_edge_medium_max_contracts = env_int("MIN_EDGE_MED_MAX_CONTRACTS", 50)
-    min_bid_contracts = env_int("MIN_BID_CONTRACTS", 5)
+    min_bid_contracts = env_int("MIN_BID_CONTRACTS", 0)  # 0 = disabled (allows thin markets)
+    # Show all edges above 0 for debugging (bypasses MIN_EDGE filter)
+    show_all_edges = env_bool("SHOW_ALL_EDGES", False)
     min_notional_cents = env_int("MIN_NOTIONAL_CENTS", 0)
-    max_executable_ask_cents = env_int("MAX_EXECUTABLE_ASK_CENTS", 98)
+    max_executable_ask_cents = env_int("MAX_EXECUTABLE_ASK_CENTS", 100)  # 100 = disabled
     max_executable_ask_bypass_edge = env_float("MAX_EXECUTABLE_ASK_BYPASS_EDGE", 0.05)
     orderbook_edge_buffer = env_float("ORDERBOOK_EDGE_BUFFER", 0.01)
     top_n = env_int("TOP_N", 25)
@@ -1534,7 +1546,7 @@ def scan() -> int:
     debug_force_orderbook = env_bool("KALSHI_DEBUG_FORCE_ORDERBOOK", False)
     # In DEBUG_MODE we want to *see* non-edge matches to validate matching/filtering.
     debug_show_all = debug_mode or env_bool("KALSHI_DEBUG_SHOW_ALL", False)
-    match_max_time_skew_hours = env_int("KALSHI_MATCH_MAX_TIME_SKEW_HOURS", 12)
+    match_max_time_skew_hours = env_int("KALSHI_MATCH_MAX_TIME_SKEW_HOURS", 48)  # was 12, increased for better matching
 
     # If debug/no-filter, automatically enable pipeline report unless explicitly disabled.
     pipeline_report_enabled = pipeline_report_enabled or debug_mode or no_filters
@@ -1570,6 +1582,8 @@ def scan() -> int:
         "min_volume_effective": min_volume_effective,
         "use_orderbook": use_orderbook,
         "min_edge": min_edge,
+        "use_tiered_edge": use_tiered_edge,
+        "show_all_edges": show_all_edges,
         "top_n": top_n,
         "min_edge_thin": min_edge_thin,
         "min_edge_medium": min_edge_medium,
@@ -2644,9 +2658,11 @@ def scan() -> int:
                     min_edge_deep,
                     min_edge_thin_max_contracts,
                     min_edge_medium_max_contracts,
+                    use_tiered=use_tiered_edge,
                 )
-                if (not debug_show_all) and (not no_filters) and edge < min_edge_effective:
-                    drops["edge_below_liquidity_tier"] += 1
+                # Edge filter: skip if edge below threshold (unless show_all_edges or debug modes)
+                if (not show_all_edges) and (not debug_show_all) and (not no_filters) and edge < min_edge_effective:
+                    drops["edge_below_min"] += 1
                     continue
 
                 candidates.append(
