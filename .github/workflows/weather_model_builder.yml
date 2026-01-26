@@ -65,7 +65,10 @@ jobs:
             git commit -m "weather: update observed highs and error models"
             ok=0
             for i in 1 2 3; do
-              git pull --rebase && git push && ok=1 && break
+              git stash --include-untracked
+              git pull --rebase && git push && ok=1
+              git stash pop || true
+              [[ "$ok" == "1" ]] && break
               echo "Push failed (attempt $i). Retrying..."
               sleep 2
             done
