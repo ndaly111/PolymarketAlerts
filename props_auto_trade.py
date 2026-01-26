@@ -356,6 +356,16 @@ def execute_trade(
         )
         order_id = order.get("order_id", order.get("id", ""))
         print(f"  Order placed: {order_id}")
+
+        # Discord notification - order placed
+        ev_cents = edge * 100
+        place_msg = (
+            f"**Order Placed** | {player} {stat_type} {line:.0f}+ {side}\n"
+            f"Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
+            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill..."
+        )
+        post_discord(place_msg)
+
     except Exception as e:
         print(f"  [error] Failed to place order: {e}")
         record_trade(
@@ -363,6 +373,8 @@ def execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
             None, "error"
         )
+        # Discord notification - error
+        post_discord(f"**Order Failed** | {player} {stat_type} {line:.0f}+ {side}\nError: {str(e)[:100]}")
         return False
 
     # Step 8: Wait and check fill status
@@ -384,11 +396,12 @@ def execute_trade(
                 order_id, "filled", fill_price
             )
 
-            # Discord notification
-            ev_cents = edge * 100
+            # Discord notification - filled
+            actual_edge = fair_prob - (fill_price / 100.0)
+            ev_cents = actual_edge * 100
             msg = (
-                f"**Trade Filled** | {player} {stat_type} {line:.0f}+ {side}\n"
-                f"Price: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
+                f"**FILLED** | {player} {stat_type} {line:.0f}+ {side}\n"
+                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
                 f"Books: {books_count}"
             )
             post_discord(msg)
@@ -404,6 +417,9 @@ def execute_trade(
                 order_id, "cancelled"
             )
             print(f"  Order cancelled")
+
+            # Discord notification - cancelled
+            post_discord(f"**Cancelled** | {player} {stat_type} {line:.0f}+ {side} | Not filled after {ORDER_TIMEOUT_SECONDS}s")
             return False
 
     except Exception as e:

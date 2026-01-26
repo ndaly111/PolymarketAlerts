@@ -2,14 +2,10 @@ name: Props Auto Trade
 
 on:
   schedule:
-    # Run at key times during game days (all times UTC)
-    # NBA/NHL games typically 7pm-10pm ET = midnight-3am UTC
-    # NCAAB games throughout the day
-    - cron: "0 17 * * *"   # 12pm ET - early games
-    - cron: "0 20 * * *"   # 3pm ET - afternoon games
-    - cron: "0 23 * * *"   # 6pm ET - evening games
-    - cron: "30 0 * * *"   # 7:30pm ET - prime time
-    - cron: "0 2 * * *"    # 9pm ET - late games
+    # Run every 15 min from 6am to 8pm EST (11:00-01:00 UTC)
+    - cron: "*/15 11-23 * * *"  # 6am-6:45pm EST
+    - cron: "*/15 0 * * *"      # 7pm-7:45pm EST
+    - cron: "0 1 * * *"         # 8pm EST (last run)
   workflow_dispatch:
     inputs:
       dry_run:
