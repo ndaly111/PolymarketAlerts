@@ -16,9 +16,11 @@ Workflow:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +49,21 @@ DB_PATH = Path(os.getenv("PROPS_DB_PATH", "props_trades.db"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_PROPS_WEBHOOK", os.getenv("DISCORD_WEBHOOK_URL", ""))
 
 DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
+
+
+class TeeIO:
+    def __init__(self, original: Any, buffer: io.StringIO) -> None:
+        self.original = original
+        self.buffer = buffer
+
+    def write(self, text: str) -> int:
+        written = self.original.write(text)
+        self.buffer.write(text)
+        return written
+
+    def flush(self) -> None:
+        self.original.flush()
+        self.buffer.flush()
 
 
 def ensure_db_schema(db_path: Path) -> None:
@@ -628,124 +645,135 @@ def execute_trade(
 
 
 def main() -> int:
-    print("=" * 60)
-    print("PROPS AUTO TRADER")
-    print(f"Initial EV threshold: {MIN_INITIAL_EV:.0%}")
-    print(f"Final EV threshold: {MIN_FINAL_EV:.0%}")
-    print(f"Min books: {MIN_BOOKS}")
-    print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
-    print(f"Min fair prob: {MIN_FAIR_PROB:.1%}")
-    print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
-    print(f"Order timeout: {ORDER_TIMEOUT_SECONDS}s")
-    print(f"Dry run: {DRY_RUN}")
-    print("=" * 60)
-
-    post_discord(format_startup_message())
-
-    # Initialize
-    ensure_db_schema(DB_PATH)
-
-    # Check daily limit
-    trades_today = get_trades_today(DB_PATH)
-    print(f"\nTrades today: {trades_today}/{MAX_TRADES_PER_DAY}")
-
-    if trades_today >= MAX_TRADES_PER_DAY:
-        print("Daily trade limit reached. Exiting.")
-        return 0
-
-    remaining_trades = MAX_TRADES_PER_DAY - trades_today
-
-    # Initialize Kalshi client
-    print("\nInitializing Kalshi client...")
+    log_buffer = io.StringIO()
+    original_stdout = sys.stdout
+    sys.stdout = TeeIO(original_stdout, log_buffer)
     try:
-        client = KalshiAuthClient.from_env()
-        balance = client.get_balance()
-        available = balance.get("available_balance", balance.get("balance", 0)) / 100
-        print(f"Balance: ${available:.2f}")
-    except Exception as e:
-        print(f"Failed to initialize Kalshi client: {e}")
-        return 1
+        print("=" * 60)
+        print("PROPS AUTO TRADER")
+        print(f"Initial EV threshold: {MIN_INITIAL_EV:.0%}")
+        print(f"Final EV threshold: {MIN_FINAL_EV:.0%}")
+        print(f"Min books: {MIN_BOOKS}")
+        print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
+        print(f"Min fair prob: {MIN_FAIR_PROB:.1%}")
+        print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
+        print(f"Order timeout: {ORDER_TIMEOUT_SECONDS}s")
+        print(f"Dry run: {DRY_RUN}")
+        print("=" * 60)
 
-    # Step 1: Initial scan for 5%+ EV opportunities
-    print("\n--- Step 1: Initial Scan ---")
+        # Initialize
+        ensure_db_schema(DB_PATH)
 
-    # Fetch Kalshi props first (free, unlimited)
-    print("Fetching Kalshi props...")
-    kalshi_props = fetch_kalshi_props()
-    print(f"  Found {len(kalshi_props)} Kalshi props")
+        # Check daily limit
+        trades_today = get_trades_today(DB_PATH)
+        print(f"\nTrades today: {trades_today}/{MAX_TRADES_PER_DAY}")
 
-    if not kalshi_props:
-        print("No Kalshi props available. Exiting.")
-        return 0
+        if trades_today >= MAX_TRADES_PER_DAY:
+            print("Daily trade limit reached. Exiting.")
+            return 0
 
-    # Determine which sports have active Kalshi markets
-    active_sports = get_active_sports_from_kalshi(kalshi_props)
-    print(f"  Active sports: {', '.join(active_sports) or 'none'}")
+        remaining_trades = MAX_TRADES_PER_DAY - trades_today
 
-    if not active_sports:
-        print("No active sports with Kalshi markets. Exiting.")
-        return 0
-
-    # Only fetch Odds API for sports with active Kalshi markets (uses cache)
-    print(f"Fetching sportsbook odds (only {len(active_sports)} sports, cached 30min)...")
-    odds_props = fetch_all_props(sport_keys=active_sports, min_books=2, use_cache=True)
-    print(f"  Found {len(odds_props)} sportsbook props")
-
-    print("Matching and finding edges...")
-    matches = match_props(odds_props, kalshi_props)
-    opportunities = filter_and_rank(matches, min_edge=MIN_INITIAL_EV, top_n=50)
-    print(f"  Found {len(opportunities)} opportunities with {MIN_INITIAL_EV:.0%}+ edge")
-
-    if not opportunities:
-        print("\nNo opportunities found. Exiting.")
-        return 0
-
-    # Log ALL scanned opportunities for later analysis
-    print(f"\nLogging {len(opportunities)} opportunities to database...")
-    for opp in opportunities:
+        # Initialize Kalshi client
+        print("\nInitializing Kalshi client...")
         try:
-            log_scanned_opportunity(
-                db_path=DB_PATH,
-                ticker=opp.get("kalshi_ticker", ""),
-                player_name=opp.get("player_name", ""),
-                stat_type=opp.get("stat_type", ""),
-                line=opp.get("kalshi_line", 0),
-                side=opp.get("best_side", ""),
-                kalshi_bid=opp.get("kalshi_yes_bid", 0),
-                kalshi_ask=opp.get("kalshi_yes_ask", 100),
-                kalshi_prob=opp.get("bet_price", 0.5),
-                fair_prob=opp.get("odds_over_prob", 0.5) if opp.get("best_side") == "OVER" else opp.get("odds_under_prob", 0.5),
-                edge=opp.get("best_edge", 0),
-                books_count=opp.get("odds_books_used", 0),
-                volume=opp.get("kalshi_volume", 0),
-                event_time=opp.get("commence_time", ""),
-            )
+            client = KalshiAuthClient.from_env()
+            balance = client.get_balance()
+            available = balance.get("available_balance", balance.get("balance", 0)) / 100
+            print(f"Balance: ${available:.2f}")
         except Exception as e:
-            print(f"  [warn] Failed to log opportunity: {e}")
+            print(f"Failed to initialize Kalshi client: {e}")
+            return 1
 
-    # Process opportunities
-    print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")
+        # Step 1: Initial scan for 5%+ EV opportunities
+        print("\n--- Step 1: Initial Scan ---")
 
-    trades_placed = 0
-    for opp in opportunities:
-        if trades_placed >= remaining_trades:
-            print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
-            break
+        # Fetch Kalshi props first (free, unlimited)
+        print("Fetching Kalshi props...")
+        kalshi_props = fetch_kalshi_props()
+        print(f"  Found {len(kalshi_props)} Kalshi props")
 
-        # Pass cached odds to avoid new Odds API calls
-        success = execute_trade(client, DB_PATH, opp, cached_odds=odds_props)
-        if success:
-            trades_placed += 1
-            increment_trades_today(DB_PATH)
+        if not kalshi_props:
+            print("No Kalshi props available. Exiting.")
+            return 0
 
-        # Rate limit between trades
-        time.sleep(1)
+        # Determine which sports have active Kalshi markets
+        active_sports = get_active_sports_from_kalshi(kalshi_props)
+        print(f"  Active sports: {', '.join(active_sports) or 'none'}")
 
-    print(f"\n{'=' * 60}")
-    print(f"Session complete: {trades_placed} trades placed")
-    print("=" * 60)
+        if not active_sports:
+            print("No active sports with Kalshi markets. Exiting.")
+            return 0
 
-    return 0
+        # Only fetch Odds API for sports with active Kalshi markets (uses cache)
+        print(f"Fetching sportsbook odds (only {len(active_sports)} sports, cached 30min)...")
+        odds_props = fetch_all_props(sport_keys=active_sports, min_books=2, use_cache=True)
+        print(f"  Found {len(odds_props)} sportsbook props")
+
+        print("Matching and finding edges...")
+        matches = match_props(odds_props, kalshi_props)
+        opportunities = filter_and_rank(matches, min_edge=MIN_INITIAL_EV, top_n=50)
+        print(f"  Found {len(opportunities)} opportunities with {MIN_INITIAL_EV:.0%}+ edge")
+
+        if not opportunities:
+            print("\nNo opportunities found. Exiting.")
+            return 0
+
+        # Log ALL scanned opportunities for later analysis
+        print(f"\nLogging {len(opportunities)} opportunities to database...")
+        for opp in opportunities:
+            try:
+                log_scanned_opportunity(
+                    db_path=DB_PATH,
+                    ticker=opp.get("kalshi_ticker", ""),
+                    player_name=opp.get("player_name", ""),
+                    stat_type=opp.get("stat_type", ""),
+                    line=opp.get("kalshi_line", 0),
+                    side=opp.get("best_side", ""),
+                    kalshi_bid=opp.get("kalshi_yes_bid", 0),
+                    kalshi_ask=opp.get("kalshi_yes_ask", 100),
+                    kalshi_prob=opp.get("bet_price", 0.5),
+                    fair_prob=opp.get("odds_over_prob", 0.5) if opp.get("best_side") == "OVER" else opp.get("odds_under_prob", 0.5),
+                    edge=opp.get("best_edge", 0),
+                    books_count=opp.get("odds_books_used", 0),
+                    volume=opp.get("kalshi_volume", 0),
+                    event_time=opp.get("commence_time", ""),
+                )
+            except Exception as e:
+                print(f"  [warn] Failed to log opportunity: {e}")
+
+        # Process opportunities
+        print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")
+
+        trades_placed = 0
+        for opp in opportunities:
+            if trades_placed >= remaining_trades:
+                print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
+                break
+
+            # Pass cached odds to avoid new Odds API calls
+            success = execute_trade(client, DB_PATH, opp, cached_odds=odds_props)
+            if success:
+                trades_placed += 1
+                increment_trades_today(DB_PATH)
+
+            # Rate limit between trades
+            time.sleep(1)
+
+        print(f"\n{'=' * 60}")
+        print(f"Session complete: {trades_placed} trades placed")
+        print("=" * 60)
+
+        return 0
+    finally:
+        sys.stdout = original_stdout
+        run_output = log_buffer.getvalue().strip()
+        startup_message = format_startup_message()
+        if run_output:
+            discord_message = f"{startup_message}\n{run_output}"
+        else:
+            discord_message = startup_message
+        post_discord(discord_message)
 
 
 if __name__ == "__main__":
