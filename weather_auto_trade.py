@@ -92,6 +92,15 @@ def ensure_db_schema(db_path: Path) -> None:
         cur.execute("ALTER TABLE weather_trades ADD COLUMN last_checked_at_utc TEXT;")
     if "filled_at_utc" not in columns:
         cur.execute("ALTER TABLE weather_trades ADD COLUMN filled_at_utc TEXT;")
+    # Settlement tracking columns
+    if "settled" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN settled INTEGER DEFAULT 0;")
+    if "won" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN won INTEGER;")
+    if "payout_cents" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN payout_cents INTEGER;")
+    if "settled_at_utc" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN settled_at_utc TEXT;")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS weather_daily_stats (
@@ -124,6 +133,156 @@ def ensure_db_schema(db_path: Path) -> None:
 
     conn.commit()
     conn.close()
+
+
+def get_ev_bucket(ev: float) -> str:
+    """Classify EV into bucket."""
+    if ev < 0.05:
+        return "0-5%"
+    elif ev < 0.10:
+        return "5-10%"
+    elif ev < 0.15:
+        return "10-15%"
+    elif ev < 0.20:
+        return "15-20%"
+    else:
+        return "20%+"
+
+
+def get_results_by_ev_bucket(db_path: Path) -> Dict[str, Dict[str, Any]]:
+    """
+    Get trading results grouped by EV bucket.
+
+    Returns dict with keys like "0-5%", "5-10%", etc.
+    Each value contains: trades, wins, losses, pending, total_cost, total_payout, roi
+    """
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+
+    # Get all filled trades with their outcomes
+    cur.execute("""
+        SELECT
+            ev,
+            limit_price_cents,
+            fill_price_cents,
+            settled,
+            won,
+            payout_cents,
+            side,
+            fair_q
+        FROM weather_trades
+        WHERE status IN ('filled', 'FILLED')
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    buckets = {
+        "0-5%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
+        "5-10%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
+        "10-15%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
+        "15-20%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
+        "20%+": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
+    }
+
+    for ev, limit_price, fill_price, settled, won, payout, side, fair_q in rows:
+        bucket = get_ev_bucket(ev or 0)
+        if bucket not in buckets:
+            continue
+
+        b = buckets[bucket]
+        b["trades"] += 1
+
+        cost = fill_price if fill_price else limit_price
+        b["total_cost_cents"] += cost or 0
+        b["kalshi_odds"].append(cost or 0)
+
+        if settled:
+            if won:
+                b["wins"] += 1
+                b["total_payout_cents"] += payout or 100  # Win pays $1 = 100 cents
+            else:
+                b["losses"] += 1
+                b["total_payout_cents"] += 0
+        else:
+            b["pending"] += 1
+
+    # Calculate ROI for each bucket
+    for bucket, data in buckets.items():
+        if data["total_cost_cents"] > 0:
+            profit = data["total_payout_cents"] - data["total_cost_cents"]
+            data["roi_pct"] = (profit / data["total_cost_cents"]) * 100
+        else:
+            data["roi_pct"] = 0.0
+
+        # Average Kalshi odds
+        if data["kalshi_odds"]:
+            data["avg_kalshi_cents"] = sum(data["kalshi_odds"]) / len(data["kalshi_odds"])
+        else:
+            data["avg_kalshi_cents"] = 0
+        del data["kalshi_odds"]  # Remove raw list from output
+
+    return buckets
+
+
+def mark_trade_settled(
+    db_path: Path,
+    market_ticker: str,
+    won: bool,
+    payout_cents: int = 0,
+) -> None:
+    """Mark a trade as settled with win/loss result."""
+    now = datetime.now(ZoneInfo("UTC")).isoformat()
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE weather_trades
+        SET settled = 1, won = ?, payout_cents = ?, settled_at_utc = ?, updated_at = ?
+        WHERE market_ticker = ? AND settled = 0
+    """, (1 if won else 0, payout_cents, now, now, market_ticker))
+    conn.commit()
+    conn.close()
+
+
+def format_ev_bucket_report(buckets: Dict[str, Dict[str, Any]]) -> str:
+    """Format EV bucket results as a Discord-friendly string."""
+    lines = ["**Weather Trades by EV Bucket**", ""]
+    lines.append("| EV Bucket | Trades | W-L-P | Avg Ask | ROI |")
+    lines.append("|-----------|--------|-------|---------|-----|")
+
+    total_trades = 0
+    total_wins = 0
+    total_losses = 0
+    total_pending = 0
+    total_cost = 0
+    total_payout = 0
+
+    for bucket in ["0-5%", "5-10%", "10-15%", "15-20%", "20%+"]:
+        data = buckets.get(bucket, {})
+        trades = data.get("trades", 0)
+        wins = data.get("wins", 0)
+        losses = data.get("losses", 0)
+        pending = data.get("pending", 0)
+        avg_ask = data.get("avg_kalshi_cents", 0)
+        roi = data.get("roi_pct", 0)
+
+        total_trades += trades
+        total_wins += wins
+        total_losses += losses
+        total_pending += pending
+        total_cost += data.get("total_cost_cents", 0)
+        total_payout += data.get("total_payout_cents", 0)
+
+        if trades > 0:
+            lines.append(f"| {bucket} | {trades} | {wins}-{losses}-{pending} | {avg_ask:.0f}¢ | {roi:+.1f}% |")
+
+    # Total row
+    if total_cost > 0:
+        total_roi = ((total_payout - total_cost) / total_cost) * 100
+    else:
+        total_roi = 0
+    lines.append(f"| **Total** | {total_trades} | {total_wins}-{total_losses}-{total_pending} | - | {total_roi:+.1f}% |")
+
+    return "\n".join(lines)
 
 
 def get_trades_today(db_path: Path) -> int:
@@ -851,6 +1010,18 @@ def main() -> int:
     if opportunities:
         summary_message = format_summary_message(results, target_date, forecast_source)
         post_discord(summary_message)
+
+    # Post EV bucket performance report (once per day at 8pm ET or later)
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.hour >= 20:
+        try:
+            buckets = get_results_by_ev_bucket(TRADES_DB_PATH)
+            total_trades = sum(b.get("trades", 0) for b in buckets.values())
+            if total_trades > 0:
+                report = format_ev_bucket_report(buckets)
+                post_discord(report)
+        except Exception as e:
+            print(f"  [warn] Failed to generate EV bucket report: {e}")
 
     print(f"\n{'=' * 60}")
     print(f"Session complete: {trades_placed} orders placed")
