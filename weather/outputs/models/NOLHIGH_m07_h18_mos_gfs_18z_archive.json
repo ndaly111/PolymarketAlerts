@@ -1,0 +1,36 @@
+{
+  "city_key": "NOLHIGH",
+  "forecast_source": "mos_gfs_18z_archive",
+  "month": 7,
+  "n_samples": 93,
+  "pmf_error": {
+    "-1": 0.20070818703714563,
+    "-2": 0.12212550959224457,
+    "-3": 0.052706160154919156,
+    "-4": 0.016133554236291092,
+    "-5": 0.003502776416333841,
+    "0": 0.2339577708586019,
+    "1": 0.193429874071134,
+    "2": 0.11342879305389557,
+    "3": 0.047177699569820035,
+    "4": 0.013917585484600597,
+    "5": 0.0029120895250134473
+  },
+  "pmf_support": {
+    "count": 11,
+    "max": 5,
+    "min": -5
+  },
+  "smoothing": {
+    "error_mean": -0.053763440860215055,
+    "error_std": 1.7061910757739083,
+    "gaussian_mix": 1.0,
+    "gaussian_support_std": null,
+    "laplace_alpha": 0.0,
+    "min_tail_prob": 0.01,
+    "pure_gaussian": true,
+    "use_tail_cutoff": true
+  },
+  "snapshot_hour_local": 18,
+  "updated_at_utc": "2026-01-27T11:32:33.962998+00:00"
+}

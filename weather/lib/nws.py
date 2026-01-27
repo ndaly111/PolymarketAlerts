@@ -155,3 +155,84 @@ def get_latest_observation(
         temperature_f=temp_f,
         raw=data,
     )
+
+
+@dataclass(frozen=True)
+class DailyObservedHigh:
+    station_id: str
+    date_local: str
+    tmax_f: int
+    observation_count: int
+    raw_observations: List[Dict[str, Any]]
+
+
+def get_daily_observed_high(
+    s: requests.Session,
+    station_id: str,
+    date_local: str,
+    timezone: str = "America/New_York",
+) -> Optional[DailyObservedHigh]:
+    """
+    Fetch all observations for a calendar day and compute the max temperature.
+
+    Uses: https://api.weather.gov/stations/{stationId}/observations?start=...&end=...
+
+    Args:
+        station_id: METAR station code (e.g., KDEN)
+        date_local: Date in YYYY-MM-DD format (local to station)
+        timezone: Timezone for the station
+
+    Returns DailyObservedHigh or None if unavailable.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    # Parse the local date and convert to UTC range
+    tz = ZoneInfo(timezone)
+    local_midnight = datetime.strptime(date_local, "%Y-%m-%d").replace(tzinfo=tz)
+
+    # Get observations from midnight to midnight (local time)
+    start_utc = local_midnight.astimezone(ZoneInfo("UTC"))
+    end_utc = (local_midnight + timedelta(days=1)).astimezone(ZoneInfo("UTC"))
+
+    url = f"https://api.weather.gov/stations/{station_id}/observations"
+    params = {
+        "start": start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end": end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    try:
+        r = s.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return None
+
+    features = data.get("features", [])
+    if not features:
+        return None
+
+    temps_f = []
+    raw_obs = []
+
+    for feat in features:
+        props = feat.get("properties", {})
+        temp_c = props.get("temperature", {}).get("value")
+        if temp_c is not None:
+            temp_f = int(round(temp_c * 9 / 5 + 32))
+            temps_f.append(temp_f)
+            raw_obs.append({
+                "timestamp": props.get("timestamp"),
+                "temperature_f": temp_f,
+            })
+
+    if not temps_f:
+        return None
+
+    return DailyObservedHigh(
+        station_id=station_id,
+        date_local=date_local,
+        tmax_f=max(temps_f),
+        observation_count=len(temps_f),
+        raw_observations=raw_obs,
+    )

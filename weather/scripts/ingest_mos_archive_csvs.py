@@ -47,10 +47,20 @@ DEFAULT_GLOB = str(ROOT / "weather" / "data" / "forecast_archive" / "*.csv")
 # Station code in the MOS CSV -> city_key in your pipeline
 # NOTE: NYC settlement (NHIGH) uses the NYC CLI; your MOS download here is KNYC (Central Park).
 STATION_TO_CITY_KEY: Dict[str, str] = {
+    # Original 4 cities
     "KMDW": "CHIHIGH",
     "KMIA": "MIAHIGH",
     "KLAX": "LAXHIGH",
     "KNYC": "NHIGH",
+    # New 8 cities
+    "KDEN": "DENHIGH",
+    "KAUS": "AUSHIGH",
+    "KSFO": "SFOHIGH",
+    "KPHL": "PHLHIGH",
+    "KSEA": "SEAHIGH",
+    "KDCA": "DCHIGH",
+    "KLAS": "LVHIGH",
+    "KMSY": "NOLHIGH",
 }
 
 

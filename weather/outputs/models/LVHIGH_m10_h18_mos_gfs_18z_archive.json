@@ -1,0 +1,35 @@
+{
+  "city_key": "LVHIGH",
+  "forecast_source": "mos_gfs_18z_archive",
+  "month": 10,
+  "n_samples": 93,
+  "pmf_error": {
+    "-1": 0.2553914117377844,
+    "-2": 0.1765366514940929,
+    "-3": 0.0792244434007069,
+    "-4": 0.023082307622986176,
+    "-5": 0.00436611297081716,
+    "0": 0.23986860468648946,
+    "1": 0.14626359541339656,
+    "2": 0.05790216425853507,
+    "3": 0.014881580745911083,
+    "4": 0.002483127669280302
+  },
+  "pmf_support": {
+    "count": 10,
+    "max": 4,
+    "min": -5
+  },
+  "smoothing": {
+    "error_mean": -0.6451612903225806,
+    "error_std": 1.5214958774732934,
+    "gaussian_mix": 1.0,
+    "gaussian_support_std": null,
+    "laplace_alpha": 0.0,
+    "min_tail_prob": 0.01,
+    "pure_gaussian": true,
+    "use_tail_cutoff": true
+  },
+  "snapshot_hour_local": 18,
+  "updated_at_utc": "2026-01-27T11:32:33.962998+00:00"
+}

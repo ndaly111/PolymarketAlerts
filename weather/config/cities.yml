@@ -1,27 +1,39 @@
-# Kalshi weather pilot cities (v1)
+# Kalshi weather cities (v3)
 # NOTE: lat/lon are used only to query api.weather.gov points endpoint.
 #       tz here is used for labeling and gating; NWS response also includes timeZone.
 #
 # Settlement source is NWS "Climatological Report (Daily)" (CLI) text products.
 # We store observed max temps from CLI (Daily Climate Report) for each city.
+#
+# Fields:
+#   key: Internal identifier (matches our naming convention)
+#   kalshi_series: Kalshi series ticker for this city's high temp market
+#   mos_station: METAR station code for MOS forecasts (IEM archive)
+#   wfo: NWS Weather Forecast Office code
 
 cities:
+  # === Original 4 cities ===
   - key: MIAHIGH
     label: Miami
+    kalshi_series: KXHIGHMIA
     tz: America/New_York
     lat: 25.7617
     lon: -80.1918
+    mos_station: KMIA
+    wfo: MFL
     cli:
       issuedby: MIA
       site: MFL
       product: CLI
 
-  # Kalshi contract uses Los Angeles Airport (LAX)
   - key: LAXHIGH
     label: Los Angeles (LAX)
+    kalshi_series: KXHIGHLAX
     tz: America/Los_Angeles
     lat: 34.0522
     lon: -118.2437
+    mos_station: KLAX
+    wfo: LOX
     cli:
       issuedby: LAX
       site: LOX
@@ -29,9 +41,12 @@ cities:
 
   - key: CHIHIGH
     label: Chicago
+    kalshi_series: KXHIGHCHI
     tz: America/Chicago
     lat: 41.8781
     lon: -87.6298
+    mos_station: KMDW
+    wfo: LOT
     cli:
       issuedby: MDW
       site: LOT
@@ -39,10 +54,118 @@ cities:
 
   - key: NHIGH
     label: New York
+    kalshi_series: KXHIGHNY
     tz: America/New_York
     lat: 40.7128
     lon: -74.0060
+    mos_station: KNYC
+    wfo: OKX
     cli:
       issuedby: NYC
       site: OKX
+      product: CLI
+
+  # === New 8 cities ===
+  - key: DENHIGH
+    label: Denver
+    kalshi_series: KXHIGHDEN
+    tz: America/Denver
+    lat: 39.8561
+    lon: -104.6737
+    mos_station: KDEN
+    wfo: BOU
+    cli:
+      issuedby: DEN
+      site: BOU
+      product: CLI
+
+  - key: AUSHIGH
+    label: Austin
+    kalshi_series: KXHIGHAUS
+    tz: America/Chicago
+    lat: 30.1975
+    lon: -97.6664
+    mos_station: KAUS
+    wfo: EWX
+    cli:
+      issuedby: AUS
+      site: EWX
+      product: CLI
+
+  - key: SFOHIGH
+    label: San Francisco
+    kalshi_series: KXHIGHTSFO
+    tz: America/Los_Angeles
+    lat: 37.6213
+    lon: -122.3790
+    mos_station: KSFO
+    wfo: MTR
+    cli:
+      issuedby: SFO
+      site: MTR
+      product: CLI
+
+  - key: PHLHIGH
+    label: Philadelphia
+    kalshi_series: KXHIGHPHIL
+    tz: America/New_York
+    lat: 39.8744
+    lon: -75.2424
+    mos_station: KPHL
+    wfo: PHI
+    cli:
+      issuedby: PHL
+      site: PHI
+      product: CLI
+
+  - key: SEAHIGH
+    label: Seattle
+    kalshi_series: KXHIGHTSEA
+    tz: America/Los_Angeles
+    lat: 47.4502
+    lon: -122.3088
+    mos_station: KSEA
+    wfo: SEW
+    cli:
+      issuedby: SEA
+      site: SEW
+      product: CLI
+
+  - key: DCHIGH
+    label: Washington DC
+    kalshi_series: KXHIGHTDC
+    tz: America/New_York
+    lat: 38.8512
+    lon: -77.0402
+    mos_station: KDCA
+    wfo: LWX
+    cli:
+      issuedby: DCA
+      site: LWX
+      product: CLI
+
+  - key: LVHIGH
+    label: Las Vegas
+    kalshi_series: KXHIGHTLV
+    tz: America/Los_Angeles
+    lat: 36.0840
+    lon: -115.1537
+    mos_station: KLAS
+    wfo: VEF
+    cli:
+      issuedby: LAS
+      site: VEF
+      product: CLI
+
+  - key: NOLHIGH
+    label: New Orleans
+    kalshi_series: KXHIGHTNOLA
+    tz: America/Chicago
+    lat: 29.9934
+    lon: -90.2580
+    mos_station: KMSY
+    wfo: LIX
+    cli:
+      issuedby: MSY
+      site: LIX
       product: CLI

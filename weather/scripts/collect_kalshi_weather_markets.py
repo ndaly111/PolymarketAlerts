@@ -65,6 +65,17 @@ def load_city_keys(config_path: Path) -> List[City]:
     return out
 
 
+def load_series_tickers_from_config(config_path: Path) -> List[str]:
+    """Load Kalshi series tickers from cities.yml kalshi_series field."""
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    tickers = []
+    for row in data.get("cities", []):
+        series = row.get("kalshi_series", "").strip()
+        if series:
+            tickers.append(series)
+    return tickers
+
+
 _YYYYMMDD = re.compile(r"(20\d{2})(\d{2})(\d{2})")
 
 
@@ -301,9 +312,15 @@ def main() -> int:
     db_path = Path(args.db)
 
     if not series_tickers:
-        series_tickers = discover_series_tickers(client, cities)
+        # Try loading from config file first
+        series_tickers = load_series_tickers_from_config(Path(args.config))
         if series_tickers:
-            print(f"[kalshi] discovered series tickers (no input): {', '.join(series_tickers)}", file=sys.stderr)
+            print(f"[kalshi] loaded series tickers from config: {', '.join(series_tickers)}", file=sys.stderr)
+        else:
+            # Fall back to API discovery
+            series_tickers = discover_series_tickers(client, cities)
+            if series_tickers:
+                print(f"[kalshi] discovered series tickers via API: {', '.join(series_tickers)}", file=sys.stderr)
 
     used_series = list(series_tickers)
     stats = collect_markets(
