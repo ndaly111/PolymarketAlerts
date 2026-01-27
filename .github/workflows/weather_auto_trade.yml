@@ -11,7 +11,7 @@ on:
       dry_run:
         description: "Dry run mode (no real trades)"
         required: false
-        default: "true"
+        default: "false"
         type: boolean
 
 permissions:
@@ -54,7 +54,7 @@ jobs:
       WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
       # Discord notifications
       DISCORD_WEATHER_TRADES_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
-      # Dry run (default true for safety)
+      # Dry run (off by default for live trading)
       WEATHER_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
 
     steps:
