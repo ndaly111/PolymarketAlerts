@@ -48,7 +48,7 @@ TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", "weather_trades.db"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEATHER_TRADES_WEBHOOK", os.getenv("DISCORD_WEATHER_ALERTS", os.getenv("DISCORD_WEBHOOK_URL", "")))
 
 DRY_RUN = os.getenv("WEATHER_DRY_RUN", "0") == "1"
-AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
+AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "1") == "1"
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
