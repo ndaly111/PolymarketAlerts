@@ -2,8 +2,8 @@ name: Weather Order Reaper
 
 on:
   schedule:
-    # Run every 10 min from 5am to 8pm ET (match trading hours)
-    - cron: "*/10 10-23 * * *"  # 5am-6:50pm ET
+    # Run every 10 min from 4am to 8pm ET (match trading hours)
+    - cron: "*/10 9-23 * * *"   # 4am-6:50pm ET
     - cron: "*/10 0 * * *"      # 7pm-7:50pm ET
     - cron: "0 1 * * *"         # 8pm ET final run
   workflow_dispatch:
