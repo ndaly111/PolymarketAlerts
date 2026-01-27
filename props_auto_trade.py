@@ -283,20 +283,26 @@ def fetch_fresh_odds_for_prop(
     event_id: str = "",
     sport_key: str = "",
     min_books: int = 2,
+    cached_odds: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Fetch FRESH odds from Odds API for a specific prop (bypasses cache).
+    Get odds for a specific prop - uses cache unless at scheduled refresh time.
 
-    Used for final verification before placing a trade.
-    Only fetches the specific event if event_id is provided.
-    Updates cache with fresh data to avoid wasting the API call.
+    At scheduled refresh times (6am, 8am, 12pm, 4pm, 6pm EST): fetches fresh data.
+    At other times: uses cached_odds (no API call).
 
     Returns the matching prop with fair probabilities, or None if not found.
     """
     from oddsapi_props import (
         fetch_event_props, extract_props_from_event, SPORT_PROP_MARKETS,
-        _update_cache_with_prop
+        _update_cache_with_prop, is_scheduled_refresh_time
     )
+
+    # At non-scheduled times, just use cached data (NO API CALL)
+    if not is_scheduled_refresh_time() and cached_odds:
+        return find_odds_in_cache(cached_odds, player_name_norm, oddsapi_type, target_line, min_books)
+
+    # At scheduled refresh times, fetch fresh data
 
     # Determine sport if not provided
     if not sport_key:
@@ -458,11 +464,17 @@ def execute_trade(
     event_id = cached_prop.get("event_id", "")
     sport_key = cached_prop.get("sport_key", "")
 
-    # Step 4b: Fetch FRESH odds before placing trade (1 API call)
-    print(f"  Fetching fresh odds for verification...")
+    # Step 4b: Verify odds (uses cache at non-scheduled times, fresh at scheduled times)
+    from oddsapi_props import is_scheduled_refresh_time
+    if is_scheduled_refresh_time():
+        print(f"  Fetching fresh odds for verification (scheduled refresh)...")
+    else:
+        print(f"  Using cached odds for verification...")
+
     fresh_prop = fetch_fresh_odds_for_prop(
         player_norm, oddsapi_type, target_line,
-        event_id=event_id, sport_key=sport_key, min_books=MIN_BOOKS
+        event_id=event_id, sport_key=sport_key, min_books=MIN_BOOKS,
+        cached_odds=cached_odds
     )
 
     if not fresh_prop:

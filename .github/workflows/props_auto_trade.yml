@@ -33,6 +33,7 @@ jobs:
       KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
       # Odds API
       THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
+      ODDS_CACHE_DIR: /tmp/odds_api_cache
       # Trading parameters
       MIN_INITIAL_EV: "0.05"
       MIN_FINAL_EV: "0.05"
@@ -66,6 +67,14 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install requests cryptography
+
+      - name: Restore Odds API cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/odds_api_cache
+          key: odds-cache-${{ github.run_id }}
+          restore-keys: |
+            odds-cache-
 
       - name: Check credentials
         run: |
