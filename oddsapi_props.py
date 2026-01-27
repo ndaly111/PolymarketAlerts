@@ -87,11 +87,11 @@ SPORT_PROP_MARKETS = {
 }
 
 # Default sport keys to fetch props for
+# NOTE: No NCAAB or NHL - Kalshi doesn't have props for these
 DEFAULT_SPORT_KEYS = [
     "basketball_nba",
     "americanfootball_nfl",
     "baseball_mlb",
-    "icehockey_nhl",
 ]
 
 # Tennis sport keys for moneylines (H2H)
