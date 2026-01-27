@@ -87,6 +87,31 @@ def ensure_db_schema(db_path: Path) -> None:
         )
     """)
 
+    # Log ALL scanned opportunities (for backtesting/analysis)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS scanned_opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_date TEXT NOT NULL,
+            scan_time TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            stat_type TEXT NOT NULL,
+            line REAL NOT NULL,
+            side TEXT NOT NULL,
+            kalshi_bid INTEGER,
+            kalshi_ask INTEGER,
+            kalshi_prob REAL NOT NULL,
+            fair_prob REAL NOT NULL,
+            edge REAL NOT NULL,
+            books_count INTEGER NOT NULL,
+            volume INTEGER,
+            event_time TEXT,
+            result TEXT,
+            settled_at TEXT,
+            UNIQUE(scan_date, ticker, side)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -149,6 +174,46 @@ def record_trade(
         today, ticker, player_name, stat_type, line, side,
         quantity, limit_price_cents, fair_prob, edge, books_count,
         order_id, status, fill_price_cents, now, now
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def log_scanned_opportunity(
+    db_path: Path,
+    ticker: str,
+    player_name: str,
+    stat_type: str,
+    line: float,
+    side: str,
+    kalshi_bid: int,
+    kalshi_ask: int,
+    kalshi_prob: float,
+    fair_prob: float,
+    edge: float,
+    books_count: int,
+    volume: int = 0,
+    event_time: str = "",
+) -> None:
+    """Log a scanned opportunity for later analysis."""
+    now = datetime.now(timezone.utc)
+    scan_date = now.strftime("%Y-%m-%d")
+    scan_time = now.isoformat()
+
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT OR REPLACE INTO scanned_opportunities (
+            scan_date, scan_time, ticker, player_name, stat_type, line, side,
+            kalshi_bid, kalshi_ask, kalshi_prob, fair_prob, edge, books_count,
+            volume, event_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        scan_date, scan_time, ticker, player_name, stat_type, line, side,
+        kalshi_bid, kalshi_ask, kalshi_prob, fair_prob, edge, books_count,
+        volume, event_time
     ))
 
     conn.commit()
@@ -489,6 +554,29 @@ def main() -> int:
     if not opportunities:
         print("\nNo opportunities found. Exiting.")
         return 0
+
+    # Log ALL scanned opportunities for later analysis
+    print(f"\nLogging {len(opportunities)} opportunities to database...")
+    for opp in opportunities:
+        try:
+            log_scanned_opportunity(
+                db_path=DB_PATH,
+                ticker=opp.get("kalshi_ticker", ""),
+                player_name=opp.get("player_name", ""),
+                stat_type=opp.get("stat_type", ""),
+                line=opp.get("kalshi_line", 0),
+                side=opp.get("best_side", ""),
+                kalshi_bid=opp.get("kalshi_yes_bid", 0),
+                kalshi_ask=opp.get("kalshi_yes_ask", 100),
+                kalshi_prob=opp.get("bet_price", 0.5),
+                fair_prob=opp.get("odds_over_prob", 0.5) if opp.get("best_side") == "OVER" else opp.get("odds_under_prob", 0.5),
+                edge=opp.get("best_edge", 0),
+                books_count=opp.get("odds_books_used", 0),
+                volume=opp.get("kalshi_volume", 0),
+                event_time=opp.get("commence_time", ""),
+            )
+        except Exception as e:
+            print(f"  [warn] Failed to log opportunity: {e}")
 
     # Process opportunities
     print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")

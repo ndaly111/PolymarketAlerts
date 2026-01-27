@@ -1,0 +1,75 @@
+name: Props Morning Report
+
+on:
+  schedule:
+    # Run at 9am EST (14:00 UTC) - after most games have settled
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Date to analyze (YYYY-MM-DD), default: yesterday"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: props-morning-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      PROPS_DB_PATH: props_trades.db
+      DISCORD_PROPS_WEBHOOK: ${{ secrets.DISCORD_PROPS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests cryptography
+
+      - name: Run morning report
+        run: |
+          DATE_ARG=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            DATE_ARG="--date ${{ github.event.inputs.date }}"
+          fi
+          python props_morning_report.py $DATE_ARG
+
+      - name: Commit DB changes
+        run: |
+          if [ -f "$PROPS_DB_PATH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$PROPS_DB_PATH" || true
+            if git diff --staged --quiet; then
+              echo "No DB changes to commit"
+            else
+              git commit -m "props: update results from morning report"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+              done
+            fi
+          fi
