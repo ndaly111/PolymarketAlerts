@@ -3,15 +3,23 @@ Odds API player props fetcher.
 
 Fetches player props (points, rebounds, assists, etc.) from The Odds API
 and structures them for comparison with prediction markets like Kalshi.
+
+Includes caching to minimize API calls.
 """
 
+import json
 import os
 import re
 import time
+from pathlib import Path
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+# Cache configuration
+CACHE_DIR = Path(os.getenv("ODDS_CACHE_DIR", "/tmp/odds_api_cache"))
+CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "1800"))  # 30 minutes default
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
@@ -89,6 +97,41 @@ def _get_odds_api_key() -> str:
     if not k:
         raise RuntimeError("Missing THE_ODDS_API env var (Odds API key).")
     return k
+
+
+def _get_cache_path(cache_key: str) -> Path:
+    """Get cache file path for a given key."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    safe_key = cache_key.replace("/", "_").replace(":", "_")
+    return CACHE_DIR / f"{safe_key}.json"
+
+
+def _read_cache(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Read from cache if exists and not expired."""
+    cache_path = _get_cache_path(cache_key)
+    if not cache_path.exists():
+        return None
+
+    try:
+        data = json.loads(cache_path.read_text())
+        cached_at = data.get("_cached_at", 0)
+        if time.time() - cached_at > CACHE_TTL_SECONDS:
+            return None  # Expired
+        return data.get("_data")
+    except Exception:
+        return None
+
+
+def _write_cache(cache_key: str, data: Any) -> None:
+    """Write data to cache."""
+    cache_path = _get_cache_path(cache_key)
+    try:
+        cache_path.write_text(json.dumps({
+            "_cached_at": time.time(),
+            "_data": data,
+        }))
+    except Exception:
+        pass  # Cache write failure is not critical
 
 
 def _env_int(name: str, default: int) -> int:
@@ -325,23 +368,42 @@ def fetch_all_props(
     sport_keys: Optional[List[str]] = None,
     regions: str = "us",
     min_books: int = 1,
+    use_cache: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Fetch all player props for given sports.
+
+    Uses caching to minimize API calls. Cache TTL is controlled by ODDS_CACHE_TTL env var.
 
     Returns list of prop dicts (see extract_props_from_event).
     """
     sport_keys = sport_keys or DEFAULT_SPORT_KEYS
     all_props: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
+    api_calls = 0
 
     for sport_key in sport_keys:
         markets = SPORT_PROP_MARKETS.get(sport_key, [])
         if not markets:
             continue
 
+        # Check cache for this sport
+        cache_key = f"props_{sport_key}_{regions}"
+        if use_cache:
+            cached = _read_cache(cache_key)
+            if cached is not None:
+                # Filter by min_books and add to results
+                props = [p for p in cached if p.get("books_used", 0) >= min_books]
+                all_props.extend(props)
+                print(f"  [cache] {sport_key}: {len(props)} props from cache")
+                continue
+
+        # Not in cache, fetch from API
+        sport_props: List[Dict[str, Any]] = []
+
         try:
             events = fetch_events(sport_key)
+            api_calls += 1
         except Exception as e:
             errors.append({"sport_key": sport_key, "stage": "events", "error": str(e)})
             continue
@@ -353,11 +415,9 @@ def fetch_all_props(
 
             try:
                 event_data = fetch_event_props(sport_key, event_id, markets, regions=regions)
+                api_calls += 1
                 props = extract_props_from_event(event_data)
-
-                # Filter by min books
-                props = [p for p in props if p.get("books_used", 0) >= min_books]
-                all_props.extend(props)
+                sport_props.extend(props)
 
             except Exception as e:
                 errors.append({
@@ -368,11 +428,21 @@ def fetch_all_props(
                 })
                 continue
 
+        # Cache all props for this sport (before min_books filter)
+        if use_cache and sport_props:
+            _write_cache(cache_key, sport_props)
+
+        # Filter by min_books and add to results
+        filtered = [p for p in sport_props if p.get("books_used", 0) >= min_books]
+        all_props.extend(filtered)
+        print(f"  [api] {sport_key}: {len(filtered)} props ({api_calls} API calls so far)")
+
     if errors and os.getenv("DEBUG_MODE"):
         print(f"Props fetch errors: {len(errors)}")
         for err in errors[:5]:
             print(f"  {err}")
 
+    print(f"  Total: {len(all_props)} props, {api_calls} API calls")
     return all_props
 
 

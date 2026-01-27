@@ -249,50 +249,59 @@ def fetch_fresh_kalshi_price(client: KalshiAuthClient, ticker: str) -> Optional[
         return None
 
 
-def fetch_fresh_odds_for_prop(
+def find_odds_in_cache(
+    cached_odds: List[Dict[str, Any]],
     player_name_norm: str,
     oddsapi_type: str,
     target_line: float,
-    min_books: int = 3,
+    min_books: int = 2,
 ) -> Optional[Dict[str, Any]]:
     """
-    Fetch fresh odds from Odds API for a specific prop.
+    Find matching odds in cached data (no API call).
 
     Returns the matching prop with fair probabilities, or None if not found.
     """
-    try:
-        # Determine sport from prop type
-        sport_keys = []
-        if oddsapi_type.startswith("player_"):
-            if "pass" in oddsapi_type or "rush" in oddsapi_type or "reception" in oddsapi_type or "td" in oddsapi_type:
-                sport_keys = ["americanfootball_nfl"]
-            elif "shots" in oddsapi_type or "goals" in oddsapi_type:
-                sport_keys = ["icehockey_nhl"]
-            else:
-                # Basketball - check both NBA and NCAAB
-                sport_keys = ["basketball_nba", "basketball_ncaab"]
+    for prop in cached_odds:
+        if prop.get("books_used", 0) < min_books:
+            continue
+        if prop.get("player_name_norm") != player_name_norm:
+            continue
+        if prop.get("prop_type") != oddsapi_type:
+            continue
+        # Check line (Kalshi "8+" means > 7.5, so target is line - 0.5)
+        odds_line = prop.get("line", 0)
+        if abs(odds_line - target_line) <= 0.5:
+            return prop
 
-        if not sport_keys:
-            sport_keys = ["basketball_nba", "basketball_ncaab", "americanfootball_nfl", "icehockey_nhl"]
+    return None
 
-        all_props = fetch_all_props(sport_keys=sport_keys, min_books=min_books)
 
-        # Find matching prop
-        for prop in all_props:
-            if prop.get("player_name_norm") != player_name_norm:
-                continue
-            if prop.get("prop_type") != oddsapi_type:
-                continue
-            # Check line (Kalshi "8+" means > 7.5, so target is line - 0.5)
-            odds_line = prop.get("line", 0)
-            if abs(odds_line - target_line) <= 0.5:
-                return prop
+def get_active_sports_from_kalshi(kalshi_props: List[Dict[str, Any]]) -> List[str]:
+    """
+    Determine which sports have active Kalshi markets.
 
-        return None
+    Returns list of Odds API sport keys that have matching Kalshi props.
+    """
+    active_sports = set()
 
-    except Exception as e:
-        print(f"  [error] Failed to fetch Odds API data: {e}")
-        return None
+    for prop in kalshi_props:
+        stat_type = prop.get("stat_type", "")
+        oddsapi_type = KALSHI_TO_ODDSAPI.get(stat_type, "")
+
+        if not oddsapi_type:
+            continue
+
+        # Map oddsapi_type to sport
+        if "pass" in oddsapi_type or "rush" in oddsapi_type or "reception" in oddsapi_type or "td" in oddsapi_type:
+            active_sports.add("americanfootball_nfl")
+        elif "shots" in oddsapi_type or "goals" in oddsapi_type:
+            active_sports.add("icehockey_nhl")
+        else:
+            # Basketball props - add both NBA and NCAAB
+            active_sports.add("basketball_nba")
+            active_sports.add("basketball_ncaab")
+
+    return list(active_sports)
 
 
 def post_discord(message: str) -> None:
@@ -312,9 +321,13 @@ def execute_trade(
     client: KalshiAuthClient,
     db_path: Path,
     opportunity: Dict[str, Any],
+    cached_odds: List[Dict[str, Any]],
 ) -> bool:
     """
     Execute the full trade workflow for a single opportunity.
+
+    Uses cached_odds for verification (no new Odds API calls).
+    Re-fetches Kalshi prices (free).
 
     Returns True if trade was placed (filled or pending), False otherwise.
     """
@@ -363,25 +376,24 @@ def execute_trade(
         print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ (worse than -200)")
         return False
 
-    # Step 4: Re-fetch Odds API
-    print(f"  Fetching fresh odds (min {MIN_BOOKS} books)...")
+    # Step 4: Use cached odds (no new API call)
     target_line = line - 0.5  # Kalshi "8+" = over 7.5
-    fresh_odds = fetch_fresh_odds_for_prop(
-        player_norm, oddsapi_type, target_line, min_books=MIN_BOOKS
+    cached_prop = find_odds_in_cache(
+        cached_odds, player_norm, oddsapi_type, target_line, min_books=MIN_BOOKS
     )
 
-    if not fresh_odds:
-        print(f"  [skip] Could not find prop in Odds API with {MIN_BOOKS}+ books")
+    if not cached_prop:
+        print(f"  [skip] Could not find prop in cached odds with {MIN_BOOKS}+ books")
         return False
 
-    books_count = fresh_odds.get("books_used", 0)
-    print(f"  Found odds from {books_count} books")
+    books_count = cached_prop.get("books_used", 0)
+    print(f"  Using cached odds from {books_count} books")
 
     # Get fair probability for our side
     if side == "OVER":
-        fair_prob = fresh_odds.get("fair_over_prob", 0.5)
+        fair_prob = cached_prop.get("fair_over_prob", 0.5)
     else:
-        fair_prob = fresh_odds.get("fair_under_prob", 0.5)
+        fair_prob = cached_prop.get("fair_under_prob", 0.5)
 
     # Step 5b: Check books odds filter (better than +200 = ≥33%)
     if fair_prob < MIN_FAIR_PROB:
@@ -538,12 +550,27 @@ def main() -> int:
 
     # Step 1: Initial scan for 5%+ EV opportunities
     print("\n--- Step 1: Initial Scan ---")
+
+    # Fetch Kalshi props first (free, unlimited)
     print("Fetching Kalshi props...")
     kalshi_props = fetch_kalshi_props()
     print(f"  Found {len(kalshi_props)} Kalshi props")
 
-    print("Fetching sportsbook odds...")
-    odds_props = fetch_all_props(min_books=2)  # Lower threshold for initial scan
+    if not kalshi_props:
+        print("No Kalshi props available. Exiting.")
+        return 0
+
+    # Determine which sports have active Kalshi markets
+    active_sports = get_active_sports_from_kalshi(kalshi_props)
+    print(f"  Active sports: {', '.join(active_sports) or 'none'}")
+
+    if not active_sports:
+        print("No active sports with Kalshi markets. Exiting.")
+        return 0
+
+    # Only fetch Odds API for sports with active Kalshi markets (uses cache)
+    print(f"Fetching sportsbook odds (only {len(active_sports)} sports, cached 30min)...")
+    odds_props = fetch_all_props(sport_keys=active_sports, min_books=2, use_cache=True)
     print(f"  Found {len(odds_props)} sportsbook props")
 
     print("Matching and finding edges...")
@@ -587,7 +614,8 @@ def main() -> int:
             print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
             break
 
-        success = execute_trade(client, DB_PATH, opp)
+        # Pass cached odds to avoid new Odds API calls
+        success = execute_trade(client, DB_PATH, opp, cached_odds=odds_props)
         if success:
             trades_placed += 1
             increment_trades_today(DB_PATH)
