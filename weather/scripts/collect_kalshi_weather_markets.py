@@ -297,14 +297,62 @@ def main() -> int:
 
     cities = load_city_keys(Path(args.config))
     city_tokens: Dict[str, str] = {}
+
+    # Load kalshi_series from config to extract city abbreviations
+    config_data = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    city_abbrev_map: Dict[str, str] = {}
+    for row in config_data.get("cities", []):
+        city_key = str(row.get("key", "")).strip()
+        kalshi_series = str(row.get("kalshi_series", "")).strip().upper()
+        # Extract abbreviation from series like "KXHIGHMIA" -> "MIA"
+        if kalshi_series.startswith("KXHIGH"):
+            abbrev = kalshi_series.replace("KXHIGH", "").replace("T", "")  # Remove trailing T from some
+            if abbrev:
+                city_abbrev_map[abbrev] = city_key
+
     for city in cities:
         if city.key:
             city_tokens[city.key.upper()] = city.key
         if city.label:
             city_tokens[city.label.upper()] = city.key
-        if "LAX" in city.key.upper() or "LOS ANGELES" in city.label.upper():
-            city_tokens.setdefault("LAX", city.key)
-            city_tokens.setdefault("LOS ANGELES", city.key)
+
+    # Add extracted abbreviations from kalshi_series
+    city_tokens.update(city_abbrev_map)
+
+    # Add common abbreviation aliases
+    alias_map = {
+        "LAX": "LAXHIGH",
+        "LOS ANGELES": "LAXHIGH",
+        "MIA": "MIAHIGH",
+        "MIAMI": "MIAHIGH",
+        "CHI": "CHIHIGH",
+        "CHICAGO": "CHIHIGH",
+        "NY": "NHIGH",
+        "NYC": "NHIGH",
+        "NEW YORK": "NHIGH",
+        "DEN": "DENHIGH",
+        "DENVER": "DENHIGH",
+        "AUS": "AUSHIGH",
+        "AUSTIN": "AUSHIGH",
+        "SFO": "SFOHIGH",
+        "SF": "SFOHIGH",
+        "SAN FRANCISCO": "SFOHIGH",
+        "PHIL": "PHLHIGH",
+        "PHL": "PHLHIGH",
+        "PHILLY": "PHLHIGH",
+        "PHILADELPHIA": "PHLHIGH",
+        "SEA": "SEAHIGH",
+        "SEATTLE": "SEAHIGH",
+        "DC": "DCHIGH",
+        "WASHINGTON": "DCHIGH",
+        "LV": "LVHIGH",
+        "LAS VEGAS": "LVHIGH",
+        "VEGAS": "LVHIGH",
+        "NOLA": "NOLHIGH",
+        "NEW ORLEANS": "NOLHIGH",
+    }
+    for alias, key in alias_map.items():
+        city_tokens.setdefault(alias, key)
 
     client = KalshiClient.from_env()
     db_lib.ensure_schema(Path(args.db))
