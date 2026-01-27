@@ -19,7 +19,11 @@ import requests
 
 # Cache configuration
 CACHE_DIR = Path(os.getenv("ODDS_CACHE_DIR", "/tmp/odds_api_cache"))
-CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "1800"))  # 30 minutes default
+CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "14400"))  # 4 hours default (refresh at scheduled times only)
+
+# Scheduled refresh times (EST hours) - only fetch fresh odds at these times
+# 6am, 8am, 12pm, 4pm, 6pm EST
+SCHEDULED_REFRESH_HOURS_EST = [6, 8, 12, 16, 18]
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
@@ -85,10 +89,91 @@ SPORT_PROP_MARKETS = {
 # Default sport keys to fetch props for
 DEFAULT_SPORT_KEYS = [
     "basketball_nba",
-    "basketball_ncaab",
     "americanfootball_nfl",
     "baseball_mlb",
     "icehockey_nhl",
+]
+
+# Tennis sport keys for moneylines (H2H)
+# Full list from Odds API - includes all major ATP and WTA tournaments
+TENNIS_SPORT_KEYS = [
+    # Grand Slams
+    "tennis_atp_australian_open",
+    "tennis_wta_australian_open",
+    "tennis_atp_french_open",
+    "tennis_wta_french_open",
+    "tennis_atp_wimbledon",
+    "tennis_wta_wimbledon",
+    "tennis_atp_us_open",
+    "tennis_wta_us_open",
+    # ATP Tour
+    "tennis_atp_adelaide",
+    "tennis_atp_auckland",
+    "tennis_atp_barcelona",
+    "tennis_atp_beijing",
+    "tennis_atp_brisbane",
+    "tennis_atp_buenos_aires",
+    "tennis_atp_canadian_open",
+    "tennis_atp_chile",
+    "tennis_atp_china_open",
+    "tennis_atp_cincinnati_open",
+    "tennis_atp_davis_cup",
+    "tennis_atp_doha",
+    "tennis_atp_dubai",
+    "tennis_atp_eastbourne",
+    "tennis_atp_estoril",
+    "tennis_atp_geneva",
+    "tennis_atp_halle",
+    "tennis_atp_hamburg",
+    "tennis_atp_houston",
+    "tennis_atp_indian_wells",
+    "tennis_atp_lyon",
+    "tennis_atp_madrid_open",
+    "tennis_atp_marseille",
+    "tennis_atp_miami_open",
+    "tennis_atp_monte_carlo",
+    "tennis_atp_munich",
+    "tennis_atp_newport",
+    "tennis_atp_paris",
+    "tennis_atp_queens_club",
+    "tennis_atp_rio",
+    "tennis_atp_rome",
+    "tennis_atp_rotterdam",
+    "tennis_atp_shanghai",
+    "tennis_atp_stockholm",
+    "tennis_atp_stuttgart",
+    "tennis_atp_tokyo",
+    "tennis_atp_umag",
+    "tennis_atp_vienna",
+    "tennis_atp_washington",
+    "tennis_atp_winston_salem",
+    # WTA Tour
+    "tennis_wta_adelaide",
+    "tennis_wta_auckland",
+    "tennis_wta_beijing",
+    "tennis_wta_birmingham",
+    "tennis_wta_brisbane",
+    "tennis_wta_canadian_open",
+    "tennis_wta_charleston",
+    "tennis_wta_china_open",
+    "tennis_wta_cincinnati",
+    "tennis_wta_doha",
+    "tennis_wta_dubai",
+    "tennis_wta_eastbourne",
+    "tennis_wta_guadalajara",
+    "tennis_wta_hobart",
+    "tennis_wta_indian_wells",
+    "tennis_wta_madrid_open",
+    "tennis_wta_miami_open",
+    "tennis_wta_monterrey",
+    "tennis_wta_nottingham",
+    "tennis_wta_pan_pacific",
+    "tennis_wta_rome",
+    "tennis_wta_san_diego",
+    "tennis_wta_strasbourg",
+    "tennis_wta_stuttgart",
+    "tennis_wta_tokyo",
+    "tennis_wta_wuhan",
 ]
 
 
@@ -122,6 +207,19 @@ def _read_cache(cache_key: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _read_cache_any_age(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Read from cache regardless of age (for non-scheduled refresh times)."""
+    cache_path = _get_cache_path(cache_key)
+    if not cache_path.exists():
+        return None
+
+    try:
+        data = json.loads(cache_path.read_text())
+        return data.get("_data")
+    except Exception:
+        return None
+
+
 def _write_cache(cache_key: str, data: Any) -> None:
     """Write data to cache."""
     cache_path = _get_cache_path(cache_key)
@@ -132,6 +230,66 @@ def _write_cache(cache_key: str, data: Any) -> None:
         }))
     except Exception:
         pass  # Cache write failure is not critical
+
+
+def _update_cache_with_prop(cache_key: str, updated_prop: Dict[str, Any]) -> None:
+    """
+    Update a single prop in the cache (used after verification fetch).
+    This avoids wasting API calls by caching fresh data.
+    """
+    cache_path = _get_cache_path(cache_key)
+    if not cache_path.exists():
+        return
+
+    try:
+        data = json.loads(cache_path.read_text())
+        props = data.get("_data", [])
+
+        # Find and update the matching prop
+        player_norm = updated_prop.get("player_name_norm", "")
+        prop_type = updated_prop.get("prop_type", "")
+        line = updated_prop.get("line", 0)
+
+        for i, prop in enumerate(props):
+            if (prop.get("player_name_norm") == player_norm and
+                prop.get("prop_type") == prop_type and
+                abs(prop.get("line", 0) - line) <= 0.5):
+                props[i] = updated_prop
+                break
+        else:
+            # Prop not found, add it
+            props.append(updated_prop)
+
+        data["_data"] = props
+        cache_path.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def is_scheduled_refresh_time() -> bool:
+    """Check if current time is a scheduled refresh time (within 15 min window)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    now_est = datetime.now(ZoneInfo("America/New_York"))
+    current_hour = now_est.hour
+    current_minute = now_est.minute
+
+    # Check if we're within 15 minutes of a scheduled hour
+    for scheduled_hour in SCHEDULED_REFRESH_HOURS_EST:
+        if current_hour == scheduled_hour and current_minute < 15:
+            return True
+
+    return False
+
+
+def force_cache_refresh() -> None:
+    """Clear cache to force refresh on next fetch."""
+    try:
+        for cache_file in CACHE_DIR.glob("*.json"):
+            cache_file.unlink()
+    except Exception:
+        pass
 
 
 def _env_int(name: str, default: int) -> int:
@@ -369,11 +527,13 @@ def fetch_all_props(
     regions: str = "us",
     min_books: int = 1,
     use_cache: bool = True,
+    force_refresh: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Fetch all player props for given sports.
 
-    Uses caching to minimize API calls. Cache TTL is controlled by ODDS_CACHE_TTL env var.
+    Uses caching to minimize API calls. Only refreshes at scheduled times
+    (6am, 8am, 12pm, 4pm, 6pm EST) unless force_refresh=True.
 
     Returns list of prop dicts (see extract_props_from_event).
     """
@@ -382,6 +542,13 @@ def fetch_all_props(
     errors: List[Dict[str, Any]] = []
     api_calls = 0
 
+    # Check if this is a scheduled refresh time
+    is_refresh_time = is_scheduled_refresh_time()
+    if is_refresh_time:
+        print("  [scheduled refresh] Fetching fresh odds (scheduled time)")
+    elif force_refresh:
+        print("  [force refresh] Fetching fresh odds")
+
     for sport_key in sport_keys:
         markets = SPORT_PROP_MARKETS.get(sport_key, [])
         if not markets:
@@ -389,8 +556,9 @@ def fetch_all_props(
 
         # Check cache for this sport
         cache_key = f"props_{sport_key}_{regions}"
-        if use_cache:
-            cached = _read_cache(cache_key)
+        if use_cache and not force_refresh:
+            # At non-scheduled times, use cache even if "expired"
+            cached = _read_cache_any_age(cache_key) if not is_refresh_time else _read_cache(cache_key)
             if cached is not None:
                 # Filter by min_books and add to results
                 props = [p for p in cached if p.get("books_used", 0) >= min_books]
@@ -398,7 +566,7 @@ def fetch_all_props(
                 print(f"  [cache] {sport_key}: {len(props)} props from cache")
                 continue
 
-        # Not in cache, fetch from API
+        # Not in cache or scheduled refresh, fetch from API
         sport_props: List[Dict[str, Any]] = []
 
         try:
@@ -455,6 +623,141 @@ def props_by_player(props: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any
             by_player[name] = []
         by_player[name].append(p)
     return by_player
+
+
+def fetch_tennis_moneylines(
+    regions: str = "us",
+    min_books: int = 2,
+    use_cache: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch tennis moneylines (H2H) from Odds API.
+
+    Returns list of match dicts with fair probabilities for each player.
+    """
+    all_matches: List[Dict[str, Any]] = []
+    api_calls = 0
+
+    # Check if scheduled refresh time
+    is_refresh_time = is_scheduled_refresh_time()
+
+    for sport_key in TENNIS_SPORT_KEYS:
+        cache_key = f"tennis_{sport_key}_{regions}"
+
+        # Check cache
+        if use_cache:
+            cached = _read_cache_any_age(cache_key) if not is_refresh_time else _read_cache(cache_key)
+            if cached is not None:
+                matches = [m for m in cached if m.get("books_used", 0) >= min_books]
+                all_matches.extend(matches)
+                continue
+
+        try:
+            # Fetch events with H2H odds
+            params = {
+                "apiKey": _get_odds_api_key(),
+                "regions": regions,
+                "markets": "h2h",
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            }
+            url = f"{ODDS_API_BASE}/{sport_key}/odds"
+            r = requests.get(url, params=params, timeout=30)
+            api_calls += 1
+
+            if r.status_code == 404:
+                # No events for this tournament
+                continue
+            r.raise_for_status()
+
+            events = r.json()
+            sport_matches: List[Dict[str, Any]] = []
+
+            for event in events:
+                home = event.get("home_team", "")
+                away = event.get("away_team", "")
+                commence_time = event.get("commence_time", "")
+                event_id = event.get("id", "")
+
+                # Collect odds from all bookmakers
+                home_odds_list = []
+                away_odds_list = []
+                books = []
+
+                for book in event.get("bookmakers", []):
+                    book_title = book.get("title", "")
+                    for market in book.get("markets", []):
+                        if market.get("key") != "h2h":
+                            continue
+                        for outcome in market.get("outcomes", []):
+                            name = outcome.get("name", "")
+                            price = outcome.get("price")
+                            if price is None:
+                                continue
+                            if name == home:
+                                home_odds_list.append(price)
+                            elif name == away:
+                                away_odds_list.append(price)
+                    if home_odds_list and away_odds_list:
+                        books.append(book_title)
+
+                if len(books) < min_books:
+                    continue
+
+                # Calculate fair probabilities (no-vig)
+                fair_home_probs = []
+                fair_away_probs = []
+                for ho, ao in zip(home_odds_list, away_odds_list):
+                    try:
+                        hp = american_to_prob(ho)
+                        ap = american_to_prob(ao)
+                        total = hp + ap
+                        if total > 0:
+                            fair_home_probs.append(hp / total)
+                            fair_away_probs.append(ap / total)
+                    except Exception:
+                        continue
+
+                if not fair_home_probs:
+                    continue
+
+                fair_home = float(median(fair_home_probs))
+                fair_away = float(median(fair_away_probs))
+
+                match = {
+                    "sport_key": sport_key,
+                    "event_id": event_id,
+                    "home_team": home,
+                    "away_team": away,
+                    "home_team_norm": normalize_player_name(home),
+                    "away_team_norm": normalize_player_name(away),
+                    "commence_time": commence_time,
+                    "fair_home_prob": fair_home,
+                    "fair_away_prob": fair_away,
+                    "home_odds": home_odds_list[0] if home_odds_list else None,
+                    "away_odds": away_odds_list[0] if away_odds_list else None,
+                    "books_used": len(books),
+                    "books": books,
+                    "market_type": "moneyline",
+                }
+                sport_matches.append(match)
+
+            # Cache results
+            if use_cache and sport_matches:
+                _write_cache(cache_key, sport_matches)
+
+            filtered = [m for m in sport_matches if m.get("books_used", 0) >= min_books]
+            all_matches.extend(filtered)
+
+            time.sleep(0.5)  # Rate limit
+
+        except Exception as e:
+            if os.getenv("DEBUG_MODE"):
+                print(f"Tennis fetch error for {sport_key}: {e}")
+            continue
+
+    print(f"  Tennis: {len(all_matches)} matches, {api_calls} API calls")
+    return all_matches
 
 
 if __name__ == "__main__":

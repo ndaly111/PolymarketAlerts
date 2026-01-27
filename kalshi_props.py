@@ -23,11 +23,6 @@ KALSHI_PROP_SERIES = {
     "KXNBASTL": "steals",
     "KXNBABLK": "blocks",
     "KXNBA3PM": "threes",
-    # College Basketball (NCAAB)
-    "KXNCAABREB": "rebounds",
-    "KXNCAABAST": "assists",
-    "KXNCAABPTS": "points",
-    "KXNCAAB3PM": "threes",
     # NFL
     "KXNFLRSHYDS": "rushing_yards",
     "KXNFLPASSYDS": "passing_yards",

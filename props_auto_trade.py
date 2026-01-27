@@ -289,10 +289,14 @@ def fetch_fresh_odds_for_prop(
 
     Used for final verification before placing a trade.
     Only fetches the specific event if event_id is provided.
+    Updates cache with fresh data to avoid wasting the API call.
 
     Returns the matching prop with fair probabilities, or None if not found.
     """
-    from oddsapi_props import fetch_event_props, extract_props_from_event, SPORT_PROP_MARKETS
+    from oddsapi_props import (
+        fetch_event_props, extract_props_from_event, SPORT_PROP_MARKETS,
+        _update_cache_with_prop
+    )
 
     # Determine sport if not provided
     if not sport_key:
@@ -315,7 +319,12 @@ def fetch_fresh_odds_for_prop(
         else:
             # Fallback: fetch all events for sport (more expensive)
             from oddsapi_props import fetch_all_props
-            props = fetch_all_props(sport_keys=[sport_key], min_books=min_books, use_cache=False)
+            props = fetch_all_props(sport_keys=[sport_key], min_books=min_books, use_cache=False, force_refresh=True)
+
+        # Update cache with ALL fresh props from this event (don't waste the call)
+        cache_key = f"props_{sport_key}_us"
+        for prop in props:
+            _update_cache_with_prop(cache_key, prop)
 
         # Find matching prop
         for prop in props:
@@ -357,9 +366,8 @@ def get_active_sports_from_kalshi(kalshi_props: List[Dict[str, Any]]) -> List[st
         elif "shots" in oddsapi_type or "goals" in oddsapi_type:
             active_sports.add("icehockey_nhl")
         else:
-            # Basketball props - add both NBA and NCAAB
+            # Basketball props - NBA only (no NCAAB props on Kalshi)
             active_sports.add("basketball_nba")
-            active_sports.add("basketball_ncaab")
 
     return list(active_sports)
 
