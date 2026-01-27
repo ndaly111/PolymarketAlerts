@@ -391,6 +391,27 @@ def post_discord(message: str) -> None:
         print(f"  [warn] Discord post failed: {e}")
 
 
+def format_startup_message() -> str:
+    """Build the startup status message for Discord."""
+    dry_run_env = os.getenv("DRY_RUN", "0")
+    lines = [
+        "Running props auto trader...",
+        f"Dry run: {dry_run_env}",
+        "=" * 60,
+        "PROPS AUTO TRADER",
+        f"Initial EV threshold: {MIN_INITIAL_EV:.0%}",
+        f"Final EV threshold: {MIN_FINAL_EV:.0%}",
+        f"Min books: {MIN_BOOKS}",
+        f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢",
+        f"Min fair prob: {MIN_FAIR_PROB:.1%}",
+        f"Max trades/day: {MAX_TRADES_PER_DAY}",
+        f"Order timeout: {ORDER_TIMEOUT_SECONDS}s",
+        f"Dry run: {DRY_RUN}",
+        "=" * 60,
+    ]
+    return "\n".join(lines)
+
+
 def execute_trade(
     client: KalshiAuthClient,
     db_path: Path,
@@ -618,6 +639,8 @@ def main() -> int:
     print(f"Order timeout: {ORDER_TIMEOUT_SECONDS}s")
     print(f"Dry run: {DRY_RUN}")
     print("=" * 60)
+
+    post_discord(format_startup_message())
 
     # Initialize
     ensure_db_schema(DB_PATH)
