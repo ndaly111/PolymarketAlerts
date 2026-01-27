@@ -39,12 +39,14 @@ jobs:
       # Trades database
       WEATHER_TRADES_DB_PATH: weather_trades.db
       # Trading parameters
-      WEATHER_MIN_EV: "0.02"
+      WEATHER_MIN_EV: "0.10"
+      WEATHER_AUTOTRADE_MIN_EV: ${{ vars.WEATHER_AUTOTRADE_MIN_EV || '0.10' }}
       WEATHER_MIN_Q: "0.05"
       WEATHER_MAX_ASK: "85"
       WEATHER_MAX_TRADES_PER_DAY: "10"
       WEATHER_ORDER_TIMEOUT: "30"
       WEATHER_CONTRACTS_PER_TRADE: "1"
+      WEATHER_AUTOTRADE_ENABLED: ${{ vars.WEATHER_AUTOTRADE_ENABLED || '0' }}
       # Forecast/model config
       WEATHER_FORECAST_SOURCE: nws_hourly_max
       WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive

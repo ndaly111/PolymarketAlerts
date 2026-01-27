@@ -1,0 +1,81 @@
+name: Weather Order Reaper
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      ttl_minutes:
+        description: "Stale order TTL (minutes)"
+        required: false
+        default: "5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-order-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: America/New_York
+      PYTHONPATH: ${{ github.workspace }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      WEATHER_TRADES_DB_PATH: weather_trades.db
+      DISCORD_WEATHER_TRADES_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests cryptography pyyaml
+
+      - name: Gate to trading window (05:00-20:00 ET)
+        run: |
+          hour=$(date +%H)
+          if [ "$hour" -lt 5 ] || [ "$hour" -gt 20 ]; then
+            echo "Outside trading window; exiting."
+            exit 0
+          fi
+
+      - name: Run order reaper
+        run: |
+          ttl="${{ github.event.inputs.ttl_minutes || '5' }}"
+          python -m weather.scripts.cancel_stale_weather_orders --ttl-minutes "$ttl"
+
+      - name: Commit DB changes
+        if: success()
+        run: |
+          if [ -f "$WEATHER_TRADES_DB_PATH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$WEATHER_TRADES_DB_PATH" || true
+            if git diff --staged --quiet; then
+              echo "No DB changes to commit"
+            else
+              git commit -m "weather: update trades database"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+              done
+            fi
+          fi

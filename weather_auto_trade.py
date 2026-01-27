@@ -6,10 +6,10 @@ Workflow:
 1. Compute fair prices from NWS forecasts + error models
 2. Collect fresh Kalshi weather market quotes
 3. Compute edges (fee-adjusted EV)
-4. Filter for opportunities: EV >= 2%, q in [5%, 95%], ask <= 85¢
+4. Filter for opportunities: EV >= 10%, q in [5%, 95%], ask <= 85¢
 5. Re-fetch fresh Kalshi price before trading
-6. Place limit order at ask for N contracts
-7. Wait 30 sec, cancel if not filled
+6. Place limit order at ask for N contracts (no fill polling)
+7. Post one consolidated Discord summary
 8. Max 10 trades/day across all weather markets
 """
 
@@ -19,7 +19,6 @@ import json
 import os
 import sqlite3
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -33,11 +32,12 @@ from kalshi_auth_client import KalshiAuthClient
 
 
 # --- Configuration ---
-MIN_EV = float(os.getenv("WEATHER_MIN_EV", "0.02"))  # 2% min EV (matches edge computation)
+MIN_EV = float(
+    os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.10"))
+)  # 10% min EV (matches edge computation)
 MIN_Q = float(os.getenv("WEATHER_MIN_Q", "0.05"))  # 5% min probability
 MAX_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MAX_ASK", "85"))  # ≤ 85¢
 MAX_TRADES_PER_DAY = int(os.getenv("WEATHER_MAX_TRADES_PER_DAY", "10"))
-ORDER_TIMEOUT_SECONDS = int(os.getenv("WEATHER_ORDER_TIMEOUT", "30"))
 CONTRACTS_PER_TRADE = int(os.getenv("WEATHER_CONTRACTS_PER_TRADE", "1"))
 
 # Database paths
@@ -48,6 +48,7 @@ TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", "weather_trades.db"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEATHER_TRADES_WEBHOOK", os.getenv("DISCORD_WEATHER_ALERTS", os.getenv("DISCORD_WEBHOOK_URL", "")))
 
 DRY_RUN = os.getenv("WEATHER_DRY_RUN", "0") == "1"
+AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
@@ -75,11 +76,22 @@ def ensure_db_schema(db_path: Path) -> None:
             order_id TEXT,
             status TEXT NOT NULL,
             fill_price_cents INTEGER,
+            placed_at_utc TEXT,
+            last_checked_at_utc TEXT,
+            filled_at_utc TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(trade_date, market_ticker)
         )
     """)
+
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(weather_trades);").fetchall()}
+    if "placed_at_utc" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN placed_at_utc TEXT;")
+    if "last_checked_at_utc" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN last_checked_at_utc TEXT;")
+    if "filled_at_utc" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN filled_at_utc TEXT;")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS weather_daily_stats (
@@ -116,7 +128,7 @@ def ensure_db_schema(db_path: Path) -> None:
 
 def get_trades_today(db_path: Path) -> int:
     """Get number of trades attempted today."""
-    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute("SELECT trades_attempted FROM weather_daily_stats WHERE date = ?", (today,))
@@ -127,7 +139,7 @@ def get_trades_today(db_path: Path) -> int:
 
 def increment_trades_today(db_path: Path) -> None:
     """Increment trade counter for today."""
-    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute("""
@@ -153,10 +165,15 @@ def record_trade(
     order_id: Optional[str],
     status: str,
     fill_price_cents: Optional[int] = None,
+    placed_at_utc: Optional[str] = None,
+    last_checked_at_utc: Optional[str] = None,
+    filled_at_utc: Optional[str] = None,
 ) -> None:
     """Record a trade in the database."""
     now = datetime.now(ZoneInfo("UTC")).isoformat()
-    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    if placed_at_utc is None and status in {"PLACED", "dry_run"}:
+        placed_at_utc = now
 
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
@@ -165,12 +182,14 @@ def record_trade(
         INSERT OR REPLACE INTO weather_trades (
             trade_date, city_key, market_ticker, event_display, side,
             quantity, limit_price_cents, fair_q, ev, forecast_high_f,
-            order_id, status, fill_price_cents, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            order_id, status, fill_price_cents, placed_at_utc,
+            last_checked_at_utc, filled_at_utc, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         today, city_key, market_ticker, event_display, side,
         quantity, limit_price_cents, fair_q, ev, forecast_high_f,
-        order_id, status, fill_price_cents, now, now
+        order_id, status, fill_price_cents, placed_at_utc,
+        last_checked_at_utc, filled_at_utc, now, now
     ))
 
     conn.commit()
@@ -212,7 +231,7 @@ def log_scanned_opportunity(
 
 def already_traded_today(db_path: Path, market_ticker: str) -> bool:
     """Check if we already traded this ticker today."""
-    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute(
@@ -320,15 +339,93 @@ def post_discord(message: str) -> None:
         print(f"  [warn] Discord post failed: {e}")
 
 
+def format_summary_message(
+    results: List[Dict[str, Any]],
+    target_date: str,
+    forecast_source: str,
+) -> str:
+    placed = [r for r in results if r["status"] in {"PLACED", "DRY_RUN"}]
+    skipped = [r for r in results if r["status"].startswith("SKIPPED")]
+    failed = [r for r in results if r["status"].startswith("FAILED")]
+
+    header_lines = [
+        f"**Weather Auto-Trade Summary — {target_date}**",
+        f"Forecast source: {forecast_source}",
+        f"Min EV: {MIN_EV:.0%} | Max ask: {MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
+        f"Placed: {len(placed)} | Skipped: {len(skipped)} | Failed: {len(failed)}",
+    ]
+    if DRY_RUN:
+        header_lines.append("Mode: DRY_RUN (no orders submitted)")
+    elif not AUTOTRADE_ENABLED:
+        header_lines.append("Mode: AUTOTRADE DISABLED (no orders submitted)")
+
+    sections: List[str] = ["\n".join(header_lines)]
+
+    def add_section(title: str, rows: List[str]) -> None:
+        if not rows:
+            return
+        sections.append(f"\n{title}\n" + "\n".join(rows))
+
+    def format_ev(value: Optional[float]) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.1%}"
+
+    placed_rows = [
+        (
+            f"- {r['ticker']} {r['side']} | {r['limit']}¢ | EV {format_ev(r.get('ev'))} | "
+            f"Order {r['order_id']}"
+        )
+        for r in placed
+    ]
+    skipped_rows = [
+        (
+            f"- {r['ticker']} {r['side']} | "
+            f"{r['status']} ({format_ev(r.get('ev'))})"
+        )
+        for r in skipped
+    ]
+    failed_rows = [
+        (
+            f"- {r['ticker']} {r['side']} | "
+            f"{r['status']} ({r.get('error', 'unknown error')})"
+        )
+        for r in failed
+    ]
+
+    add_section("✅ PLACED", placed_rows)
+    add_section("⏭️ SKIPPED", skipped_rows)
+    add_section("❌ FAILED", failed_rows)
+
+    message = "\n".join(sections)
+    if len(message) <= 1990:
+        return message
+
+    trimmed_sections: List[str] = [sections[0]]
+    for title, rows in [("✅ PLACED", placed_rows), ("⏭️ SKIPPED", skipped_rows), ("❌ FAILED", failed_rows)]:
+        if not rows:
+            continue
+        preview = rows[:5]
+        remaining = len(rows) - len(preview)
+        block = f"\n{title}\n" + "\n".join(preview)
+        if remaining > 0:
+            block += f"\n- ... and {remaining} more"
+        trimmed_sections.append(block)
+
+    trimmed_message = "\n".join(trimmed_sections)
+    return trimmed_message[:1990]
+
+
 def execute_trade(
     client: KalshiAuthClient,
     db_path: Path,
     opportunity: Dict[str, Any],
-) -> bool:
+    trade_enabled: bool,
+) -> Dict[str, Any]:
     """
-    Execute the full trade workflow for a single opportunity.
+    Execute the trade workflow for a single opportunity.
 
-    Returns True if trade was placed (filled or pending), False otherwise.
+    Returns a result dict summarizing the outcome.
     """
     ticker = opportunity["market_ticker"]
     city_key = opportunity["city_key"]
@@ -343,13 +440,38 @@ def execute_trade(
     # Check if already traded today
     if already_traded_today(db_path, ticker):
         print(f"  [skip] Already traded {ticker} today")
-        return False
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": None,
+            "fair_q": fair_q,
+            "ev": pre_ev,
+            "order_id": None,
+            "status": "SKIPPED_ALREADY_TRADED",
+        }
 
     # Check if we have existing position
     try:
         if client.has_position(ticker):
             print(f"  [skip] Already have position in {ticker}")
-            return False
+            record_trade(
+                db_path, city_key, ticker, event_display, side,
+                0, 0, fair_q, pre_ev, forecast_high_f,
+                None, "SKIPPED_HAS_POSITION"
+            )
+            return {
+                "ticker": ticker,
+                "city": city_key,
+                "event": event_display,
+                "side": side,
+                "limit": None,
+                "fair_q": fair_q,
+                "ev": pre_ev,
+                "order_id": None,
+                "status": "SKIPPED_HAS_POSITION",
+            }
     except Exception as e:
         print(f"  [warn] Could not check position: {e}")
 
@@ -358,7 +480,22 @@ def execute_trade(
     fresh_kalshi = fetch_fresh_kalshi_price(client, ticker)
     if not fresh_kalshi:
         print(f"  [skip] Could not get fresh Kalshi price")
-        return False
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            0, 0, fair_q, pre_ev, forecast_high_f,
+            None, "SKIPPED_NO_PRICE"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": None,
+            "fair_q": fair_q,
+            "ev": pre_ev,
+            "order_id": None,
+            "status": "SKIPPED_NO_PRICE",
+        }
 
     # Determine which price to use based on side
     if side == "YES":
@@ -373,7 +510,22 @@ def execute_trade(
     # Check price hasn't moved too much
     if kalshi_ask > MAX_KALSHI_ASK_CENTS:
         print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ limit")
-        return False
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            0, kalshi_ask, fair_q, ev, forecast_high_f,
+            None, "SKIPPED_MAX_ASK"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": None,
+            "status": "SKIPPED_MAX_ASK",
+        }
 
     # Recalculate EV with fresh price
     kalshi_prob = kalshi_ask / 100.0
@@ -388,10 +540,44 @@ def execute_trade(
 
     if ev < MIN_EV:
         print(f"  [skip] Fresh EV {ev:.1%} < {MIN_EV:.1%} threshold")
-        return False
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            0, kalshi_ask, fair_q, ev, forecast_high_f,
+            None, "SKIPPED_MIN_EV"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": None,
+            "status": "SKIPPED_MIN_EV",
+        }
 
     # All checks passed - place order
     print(f"  Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
+
+    if not trade_enabled:
+        print("  [skip] Auto-trade disabled")
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
+            None, "SKIPPED_AUTOTRADE_DISABLED"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": None,
+            "status": "SKIPPED_AUTOTRADE_DISABLED",
+        }
 
     if DRY_RUN:
         print("  [DRY_RUN] Would place order")
@@ -400,7 +586,17 @@ def execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
             "DRY_RUN", "dry_run"
         )
-        return True
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": "DRY_RUN",
+            "status": "DRY_RUN",
+        }
 
     try:
         order = client.place_order(
@@ -411,84 +607,42 @@ def execute_trade(
         )
         order_id = order.get("order_id", order.get("id", ""))
         print(f"  Order placed: {order_id}")
-
-        # Discord notification - order placed
-        ev_cents = ev * 100
-        place_msg = (
-            f"**Weather Order** | {city_key} {event_display} {side}\n"
-            f"Limit: {kalshi_ask}¢ | Fair q: {fair_q:.1%} | EV: {ev:.1%} ({ev_cents:.1f}¢)\n"
-            f"Forecast high: {forecast_high_f}°F | Waiting {ORDER_TIMEOUT_SECONDS}s..."
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
+            order_id, "PLACED"
         )
-        post_discord(place_msg)
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": order_id,
+            "status": "PLACED",
+        }
 
     except Exception as e:
         print(f"  [error] Failed to place order: {e}")
         record_trade(
             db_path, city_key, ticker, event_display, side,
             CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            None, "error"
+            None, "FAILED_PLACE_ORDER"
         )
-        post_discord(f"**Weather Order Failed** | {city_key} {event_display} {side}\nError: {str(e)[:100]}")
-        return False
-
-    # Wait and check fill status
-    print(f"  Waiting {ORDER_TIMEOUT_SECONDS}s for fill...")
-    time.sleep(ORDER_TIMEOUT_SECONDS)
-
-    try:
-        order_status = client.get_order(order_id)
-        status = order_status.get("status", "").lower()
-        filled_count = order_status.get("filled_count", 0)
-        remaining = order_status.get("remaining_count", CONTRACTS_PER_TRADE)
-
-        if filled_count > 0:
-            fill_price = order_status.get("avg_fill_price", kalshi_ask)
-            print(f"  FILLED: {filled_count} contract(s) at {fill_price}¢")
-            record_trade(
-                db_path, city_key, ticker, event_display, side,
-                filled_count, kalshi_ask, fair_q, ev, forecast_high_f,
-                order_id, "filled", fill_price
-            )
-
-            # Recalc EV at fill price
-            fill_prob = fill_price / 100.0
-            if side == "YES":
-                actual_ev = fair_q * (1.0 - fill_prob) - (1 - fair_q) * fill_prob - 0.02
-            else:
-                actual_ev = (1 - fair_q) * (1.0 - fill_prob) - fair_q * fill_prob - 0.02
-            ev_cents = actual_ev * 100
-
-            msg = (
-                f"**FILLED** | {city_key} {event_display} {side}\n"
-                f"Fill: {fill_price}¢ | Fair q: {fair_q:.1%} | EV: {actual_ev:.1%} ({ev_cents:.1f}¢)\n"
-                f"Forecast high: {forecast_high_f}°F"
-            )
-            post_discord(msg)
-            return True
-
-        elif remaining > 0:
-            # Cancel unfilled order
-            print(f"  Not filled, cancelling...")
-            client.cancel_order(order_id)
-            record_trade(
-                db_path, city_key, ticker, event_display, side,
-                CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-                order_id, "cancelled"
-            )
-            print(f"  Order cancelled")
-            post_discord(f"**Cancelled** | {city_key} {event_display} {side} | Not filled after {ORDER_TIMEOUT_SECONDS}s")
-            return False
-
-    except Exception as e:
-        print(f"  [error] Failed to check/cancel order: {e}")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            order_id, "unknown"
-        )
-        return False
-
-    return False
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": None,
+            "status": "FAILED_PLACE_ORDER",
+            "error": str(e)[:120],
+        }
 
 
 def run_data_pipeline(target_date: str, forecast_source: str) -> bool:
@@ -597,13 +751,17 @@ def main() -> int:
     print(f"Min q: {MIN_Q:.1%}")
     print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
     print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
-    print(f"Order timeout: {ORDER_TIMEOUT_SECONDS}s")
     print(f"Contracts per trade: {CONTRACTS_PER_TRADE}")
     print(f"Dry run: {DRY_RUN}")
+    print(f"Autotrade enabled: {AUTOTRADE_ENABLED}")
     print("=" * 60)
 
     # Initialize
     ensure_db_schema(TRADES_DB_PATH)
+
+    if AUTOTRADE_ENABLED and MAX_TRADES_PER_DAY <= 0:
+        print("ERROR: WEATHER_MAX_TRADES_PER_DAY must be > 0 when auto-trade is enabled.")
+        return 1
 
     # Check daily limit
     trades_today = get_trades_today(TRADES_DB_PATH)
@@ -615,17 +773,6 @@ def main() -> int:
 
     remaining_trades = MAX_TRADES_PER_DAY - trades_today
 
-    # Initialize Kalshi client
-    print("\nInitializing Kalshi client...")
-    try:
-        client = KalshiAuthClient.from_env()
-        balance = client.get_balance()
-        available = balance.get("available_balance", balance.get("balance", 0)) / 100
-        print(f"Balance: ${available:.2f}")
-    except Exception as e:
-        print(f"Failed to initialize Kalshi client: {e}")
-        return 1
-
     # Get target date (today in ET)
     now_et = datetime.now(ZoneInfo("America/New_York"))
     target_date = now_et.strftime("%Y-%m-%d")
@@ -633,6 +780,19 @@ def main() -> int:
 
     print(f"\nTarget date: {target_date}")
     print(f"Forecast source: {forecast_source}")
+
+    client = None
+    if AUTOTRADE_ENABLED or DRY_RUN:
+        # Initialize Kalshi client
+        print("\nInitializing Kalshi client...")
+        try:
+            client = KalshiAuthClient.from_env()
+            balance = client.get_balance()
+            available = balance.get("available_balance", balance.get("balance", 0)) / 100
+            print(f"Balance: ${available:.2f}")
+        except Exception as e:
+            print(f"Failed to initialize Kalshi client: {e}")
+            return 1
 
     # Run data pipeline to get fresh prices and edges
     if not run_data_pipeline(target_date, forecast_source):
@@ -670,21 +830,30 @@ def main() -> int:
     print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")
 
     trades_placed = 0
+    results: List[Dict[str, Any]] = []
     for opp in opportunities:
         if trades_placed >= remaining_trades:
             print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
             break
 
-        success = execute_trade(client, TRADES_DB_PATH, opp)
-        if success:
+        result = execute_trade(
+            client,
+            TRADES_DB_PATH,
+            opp,
+            trade_enabled=AUTOTRADE_ENABLED or DRY_RUN,
+        )
+        results.append(result)
+        if result["status"] in {"PLACED", "DRY_RUN"}:
             trades_placed += 1
             increment_trades_today(TRADES_DB_PATH)
 
-        # Rate limit between trades
-        time.sleep(1)
+    # Post only when an edge/opportunity was found.
+    if opportunities:
+        summary_message = format_summary_message(results, target_date, forecast_source)
+        post_discord(summary_message)
 
     print(f"\n{'=' * 60}")
-    print(f"Session complete: {trades_placed} trades placed")
+    print(f"Session complete: {trades_placed} orders placed")
     print("=" * 60)
 
     return 0

@@ -554,6 +554,7 @@ def execute_trade(
         ev_cents = edge * 100
         place_msg = (
             f"**Order Placed** | {player} {stat_type} {line:.0f}+ {side}\n"
+            f"Order ID: {order_id}\n"
             f"Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
             f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill..."
         )
@@ -580,7 +581,9 @@ def execute_trade(
         filled_count = order_status.get("filled_count", 0)
         remaining = order_status.get("remaining_count", CONTRACTS_PER_TRADE)
 
-        if filled_count > 0:
+        if filled_count > 0 or status in {"filled", "executed"}:
+            if filled_count == 0:
+                filled_count = CONTRACTS_PER_TRADE
             fill_price = order_status.get("avg_fill_price", kalshi_ask)
             print(f"  FILLED: {filled_count} contract(s) at {fill_price}¢")
             record_trade(
@@ -594,6 +597,7 @@ def execute_trade(
             ev_cents = actual_edge * 100
             msg = (
                 f"**FILLED** | {player} {stat_type} {line:.0f}+ {side}\n"
+                f"Order ID: {order_id}\n"
                 f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
                 f"Books: {books_count}"
             )
@@ -603,6 +607,12 @@ def execute_trade(
         elif remaining > 0:
             # Cancel unfilled order
             print(f"  Not filled, cancelling...")
+            post_discord(
+                f"**Timed Out** | {player} {stat_type} {line:.0f}+ {side}\n"
+                f"Order ID: {order_id}\n"
+                f"Limit: {kalshi_ask}¢ | Status: {status or 'unknown'} | Filled: {filled_count} | Remaining: {remaining}\n"
+                f"Not filled after {ORDER_TIMEOUT_SECONDS}s"
+            )
             client.cancel_order(order_id)
             record_trade(
                 db_path, ticker, player, stat_type, line, side,
@@ -612,7 +622,10 @@ def execute_trade(
             print(f"  Order cancelled")
 
             # Discord notification - cancelled
-            post_discord(f"**Cancelled** | {player} {stat_type} {line:.0f}+ {side} | Not filled after {ORDER_TIMEOUT_SECONDS}s")
+            post_discord(
+                f"**Cancelled** | {player} {stat_type} {line:.0f}+ {side}\n"
+                f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s"
+            )
             return False
 
     except Exception as e:

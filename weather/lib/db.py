@@ -980,3 +980,38 @@ def fetch_preferred_station(
             (city_key,),
         ).fetchone()
     return str(row[0]) if row else None
+
+
+def ensure_weather_trades_schema(db_path: Path) -> None:
+    """Ensure the weather_trades schema exists in a trades database."""
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS weather_trades (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              trade_date TEXT NOT NULL,
+              city_key TEXT NOT NULL,
+              market_ticker TEXT NOT NULL,
+              event_display TEXT NOT NULL,
+              side TEXT NOT NULL,
+              quantity INTEGER NOT NULL,
+              limit_price_cents INTEGER NOT NULL,
+              fair_q REAL NOT NULL,
+              ev REAL NOT NULL,
+              forecast_high_f INTEGER,
+              order_id TEXT,
+              status TEXT NOT NULL,
+              fill_price_cents INTEGER,
+              placed_at_utc TEXT,
+              last_checked_at_utc TEXT,
+              filled_at_utc TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(trade_date, market_ticker)
+            );
+            """
+        )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(weather_trades);").fetchall()}
+        for column in ("placed_at_utc", "last_checked_at_utc", "filled_at_utc"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE weather_trades ADD COLUMN {column} TEXT;")
