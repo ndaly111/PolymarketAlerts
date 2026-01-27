@@ -28,8 +28,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kalshi_auth_client import KalshiAuthClient, prob_to_american, american_to_prob
 from kalshi_props import fetch_kalshi_props, KALSHI_TO_ODDSAPI
-from oddsapi_props import fetch_all_props, normalize_player_name
+from oddsapi_props import fetch_all_props, get_daily_odds_api_usage, normalize_player_name
 from props_value import match_props, filter_and_rank
+from zoneinfo import ZoneInfo
 
 
 # --- Configuration ---
@@ -129,8 +130,65 @@ def ensure_db_schema(db_path: Path) -> None:
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+
+def get_notification_value(db_path: Path, key: str) -> Optional[str]:
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM notifications WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_notification_value(db_path: Path, key: str, value: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO notifications (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    """, (key, value, now))
+    conn.commit()
+    conn.close()
+
+
+def maybe_post_hourly_odds_api_usage(db_path: Path) -> None:
+    now_est = datetime.now(ZoneInfo("America/New_York"))
+    hour_key = now_est.strftime("%Y-%m-%d %H")
+    last_sent = get_notification_value(db_path, "odds_api_usage_hour")
+    if last_sent == hour_key:
+        return
+
+    summary = get_daily_odds_api_usage(date=now_est.strftime("%Y-%m-%d"), db_path=db_path)
+    credits_used = summary.get("credits_used", 0)
+    request_count = summary.get("request_count", 0)
+    credits_remaining = summary.get("credits_remaining_header")
+    credits_used_header = summary.get("credits_used_header")
+
+    lines = [
+        f"**Odds API usage (ET)**",
+        f"Credits used today: {credits_used} (goal < 650)",
+        f"Requests logged today: {request_count}",
+    ]
+    if credits_used_header is not None:
+        lines.append(f"API header used: {credits_used_header}")
+    if credits_remaining is not None:
+        lines.append(f"API header remaining: {credits_remaining}")
+
+    post_discord("\n".join(lines))
+    set_notification_value(db_path, "odds_api_usage_hour", hour_key)
 
 
 def get_trades_today(db_path: Path) -> int:
@@ -787,6 +845,10 @@ def main() -> int:
         else:
             discord_message = startup_message
         post_discord(discord_message)
+        try:
+            maybe_post_hourly_odds_api_usage(DB_PATH)
+        except Exception as e:
+            print(f"  [warn] Failed to post hourly Odds API usage: {e}")
 
 
 if __name__ == "__main__":
