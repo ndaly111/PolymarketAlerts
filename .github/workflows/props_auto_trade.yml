@@ -34,9 +34,9 @@ jobs:
       # Odds API
       THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
       # Trading parameters
-      MIN_INITIAL_EV: "0.10"
+      MIN_INITIAL_EV: "0.05"
       MIN_FINAL_EV: "0.05"
-      MIN_BOOKS: "3"
+      MIN_BOOKS: "2"
       MAX_KALSHI_ASK: "67"
       MIN_FAIR_PROB: "0.333"
       MAX_TRADES_PER_DAY: "10"
