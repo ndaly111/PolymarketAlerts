@@ -8,7 +8,7 @@ import requests
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
-# Major leagues + college
+# Major leagues + college + soccer
 BASE_SPORT_KEYS = [
     "americanfootball_nfl",
     "basketball_nba",
@@ -16,6 +16,13 @@ BASE_SPORT_KEYS = [
     "icehockey_nhl",
     "americanfootball_ncaaf",
     "basketball_ncaab",
+    # Soccer
+    "soccer_epl",
+    "soccer_usa_mls",
+    "soccer_spain_la_liga",
+    "soccer_germany_bundesliga",
+    "soccer_portugal_primeira_liga",
+    "soccer_mexico_ligamx",
 ]
 
 # All tennis tournaments (ATP + WTA)

@@ -48,8 +48,8 @@ jobs:
       SPORTS_MAX_TRADES_PER_DAY: "10"
       SPORTS_ORDER_TIMEOUT: "30"
       SPORTS_CONTRACTS_PER_TRADE: "1"
-      # Sports to trade (NFL, NHL, NBA, CBB, CFB, MLB)
-      SPORTS_SPORT_KEYS: "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb"
+      # Sports to trade (NFL, NHL, NBA, CBB, CFB, MLB, Soccer)
+      SPORTS_SPORT_KEYS: "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb,soccer_epl,soccer_usa_mls,soccer_spain_la_liga,soccer_germany_bundesliga,soccer_portugal_primeira_liga,soccer_mexico_ligamx"
       # Database
       SPORTS_DB_PATH: sports_trades.db
       # Discord notifications - use sports betting lines channel

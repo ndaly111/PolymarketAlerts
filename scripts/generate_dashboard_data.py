@@ -300,9 +300,15 @@ def get_sports_stats(db_path: Path) -> dict:
                 WHEN ticker LIKE '%NBA%' THEN 'NBA'
                 WHEN ticker LIKE '%NFL%' THEN 'NFL'
                 WHEN ticker LIKE '%NHL%' THEN 'NHL'
-                WHEN ticker LIKE '%MLB%' THEN 'MLB'
+                WHEN ticker LIKE 'KXMLB%' THEN 'MLB'
                 WHEN ticker LIKE '%NCAAB%' OR ticker LIKE '%CBB%' THEN 'NCAAB'
                 WHEN ticker LIKE '%NCAAF%' OR ticker LIKE '%CFB%' THEN 'NCAAF'
+                WHEN ticker LIKE 'KXEPL%' THEN 'EPL'
+                WHEN ticker LIKE 'KXMLS%' THEN 'MLS'
+                WHEN ticker LIKE 'KXLALIGA%' THEN 'La Liga'
+                WHEN ticker LIKE 'KXBUNDESLIGA%' THEN 'Bundesliga'
+                WHEN ticker LIKE 'KXLIGAPORTUGAL%' THEN 'Liga Portugal'
+                WHEN ticker LIKE 'KXLIGAMX%' THEN 'Liga MX'
                 ELSE 'Other'
             END as sport,
             COUNT(*) as count,

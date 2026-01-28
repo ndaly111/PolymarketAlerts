@@ -63,10 +63,10 @@ CACHE_TTL_SECONDS = int(os.getenv("SPORTS_CACHE_TTL", "14400"))  # 4 hours - but
 # Scheduled refresh times (ET) - only fetch fresh data at these times
 SCHEDULED_REFRESH_HOURS = [6, 8, 12, 16, 18, 20]  # 6am, 8am, 12pm, 4pm, 6pm, 8pm ET
 
-# Sports to include (NFL, NHL, NBA, CBB, CFB, MLB)
+# Sports to include (NFL, NHL, NBA, CBB, CFB, MLB, Soccer)
 SPORT_KEYS = os.getenv(
     "SPORTS_SPORT_KEYS",
-    "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb"
+    "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb,soccer_epl,soccer_usa_mls,soccer_spain_la_liga,soccer_germany_bundesliga,soccer_portugal_primeira_liga,soccer_mexico_ligamx"
 ).split(",")
 
 
@@ -581,6 +581,26 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
         "KXMLBGAME",      # MLB moneylines
         "KXMLBSPREAD",    # MLB spreads
         "KXMLBTOTAL",     # MLB totals
+        # Soccer - EPL (English Premier League)
+        "KXEPLGAME",      # EPL moneylines
+        "KXEPLSPREAD",    # EPL spreads
+        "KXEPLTOTAL",     # EPL totals
+        # Soccer - MLS
+        "KXMLSGAME",      # MLS moneylines
+        "KXMLSSPREAD",    # MLS spreads
+        "KXMLSTOTAL",     # MLS totals
+        # Soccer - La Liga
+        "KXLALIGAGAME",   # La Liga moneylines
+        "KXLALIGASPREAD", # La Liga spreads
+        "KXLALIGATOTAL",  # La Liga totals
+        # Soccer - Bundesliga
+        "KXBUNDESLIGAGAME",   # Bundesliga moneylines
+        "KXBUNDESLIGASPREAD", # Bundesliga spreads
+        "KXBUNDESLIGATOTAL",  # Bundesliga totals
+        # Soccer - Liga Portugal
+        "KXLIGAPORTUGALGAME", # Liga Portugal moneylines
+        # Soccer - Liga MX
+        "KXLIGAMXGAME",       # Liga MX moneylines
     ]
 
     try:

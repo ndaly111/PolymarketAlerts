@@ -15,12 +15,20 @@ import requests
 
 # ESPN sport endpoints
 ESPN_SPORTS = {
+    # US Sports
     "basketball_nba": "basketball/nba",
     "basketball_ncaab": "basketball/mens-college-basketball",
     "americanfootball_nfl": "football/nfl",
     "americanfootball_ncaaf": "football/college-football",
     "icehockey_nhl": "hockey/nhl",
     "baseball_mlb": "baseball/mlb",
+    # Soccer
+    "soccer_epl": "soccer/eng.1",           # English Premier League
+    "soccer_usa_mls": "soccer/usa.1",       # MLS
+    "soccer_spain_la_liga": "soccer/esp.1", # La Liga
+    "soccer_germany_bundesliga": "soccer/ger.1",  # Bundesliga
+    "soccer_portugal_primeira_liga": "soccer/por.1",  # Liga Portugal
+    "soccer_mexico_ligamx": "soccer/mex.1", # Liga MX
 }
 
 
