@@ -22,6 +22,28 @@ from kalshi_auth_client import KalshiAuthClient
 # Configuration
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "props_trades.db"
+
+
+def ensure_settlement_columns(db_path: Path) -> None:
+    """Add settlement columns if they don't exist (migration)."""
+    if not db_path.exists():
+        return
+
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(trades);").fetchall()}
+    if "settled" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN settled INTEGER DEFAULT 0;")
+    if "won" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN won INTEGER;")
+    if "payout_cents" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN payout_cents INTEGER;")
+    if "settled_at" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN settled_at TEXT;")
+
+    conn.commit()
+    conn.close()
 DISCORD_WEBHOOK = os.getenv("DISCORD_PROPS_WEBHOOK", os.getenv("DISCORD_WEBHOOK_URL", ""))
 ET = ZoneInfo("America/New_York")
 
@@ -122,6 +144,9 @@ def main() -> int:
     print("PROPS SETTLEMENT CHECKER")
     print(f"Database: {DB_PATH}")
     print("=" * 60)
+
+    # Ensure settlement columns exist (migration)
+    ensure_settlement_columns(DB_PATH)
 
     # Get unsettled trades
     trades = get_unsettled_trades(DB_PATH)
