@@ -551,14 +551,32 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
     """Fetch sports markets from Kalshi (moneylines, spreads, totals)."""
     markets = []
 
-    # Series tickers for game lines (not props)
+    # Series tickers for game lines - moneylines, spreads, totals (not futures)
     series_tickers = [
-        "KXNBA",      # NBA games
-        "KXNCAAB",    # College basketball
-        "KXNFL",      # NFL games
-        "KXNCAAF",    # College football
-        "KXNHL",      # NHL games
-        "KXMLB",      # MLB games
+        # NBA
+        "KXNBAGAME",      # NBA moneylines
+        "KXNBASPREAD",    # NBA spreads
+        "KXNBATOTAL",     # NBA totals
+        # College Basketball
+        "KXNCAABGAME",    # NCAAB moneylines
+        "KXNCAAMBGAME",   # Men's college basketball
+        "KXNCAAWBGAME",   # Women's college basketball
+        # NFL
+        "KXNFLGAME",      # NFL moneylines (may be KXNFLGAMETO)
+        "KXNFLSPREAD",    # NFL spreads
+        "KXNFLTOTAL",     # NFL totals
+        # College Football
+        "KXNCAAFGAME",    # NCAAF moneylines
+        "KXNCAAFSPREAD",  # NCAAF spreads
+        "KXNCAAFTOTAL",   # NCAAF totals
+        # NHL
+        "KXNHLGAME",      # NHL moneylines (if available)
+        "KXNHLSPREAD",
+        "KXNHLTOTAL",
+        # MLB
+        "KXMLBGAME",      # MLB moneylines
+        "KXMLBSPREAD",    # MLB spreads
+        "KXMLBTOTAL",     # MLB totals
     ]
 
     try:
@@ -572,31 +590,15 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
             except Exception as e:
                 print(f"    {series}: error - {e}")
 
-        # Debug: show raw market titles
-        print("  Sample market titles from Kalshi:")
-        for m in all_markets[:10]:
-            print(f"    {m.get('ticker', '')[:30]}: {m.get('title', '')[:60]}")
-
         for market in all_markets:
             ticker = market.get("ticker", "")
             title = market.get("title", "").upper()
 
-            # Check if it's a game line market (not props, not futures)
-            is_game_line = any(p in ticker for p in series_tickers)
-            is_prop = "PROP" in title or "PLAYER" in title or "AST" in ticker or "REB" in ticker or "PTS" in ticker
+            # With correct series, we don't need complex filtering
+            # Just check it's not a prop market
+            is_prop = "AST" in ticker or "REB" in ticker or "PTS" in ticker or "PROP" in title
 
-            # Exclude futures/championship markets
-            is_futures = (
-                "FINALS" in title or
-                "CHAMPIONSHIP" in title or
-                "SUPER BOWL" in title or
-                "WORLD SERIES" in title or
-                "STANLEY CUP" in title or
-                "WINNER" in title or
-                ("WIN THE" in title and "202" in title)  # "Will X win the 2026..."
-            )
-
-            if is_game_line and not is_prop and not is_futures:
+            if not is_prop:
                 # Determine line type
                 if "SPREAD" in title or "SPREAD" in ticker:
                     line_type = "spread"
