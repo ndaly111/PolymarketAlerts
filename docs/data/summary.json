@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-01-28T00:17:30.885887Z",
+  "generated_at": "2026-01-28T00:23:53.507285Z",
   "props": {
     "total_trades": 6,
     "avg_edge": 0.05505593315093951
   },
   "weather": {
-    "total_trades": 1,
+    "total_trades": 57,
     "record": "0W-0L",
     "roi": -100.0,
-    "avg_ev": 0.034569517620172616
+    "avg_ev": 0.16559523578195087
   }
 }
