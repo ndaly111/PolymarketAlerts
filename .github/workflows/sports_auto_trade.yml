@@ -52,8 +52,8 @@ jobs:
       SPORTS_SPORT_KEYS: "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb"
       # Database
       SPORTS_DB_PATH: sports_trades.db
-      # Discord notifications
-      DISCORD_SPORTS_WEBHOOK: ${{ secrets.DISCORD_SPORTS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
+      # Discord notifications - use sports betting lines channel
+      DISCORD_SPORTS_WEBHOOK: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
       # Dry run (default true for safety)
       SPORTS_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
 
