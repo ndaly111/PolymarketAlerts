@@ -1,0 +1,145 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.69,
+        "ev": 0.09103588786555096,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 48,
+        "b": 49,
+        "desc": "48 \u2264 TMAX \u2264 49",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 2743,
+        "support_hi": 57,
+        "support_lo": 38,
+        "volume": 4119
+      },
+      "market_ticker": "KXHIGHDEN-26JAN27-B48.5",
+      "model_q": 0.19896411213444912,
+      "prices": {
+        "no_ask": 0.69,
+        "yes_ask": 0.35
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHDEN-26JAN27",
+        "series_ticker": "KXHIGHDEN",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Denver** be 48-49\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.75,
+        "ev": 0.06456951762017261,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 50,
+        "b": 51,
+        "desc": "50 \u2264 TMAX \u2264 51",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 1532,
+        "support_hi": 57,
+        "support_lo": 38,
+        "volume": 2137
+      },
+      "market_ticker": "KXHIGHDEN-26JAN27-B50.5",
+      "model_q": 0.16543048237982735,
+      "prices": {
+        "no_ask": 0.75,
+        "yes_ask": 0.26
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHDEN-26JAN27",
+        "series_ticker": "KXHIGHDEN",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Denver** be 50-51\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.06,
+        "ev": 0.057547864145070335,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 44,
+        "b": 45,
+        "desc": "44 \u2264 TMAX \u2264 45",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 1608,
+        "support_hi": 57,
+        "support_lo": 38,
+        "volume": 1817
+      },
+      "market_ticker": "KXHIGHDEN-26JAN27-B44.5",
+      "model_q": 0.13754786414507034,
+      "prices": {
+        "no_ask": 0.96,
+        "yes_ask": 0.06
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHDEN-26JAN27",
+        "series_ticker": "KXHIGHDEN",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Denver** be 44-45\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "DENHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 1,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      38,
+      57
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 48,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Denver",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Denver"
+}

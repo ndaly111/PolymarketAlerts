@@ -1,0 +1,68 @@
+{
+  "city_key": "SEAHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 51,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 50.96,
+    "adjusted_support": [
+      42,
+      59
+    ],
+    "baseline_temp_f": 36,
+    "current_temp_f": 37,
+    "max_observed_f": 37,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 50.96,
+    "original_support": [
+      41,
+      60
+    ],
+    "progress": 0.0667,
+    "station_id": "KSEA"
+  },
+  "label": "Seattle",
+  "pmf_high_f": {
+    "42": 0.004439226819476317,
+    "43": 0.00803840131115017,
+    "44": 0.03552442145948063,
+    "45": 0.032801696004987994,
+    "46": 0.04625780569595274,
+    "47": 0.061281635958239496,
+    "48": 0.07626622818683083,
+    "49": 0.08916425419299652,
+    "50": 0.09792777542679783,
+    "51": 0.10103633670765129,
+    "52": 0.09792777542679783,
+    "53": 0.08916425419299652,
+    "54": 0.07626622818683083,
+    "55": 0.061281635958239496,
+    "56": 0.04625780569595274,
+    "57": 0.032801696004987994,
+    "58": 0.03552442145948063,
+    "59": 0.00803840131115017
+  },
+  "snapshot_hour_local": 4,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/SEW/124,61/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/47.4502,-122.3088",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 50.96004695862471,
+    "p10": 46,
+    "p50": 51,
+    "p90": 56
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

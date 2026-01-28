@@ -1,0 +1,63 @@
+{
+  "city_key": "CHIHIGH",
+  "error_model_missing": false,
+  "error_model_month": 1,
+  "error_model_n_samples": 94,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": "2026-01-27T12:02:38.933682+00:00",
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 13,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 15.23,
+    "adjusted_support": [
+      12,
+      27
+    ],
+    "baseline_temp_f": 12,
+    "current_temp_f": 12,
+    "max_observed_f": 12,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 13.4,
+    "original_support": [
+      4,
+      27
+    ],
+    "progress": 0.0,
+    "station_id": "KMDW"
+  },
+  "label": "Chicago",
+  "pmf_high_f": {
+    "12": 0.1230769230769231,
+    "13": 0.276923076923077,
+    "14": 0.18461538461538465,
+    "15": 0.06153846153846155,
+    "16": 0.1384615384615385,
+    "17": 0.07692307692307694,
+    "18": 0.015384615384615387,
+    "20": 0.015384615384615387,
+    "21": 0.015384615384615387,
+    "22": 0.030769230769230774,
+    "23": 0.015384615384615387,
+    "25": 0.030769230769230774,
+    "27": 0.015384615384615387
+  },
+  "snapshot_hour_local": 6,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/LOT/76,73/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/41.8781,-87.6298",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 15.23076923076923,
+    "p10": 12,
+    "p50": 14,
+    "p90": 21
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Chicago"
+}

@@ -1,0 +1,112 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.58,
+        "ev": 0.19999999999999998,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 15,
+        "b": 16,
+        "desc": "15 \u2264 TMAX \u2264 16",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 1919,
+        "support_hi": 27,
+        "support_lo": 12,
+        "volume": 2727
+      },
+      "market_ticker": "KXHIGHCHI-26JAN27-B15.5",
+      "model_q": 0.20000000000000004,
+      "prices": {
+        "no_ask": 0.58,
+        "yes_ask": 0.52
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHCHI-26JAN27",
+        "series_ticker": "KXHIGHCHI",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the high temp in Chicago be 15-16\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.41,
+        "ev": 0.031538461538461696,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 13,
+        "b": 14,
+        "desc": "13 \u2264 TMAX \u2264 14",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 2773,
+        "support_hi": 27,
+        "support_lo": 12,
+        "volume": 4050
+      },
+      "market_ticker": "KXHIGHCHI-26JAN27-B13.5",
+      "model_q": 0.4615384615384617,
+      "prices": {
+        "no_ask": 0.68,
+        "yes_ask": 0.41
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHCHI-26JAN27",
+        "series_ticker": "KXHIGHCHI",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the high temp in Chicago be 13-14\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "CHIHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 1,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 1,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      12,
+      27
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 13,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Chicago",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Chicago"
+}

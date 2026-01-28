@@ -1,0 +1,70 @@
+{
+  "city_key": "LVHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 62,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 61.96,
+    "adjusted_support": [
+      52,
+      71
+    ],
+    "baseline_temp_f": 37,
+    "current_temp_f": 37,
+    "max_observed_f": 37,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 61.96,
+    "original_support": [
+      52,
+      71
+    ],
+    "progress": 0.0,
+    "station_id": "KLAS"
+  },
+  "label": "Las Vegas",
+  "pmf_high_f": {
+    "52": 0.004439226819476317,
+    "53": 0.00803840131115017,
+    "54": 0.013673781245519755,
+    "55": 0.02185064021396087,
+    "56": 0.032801696004987994,
+    "57": 0.04625780569595274,
+    "58": 0.061281635958239496,
+    "59": 0.07626622818683083,
+    "60": 0.08916425419299652,
+    "61": 0.09792777542679783,
+    "62": 0.10103633670765129,
+    "63": 0.09792777542679783,
+    "64": 0.08916425419299652,
+    "65": 0.07626622818683083,
+    "66": 0.061281635958239496,
+    "67": 0.04625780569595274,
+    "68": 0.032801696004987994,
+    "69": 0.02185064021396087,
+    "70": 0.013673781245519755,
+    "71": 0.00803840131115017
+  },
+  "snapshot_hour_local": 4,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/VEF/122,94/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/36.0840,-115.1537",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 61.955607731805244,
+    "p10": 57,
+    "p50": 62,
+    "p90": 67
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

@@ -1,0 +1,66 @@
+{
+  "city_key": "PHLHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 22,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 22.35,
+    "adjusted_support": [
+      16,
+      31
+    ],
+    "baseline_temp_f": 16,
+    "current_temp_f": 16,
+    "max_observed_f": 16,
+    "observation_time_utc": "2026-01-27T10:54:00+00:00",
+    "original_mean": 21.96,
+    "original_support": [
+      12,
+      31
+    ],
+    "progress": 0.0,
+    "station_id": "KPHL"
+  },
+  "label": "Philadelphia",
+  "pmf_high_f": {
+    "16": 0.03445563721105163,
+    "17": 0.048590236644980106,
+    "18": 0.06437160493029846,
+    "19": 0.08011175670493155,
+    "20": 0.09366013251877894,
+    "21": 0.10286553178463669,
+    "22": 0.10613083427768831,
+    "23": 0.10286553178463669,
+    "24": 0.09366013251877894,
+    "25": 0.08011175670493155,
+    "26": 0.06437160493029846,
+    "27": 0.048590236644980106,
+    "28": 0.03445563721105163,
+    "29": 0.02295240258085938,
+    "30": 0.01436324651710895,
+    "31": 0.00844371703498852
+  },
+  "snapshot_hour_local": 7,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/PHI/48,72/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/39.8744,-75.2424",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 22.35156624351779,
+    "p10": 18,
+    "p50": 22,
+    "p90": 27
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

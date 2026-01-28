@@ -1,0 +1,70 @@
+{
+  "city_key": "SFOHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 60,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 59.96,
+    "adjusted_support": [
+      50,
+      69
+    ],
+    "baseline_temp_f": 48,
+    "current_temp_f": 46,
+    "max_observed_f": 48,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 59.96,
+    "original_support": [
+      50,
+      69
+    ],
+    "progress": 0.0,
+    "station_id": "KSFO"
+  },
+  "label": "San Francisco",
+  "pmf_high_f": {
+    "50": 0.004439226819476317,
+    "51": 0.00803840131115017,
+    "52": 0.013673781245519755,
+    "53": 0.02185064021396087,
+    "54": 0.032801696004987994,
+    "55": 0.04625780569595274,
+    "56": 0.061281635958239496,
+    "57": 0.07626622818683083,
+    "58": 0.08916425419299652,
+    "59": 0.09792777542679783,
+    "60": 0.10103633670765129,
+    "61": 0.09792777542679783,
+    "62": 0.08916425419299652,
+    "63": 0.07626622818683083,
+    "64": 0.061281635958239496,
+    "65": 0.04625780569595274,
+    "66": 0.032801696004987994,
+    "67": 0.02185064021396087,
+    "68": 0.013673781245519755,
+    "69": 0.00803840131115017
+  },
+  "snapshot_hour_local": 4,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/MTR/85,98/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/37.6213,-122.3790",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 59.95560773180523,
+    "p10": 55,
+    "p50": 60,
+    "p90": 65
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

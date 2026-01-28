@@ -1,0 +1,178 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.6,
+        "ev": 0.18347433569658436,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 23,
+        "b": 24,
+        "desc": "23 \u2264 TMAX \u2264 24",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 1284,
+        "support_hi": 31,
+        "support_lo": 16,
+        "volume": 1524
+      },
+      "market_ticker": "KXHIGHPHIL-26JAN27-B23.5",
+      "model_q": 0.19652566430341561,
+      "prices": {
+        "no_ask": 0.6,
+        "yes_ask": 0.46
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHPHIL-26JAN27",
+        "series_ticker": "KXHIGHPHIL",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Philadelphia** be 23-24\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.05,
+        "ev": 0.1037718892237105,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 19,
+        "b": 20,
+        "desc": "19 \u2264 TMAX \u2264 20",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 662,
+        "support_hi": 31,
+        "support_lo": 16,
+        "volume": 916
+      },
+      "market_ticker": "KXHIGHPHIL-26JAN27-B19.5",
+      "model_q": 0.1737718892237105,
+      "prices": {
+        "no_ask": 0.96,
+        "yes_ask": 0.05
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHPHIL-26JAN27",
+        "series_ticker": "KXHIGHPHIL",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Philadelphia** be 19-20\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.77,
+        "ev": 0.06551663836476997,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 25,
+        "b": 26,
+        "desc": "25 \u2264 TMAX \u2264 26",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 859,
+        "support_hi": 31,
+        "support_lo": 16,
+        "volume": 1369
+      },
+      "market_ticker": "KXHIGHPHIL-26JAN27-B25.5",
+      "model_q": 0.14448336163523,
+      "prices": {
+        "no_ask": 0.77,
+        "yes_ask": 0.29
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHPHIL-26JAN27",
+        "series_ticker": "KXHIGHPHIL",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Philadelphia** be 25-26\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.14,
+        "ev": 0.04899636606232498,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 21,
+        "b": 22,
+        "desc": "21 \u2264 TMAX \u2264 22",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 1057,
+        "support_hi": 31,
+        "support_lo": 16,
+        "volume": 1440
+      },
+      "market_ticker": "KXHIGHPHIL-26JAN27-B21.5",
+      "model_q": 0.208996366062325,
+      "prices": {
+        "no_ask": 0.88,
+        "yes_ask": 0.14
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHPHIL-26JAN27",
+        "series_ticker": "KXHIGHPHIL",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Philadelphia** be 21-22\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "PHLHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 0,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      16,
+      31
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 22,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Philadelphia",
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

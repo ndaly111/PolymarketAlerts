@@ -1,0 +1,63 @@
+{
+  "city_key": "LAXHIGH",
+  "error_model_missing": false,
+  "error_model_month": 1,
+  "error_model_n_samples": 94,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": "2026-01-27T12:02:38.933682+00:00",
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 73,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 72.33,
+    "adjusted_support": [
+      64,
+      78
+    ],
+    "baseline_temp_f": 55,
+    "current_temp_f": 55,
+    "max_observed_f": 55,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 72.33,
+    "original_support": [
+      64,
+      78
+    ],
+    "progress": 0.0,
+    "station_id": "FHMC1"
+  },
+  "label": "Los Angeles (LAX)",
+  "pmf_high_f": {
+    "64": 0.010638297872340427,
+    "67": 0.021276595744680854,
+    "68": 0.03191489361702128,
+    "69": 0.07446808510638299,
+    "70": 0.10638297872340427,
+    "71": 0.14893617021276598,
+    "72": 0.1170212765957447,
+    "73": 0.12765957446808512,
+    "74": 0.14893617021276598,
+    "75": 0.1170212765957447,
+    "76": 0.04255319148936171,
+    "77": 0.03191489361702128,
+    "78": 0.021276595744680854
+  },
+  "snapshot_hour_local": 4,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/LOX/155,45/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/34.0522,-118.2437",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 72.32978723404256,
+    "p10": 69,
+    "p50": 72,
+    "p90": 75
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

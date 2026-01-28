@@ -1,0 +1,63 @@
+{
+  "city_key": "MIAHIGH",
+  "error_model_missing": false,
+  "error_model_month": 1,
+  "error_model_n_samples": 94,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": "2026-01-27T12:02:38.933682+00:00",
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 67,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 66.76,
+    "adjusted_support": [
+      51,
+      73
+    ],
+    "baseline_temp_f": 50,
+    "current_temp_f": 50,
+    "max_observed_f": 50,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 66.76,
+    "original_support": [
+      51,
+      73
+    ],
+    "progress": 0.0,
+    "station_id": "KMIA"
+  },
+  "label": "Miami",
+  "pmf_high_f": {
+    "51": 0.010638297872340427,
+    "61": 0.010638297872340427,
+    "62": 0.03191489361702128,
+    "63": 0.03191489361702128,
+    "64": 0.03191489361702128,
+    "65": 0.06382978723404256,
+    "66": 0.15957446808510642,
+    "67": 0.2659574468085107,
+    "68": 0.2446808510638298,
+    "69": 0.08510638297872342,
+    "70": 0.04255319148936171,
+    "72": 0.010638297872340427,
+    "73": 0.010638297872340427
+  },
+  "snapshot_hour_local": 7,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/MFL/110,50/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/25.7617,-80.1918",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 66.75531914893618,
+    "p10": 64,
+    "p50": 67,
+    "p90": 69
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

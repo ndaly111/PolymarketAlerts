@@ -1,0 +1,112 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.64,
+        "ev": 0.15290797038020568,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 49,
+        "b": 50,
+        "desc": "49 \u2264 TMAX \u2264 50",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 454,
+        "support_hi": 57,
+        "support_lo": 38,
+        "volume": 511
+      },
+      "market_ticker": "KXHIGHTNOLA-26JAN27-B49.5",
+      "model_q": 0.18709202961979435,
+      "prices": {
+        "no_ask": 0.64,
+        "yes_ask": 0.39
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTNOLA-26JAN27",
+        "series_ticker": "KXHIGHTNOLA",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  49-50\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.69,
+        "ev": 0.09103588786555096,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 47,
+        "b": 48,
+        "desc": "47 \u2264 TMAX \u2264 48",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 354,
+        "support_hi": 57,
+        "support_lo": 38,
+        "volume": 420
+      },
+      "market_ticker": "KXHIGHTNOLA-26JAN27-B47.5",
+      "model_q": 0.19896411213444912,
+      "prices": {
+        "no_ask": 0.69,
+        "yes_ask": 0.39
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTNOLA-26JAN27",
+        "series_ticker": "KXHIGHTNOLA",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  47-48\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "NOLHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 2,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      38,
+      57
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 48,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "New Orleans",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Chicago"
+}

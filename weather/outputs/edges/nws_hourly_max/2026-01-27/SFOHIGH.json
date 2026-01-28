@@ -1,0 +1,112 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.6,
+        "ev": 0.18103588786555094,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 60,
+        "b": 61,
+        "desc": "60 \u2264 TMAX \u2264 61",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 869,
+        "support_hi": 69,
+        "support_lo": 50,
+        "volume": 1021
+      },
+      "market_ticker": "KXHIGHTSFO-26JAN27-B60.5",
+      "model_q": 0.19896411213444912,
+      "prices": {
+        "no_ask": 0.6,
+        "yes_ask": 0.46
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTSFO-26JAN27",
+        "series_ticker": "KXHIGHTSFO",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  60-61\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.77,
+        "ev": 0.0445695176201726,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 62,
+        "b": 63,
+        "desc": "62 \u2264 TMAX \u2264 63",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 970,
+        "support_hi": 69,
+        "support_lo": 50,
+        "volume": 1146
+      },
+      "market_ticker": "KXHIGHTSFO-26JAN27-B62.5",
+      "model_q": 0.16543048237982735,
+      "prices": {
+        "no_ask": 0.77,
+        "yes_ask": 0.29
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTSFO-26JAN27",
+        "series_ticker": "KXHIGHTSFO",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  62-63\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "SFOHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 2,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      50,
+      69
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 60,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "San Francisco",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

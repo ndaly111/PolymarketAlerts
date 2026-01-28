@@ -1,0 +1,178 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.62,
+        "ev": 0.19456951762017263,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 59,
+        "b": 60,
+        "desc": "59 \u2264 TMAX \u2264 60",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 220,
+        "support_hi": 71,
+        "support_lo": 52,
+        "volume": 313
+      },
+      "market_ticker": "KXHIGHTLV-26JAN27-B59.5",
+      "model_q": 0.16543048237982735,
+      "prices": {
+        "no_ask": 0.62,
+        "yes_ask": 0.41
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTLV-26JAN27",
+        "series_ticker": "KXHIGHTLV",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  59-60\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.6,
+        "ev": 0.18103588786555094,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 61,
+        "b": 62,
+        "desc": "61 \u2264 TMAX \u2264 62",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 348,
+        "support_hi": 71,
+        "support_lo": 52,
+        "volume": 470
+      },
+      "market_ticker": "KXHIGHTLV-26JAN27-B61.5",
+      "model_q": 0.19896411213444912,
+      "prices": {
+        "no_ask": 0.6,
+        "yes_ask": 0.45
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTLV-26JAN27",
+        "series_ticker": "KXHIGHTLV",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  61-62\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.04,
+        "ev": 0.07754786414507032,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 65,
+        "b": 66,
+        "desc": "65 \u2264 TMAX \u2264 66",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 543,
+        "support_hi": 71,
+        "support_lo": 52,
+        "volume": 2039
+      },
+      "market_ticker": "KXHIGHTLV-26JAN27-B65.5",
+      "model_q": 0.13754786414507034,
+      "prices": {
+        "no_ask": 0.97,
+        "yes_ask": 0.04
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTLV-26JAN27",
+        "series_ticker": "KXHIGHTLV",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  65-66\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.13,
+        "ev": 0.03709202961979434,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 63,
+        "b": 64,
+        "desc": "63 \u2264 TMAX \u2264 64",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 303,
+        "support_hi": 71,
+        "support_lo": 52,
+        "volume": 343
+      },
+      "market_ticker": "KXHIGHTLV-26JAN27-B63.5",
+      "model_q": 0.18709202961979435,
+      "prices": {
+        "no_ask": 0.94,
+        "yes_ask": 0.13
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTLV-26JAN27",
+        "series_ticker": "KXHIGHTLV",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  63-64\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "LVHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 0,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      52,
+      71
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 62,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Las Vegas",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

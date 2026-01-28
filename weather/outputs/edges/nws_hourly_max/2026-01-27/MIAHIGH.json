@@ -1,0 +1,112 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.28,
+        "ev": 0.12553191489361706,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 66,
+        "b": 67,
+        "desc": "66 \u2264 TMAX \u2264 67",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 6198,
+        "support_hi": 73,
+        "support_lo": 51,
+        "volume": 9090
+      },
+      "market_ticker": "KXHIGHMIA-26JAN27-B66.5",
+      "model_q": 0.4255319148936171,
+      "prices": {
+        "no_ask": 0.75,
+        "yes_ask": 0.28
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHMIA-26JAN27",
+        "series_ticker": "KXHIGHMIA",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Miami** be 66-67\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.6,
+        "ev": 0.05021276595744685,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 68,
+        "b": 69,
+        "desc": "68 \u2264 TMAX \u2264 69",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 4073,
+        "support_hi": 73,
+        "support_lo": 51,
+        "volume": 6074
+      },
+      "market_ticker": "KXHIGHMIA-26JAN27-B68.5",
+      "model_q": 0.3297872340425532,
+      "prices": {
+        "no_ask": 0.6,
+        "yes_ask": 0.41
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHMIA-26JAN27",
+        "series_ticker": "KXHIGHMIA",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in Miami** be 68-69\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "MIAHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 0,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 2,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      51,
+      73
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 67,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Miami",
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

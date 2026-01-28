@@ -1,0 +1,145 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.56,
+        "ev": 0.1753191489361701,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 72,
+        "b": 73,
+        "desc": "72 \u2264 TMAX \u2264 73",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 5638,
+        "support_hi": 78,
+        "support_lo": 64,
+        "volume": 7228
+      },
+      "market_ticker": "KXHIGHLAX-26JAN27-B72.5",
+      "model_q": 0.2446808510638298,
+      "prices": {
+        "no_ask": 0.56,
+        "yes_ask": 0.46
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHLAX-26JAN27",
+        "series_ticker": "KXHIGHLAX",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in LA** be 72-73\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.18,
+        "ev": 0.05531914893617025,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 70,
+        "b": 71,
+        "desc": "70 \u2264 TMAX \u2264 71",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 4871,
+        "support_hi": 78,
+        "support_lo": 64,
+        "volume": 7894
+      },
+      "market_ticker": "KXHIGHLAX-26JAN27-B70.5",
+      "model_q": 0.25531914893617025,
+      "prices": {
+        "no_ask": 0.83,
+        "yes_ask": 0.18
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHLAX-26JAN27",
+        "series_ticker": "KXHIGHLAX",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in LA** be 70-71\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.04,
+        "ev": 0.04638297872340426,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 68,
+        "b": 69,
+        "desc": "68 \u2264 TMAX \u2264 69",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 4486,
+        "support_hi": 78,
+        "support_lo": 64,
+        "volume": 5576
+      },
+      "market_ticker": "KXHIGHLAX-26JAN27-B68.5",
+      "model_q": 0.10638297872340427,
+      "prices": {
+        "no_ask": 0.97,
+        "yes_ask": 0.04
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHLAX-26JAN27",
+        "series_ticker": "KXHIGHLAX",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the **high temp in LA** be 68-69\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "LAXHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 1,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      64,
+      78
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 73,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Los Angeles (LAX)",
+  "target_date_local": "2026-01-27",
+  "tz": "America/Los_Angeles"
+}

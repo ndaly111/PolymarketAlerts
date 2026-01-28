@@ -1,0 +1,63 @@
+{
+  "city_key": "NHIGH",
+  "error_model_missing": false,
+  "error_model_month": 1,
+  "error_model_n_samples": 94,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": "2026-01-27T12:02:38.933682+00:00",
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 19,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 20.06,
+    "adjusted_support": [
+      16,
+      28
+    ],
+    "baseline_temp_f": 16,
+    "current_temp_f": 16,
+    "max_observed_f": 16,
+    "observation_time_utc": "2026-01-27T10:51:00+00:00",
+    "original_mean": 19.81,
+    "original_support": [
+      12,
+      28
+    ],
+    "progress": 0.0,
+    "station_id": "KNYC"
+  },
+  "label": "New York",
+  "pmf_high_f": {
+    "16": 0.07777777777777778,
+    "17": 0.09999999999999999,
+    "18": 0.16666666666666669,
+    "19": 0.12222222222222222,
+    "20": 0.17777777777777778,
+    "21": 0.13333333333333333,
+    "22": 0.044444444444444446,
+    "23": 0.03333333333333333,
+    "24": 0.044444444444444446,
+    "25": 0.022222222222222223,
+    "26": 0.044444444444444446,
+    "27": 0.022222222222222223,
+    "28": 0.011111111111111112
+  },
+  "snapshot_hour_local": 7,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/OKX/33,35/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/40.7128,-74.0060",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 20.055555555555557,
+    "p10": 17,
+    "p50": 20,
+    "p90": 24
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

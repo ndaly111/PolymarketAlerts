@@ -1,0 +1,145 @@
+{
+  "candidates": [
+    {
+      "decision": {
+        "buy_price": 0.65,
+        "ev": 0.1310358878655509,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 27,
+        "b": 28,
+        "desc": "27 \u2264 TMAX \u2264 28",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 494,
+        "support_hi": 36,
+        "support_lo": 17,
+        "volume": 604
+      },
+      "market_ticker": "KXHIGHTDC-26JAN27-B27.5",
+      "model_q": 0.19896411213444912,
+      "prices": {
+        "no_ask": 0.65,
+        "yes_ask": 0.36
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTDC-26JAN27",
+        "series_ticker": "KXHIGHTDC",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  27-28\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.76,
+        "ev": 0.054569517620172606,
+        "fee_open": 0.02,
+        "side_to_buy": "NO"
+      },
+      "event": {
+        "a": 29,
+        "b": 30,
+        "desc": "29 \u2264 TMAX \u2264 30",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 300,
+        "support_hi": 36,
+        "support_lo": 17,
+        "volume": 867
+      },
+      "market_ticker": "KXHIGHTDC-26JAN27-B29.5",
+      "model_q": 0.16543048237982735,
+      "prices": {
+        "no_ask": 0.76,
+        "yes_ask": 0.25
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTDC-26JAN27",
+        "series_ticker": "KXHIGHTDC",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  29-30\u00b0 on Jan 27, 2026?"
+    },
+    {
+      "decision": {
+        "buy_price": 0.12,
+        "ev": 0.04709202961979435,
+        "fee_open": 0.02,
+        "side_to_buy": "YES"
+      },
+      "event": {
+        "a": 25,
+        "b": 26,
+        "desc": "25 \u2264 TMAX \u2264 26",
+        "kind": "between"
+      },
+      "liquidity": {
+        "open_interest": 821,
+        "support_hi": 36,
+        "support_lo": 17,
+        "volume": 1044
+      },
+      "market_ticker": "KXHIGHTDC-26JAN27-B25.5",
+      "model_q": 0.18709202961979435,
+      "prices": {
+        "no_ask": 0.89,
+        "yes_ask": 0.12
+      },
+      "snapshot": {
+        "event_ticker": "KXHIGHTDC-26JAN27",
+        "series_ticker": "KXHIGHTDC",
+        "snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+        "status": "active"
+      },
+      "title": "Will the maximum temperature be  25-26\u00b0 on Jan 27, 2026?"
+    }
+  ],
+  "city_key": "DCHIGH",
+  "drops": {
+    "max_spread_missing": 0,
+    "max_spread_too_wide": 0,
+    "min_open_interest": 0,
+    "min_volume": 0,
+    "no_pmf": 0,
+    "no_positive_ev": 1,
+    "no_prices": 0,
+    "no_title": 0,
+    "outside_support": 0,
+    "q_tail": 0,
+    "unparsed": 2
+  },
+  "fee": {
+    "open_fee_cents": 2,
+    "open_fee_dollars": 0.02
+  },
+  "filters": {
+    "max_spread_cents": null,
+    "min_ev": 0.02,
+    "min_open_interest": 0,
+    "min_q": 0.05,
+    "min_volume": 0,
+    "q_interval": [
+      0.05,
+      0.95
+    ],
+    "support_interval_f": [
+      17,
+      36
+    ],
+    "support_overlap_enabled": false,
+    "support_tail_mass": null,
+    "tail_prob_min": 0.0
+  },
+  "forecast_high_f": 27,
+  "forecast_source": "nws_hourly_max",
+  "kalshi_snapshot_time_utc": "2026-01-27T12:03:34+00:00",
+  "label": "Washington DC",
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}

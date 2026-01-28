@@ -1,0 +1,70 @@
+{
+  "city_key": "DENHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 48,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 47.96,
+    "adjusted_support": [
+      38,
+      57
+    ],
+    "baseline_temp_f": 30,
+    "current_temp_f": 28,
+    "max_observed_f": 30,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 47.96,
+    "original_support": [
+      38,
+      57
+    ],
+    "progress": 0.0,
+    "station_id": "KDEN"
+  },
+  "label": "Denver",
+  "pmf_high_f": {
+    "38": 0.004439226819476317,
+    "39": 0.00803840131115017,
+    "40": 0.013673781245519755,
+    "41": 0.02185064021396087,
+    "42": 0.032801696004987994,
+    "43": 0.04625780569595274,
+    "44": 0.061281635958239496,
+    "45": 0.07626622818683083,
+    "46": 0.08916425419299652,
+    "47": 0.09792777542679783,
+    "48": 0.10103633670765129,
+    "49": 0.09792777542679783,
+    "50": 0.08916425419299652,
+    "51": 0.07626622818683083,
+    "52": 0.061281635958239496,
+    "53": 0.04625780569595274,
+    "54": 0.032801696004987994,
+    "55": 0.02185064021396087,
+    "56": 0.013673781245519755,
+    "57": 0.00803840131115017
+  },
+  "snapshot_hour_local": 5,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/BOU/74,66/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/39.8561,-104.6737",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 47.95560773180524,
+    "p10": 43,
+    "p50": 48,
+    "p90": 53
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/Denver"
+}

@@ -1,0 +1,70 @@
+{
+  "city_key": "DCHIGH",
+  "error_model_missing": true,
+  "error_model_month": 1,
+  "error_model_n_samples": 0,
+  "error_model_snapshot_hour_local": 12,
+  "error_model_source": "mos_gfs_18z_archive",
+  "error_model_updated_at_utc": null,
+  "fallback_source": "nws_hourly_max_fallback",
+  "forecast_high_f": 27,
+  "forecast_source": "nws_hourly_max",
+  "intraday_adjustment": {
+    "adjusted_mean": 26.96,
+    "adjusted_support": [
+      17,
+      36
+    ],
+    "baseline_temp_f": 16,
+    "current_temp_f": 12,
+    "max_observed_f": 16,
+    "observation_time_utc": "2026-01-27T11:45:00+00:00",
+    "original_mean": 26.96,
+    "original_support": [
+      17,
+      36
+    ],
+    "progress": 0.0,
+    "station_id": "KDCA"
+  },
+  "label": "Washington DC",
+  "pmf_high_f": {
+    "17": 0.004439226819476317,
+    "18": 0.00803840131115017,
+    "19": 0.013673781245519755,
+    "20": 0.02185064021396087,
+    "21": 0.032801696004987994,
+    "22": 0.04625780569595274,
+    "23": 0.061281635958239496,
+    "24": 0.07626622818683083,
+    "25": 0.08916425419299652,
+    "26": 0.09792777542679783,
+    "27": 0.10103633670765129,
+    "28": 0.09792777542679783,
+    "29": 0.08916425419299652,
+    "30": 0.07626622818683083,
+    "31": 0.061281635958239496,
+    "32": 0.04625780569595274,
+    "33": 0.032801696004987994,
+    "34": 0.02185064021396087,
+    "35": 0.013673781245519755,
+    "36": 0.00803840131115017
+  },
+  "snapshot_hour_local": 7,
+  "snapshot_kind": "latest",
+  "snapshot_meta": {
+    "forecast_url": "https://api.weather.gov/gridpoints/LWX/97,69/forecast/hourly",
+    "points_url": "https://api.weather.gov/points/38.8512,-77.0402",
+    "qc_flags": "",
+    "snapshot_time_utc": "2026-01-27T12:03:27.058205+00:00",
+    "source": "nws_hourly_max"
+  },
+  "summary": {
+    "mean": 26.955607731805237,
+    "p10": 22,
+    "p50": 27,
+    "p90": 32
+  },
+  "target_date_local": "2026-01-27",
+  "tz": "America/New_York"
+}
