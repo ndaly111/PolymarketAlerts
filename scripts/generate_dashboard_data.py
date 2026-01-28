@@ -293,6 +293,35 @@ def get_sports_stats(db_path: Path) -> dict:
     by_line_type = {row["line_type"]: {"count": row["count"], "avg_edge": row["avg_edge"]}
                     for row in cur.fetchall()}
 
+    # Aggregate by sport (extracted from ticker)
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN ticker LIKE '%NBA%' THEN 'NBA'
+                WHEN ticker LIKE '%NFL%' THEN 'NFL'
+                WHEN ticker LIKE '%NHL%' THEN 'NHL'
+                WHEN ticker LIKE '%MLB%' THEN 'MLB'
+                WHEN ticker LIKE '%NCAAB%' OR ticker LIKE '%CBB%' THEN 'NCAAB'
+                WHEN ticker LIKE '%NCAAF%' OR ticker LIKE '%CFB%' THEN 'NCAAF'
+                ELSE 'Other'
+            END as sport,
+            COUNT(*) as count,
+            AVG(edge) as avg_edge,
+            SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN COALESCE(settled, 0)=1 AND won=0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN COALESCE(settled, 0)=0 THEN 1 ELSE 0 END) as pending
+        FROM trades
+        WHERE status IN ('filled', 'FILLED')
+        GROUP BY sport
+    """)
+    by_sport = {row["sport"]: {
+        "count": row["count"],
+        "avg_edge": row["avg_edge"],
+        "wins": row["wins"],
+        "losses": row["losses"],
+        "pending": row["pending"]
+    } for row in cur.fetchall()}
+
     # Aggregate by EV bucket
     cur.execute("""
         SELECT
@@ -358,6 +387,7 @@ def get_sports_stats(db_path: Path) -> dict:
         "trades": trades[:50],
         "daily_stats": daily_stats,
         "by_line_type": by_line_type,
+        "by_sport": by_sport,
         "by_ev_bucket": by_ev_bucket,
     }
 

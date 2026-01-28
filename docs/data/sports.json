@@ -103,6 +103,15 @@
       "avg_edge": 0.13550087139903577
     }
   },
+  "by_sport": {
+    "NHL": {
+      "count": 4,
+      "avg_edge": 0.13550087139903577,
+      "wins": 0,
+      "losses": 0,
+      "pending": 4
+    }
+  },
   "by_ev_bucket": {
     "10-15%": {
       "count": 1,
