@@ -69,39 +69,23 @@ def check_market_settlement(client: KalshiAuthClient, ticker: str) -> Optional[D
     Check if a Kalshi market has settled and get the result.
 
     Returns:
-        dict with 'settled', 'result' ('yes' or 'no'), or None if not settled/error
+        dict with 'settled', 'result' ('yes' or 'no'), 'status', or None if error
     """
     try:
         market = client.get_market(ticker)
         status = market.get("status", "").lower()
+        result = market.get("result", "").lower()
 
         if status in ("settled", "finalized", "closed"):
-            # Market is settled - determine result
-            result = market.get("result", market.get("settlement_value"))
-
-            # Handle different result formats
-            if result in ("yes", "Yes", "YES", 1, "1", True):
-                return {"settled": True, "result": "yes"}
-            elif result in ("no", "No", "NO", 0, "0", False):
-                return {"settled": True, "result": "no"}
-            else:
-                # Check settlement_value or yes_price for final value
-                settlement_value = market.get("settlement_value")
-                if settlement_value is not None:
-                    return {"settled": True, "result": "yes" if settlement_value > 50 else "no"}
-
-                # Fallback: check final prices
-                yes_price = market.get("yes_bid", 0)
-                if yes_price >= 99:
-                    return {"settled": True, "result": "yes"}
-                elif yes_price <= 1:
-                    return {"settled": True, "result": "no"}
-
-                print(f"  [warn] Market {ticker} settled but can't determine result: {market}")
-                return None
-
-        return None  # Not settled yet
-
+            return {
+                "settled": True,
+                "result": result,  # 'yes' or 'no'
+                "status": status,
+            }
+        return {
+            "settled": False,
+            "status": status,
+        }
     except Exception as e:
         print(f"  [error] Failed to check market {ticker}: {e}")
         return None
@@ -176,7 +160,10 @@ def main() -> int:
         result = check_market_settlement(client, ticker)
 
         if result is None:
-            print("  Not settled yet")
+            continue
+
+        if not result["settled"]:
+            print(f"  Not settled yet (status: {result['status']})")
             continue
 
         # Determine if we won

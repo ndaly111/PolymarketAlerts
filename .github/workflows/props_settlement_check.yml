@@ -1,0 +1,57 @@
+name: Props Settlement Check
+
+on:
+  schedule:
+    # Run at 11pm ET (4am UTC next day) - after games finish
+    - cron: "0 4 * * *"
+    # Also run at 2am ET (7am UTC) for late games
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      DISCORD_PROPS_WEBHOOK: ${{ secrets.DISCORD_PROPS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests cryptography
+
+      - name: Check settlements
+        run: python scripts/settle_props_trades.py
+
+      - name: Update dashboard
+        run: python scripts/generate_dashboard_data.py
+
+      - name: Commit DB and dashboard changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add props_trades.db docs/data/props.json docs/data/summary.json || true
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "props: update settlement results"
+            git pull --rebase && git push
+          fi
