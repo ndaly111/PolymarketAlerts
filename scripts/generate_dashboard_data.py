@@ -26,7 +26,7 @@ def get_props_stats(db_path: Path) -> dict:
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # Get all trades (including settlement columns if they exist)
+    # Get all trades (excluding dry_run)
     cur.execute("""
         SELECT
             trade_date, ticker, player_name, stat_type, line, side,
@@ -35,6 +35,7 @@ def get_props_stats(db_path: Path) -> dict:
             COALESCE(settled, 0) as settled,
             won, payout_cents, settled_at
         FROM trades
+        WHERE status IN ('filled', 'FILLED')
         ORDER BY trade_date DESC, created_at DESC
     """)
     trades = [dict(row) for row in cur.fetchall()]
@@ -48,10 +49,11 @@ def get_props_stats(db_path: Path) -> dict:
     """)
     daily_stats = [dict(row) for row in cur.fetchall()]
 
-    # Aggregate by stat type
+    # Aggregate by stat type (excluding dry_run)
     cur.execute("""
         SELECT stat_type, COUNT(*) as count, AVG(edge) as avg_edge
         FROM trades
+        WHERE status IN ('filled', 'FILLED')
         GROUP BY stat_type
     """)
     by_stat_type = {row["stat_type"]: {"count": row["count"], "avg_edge": row["avg_edge"]}
@@ -98,14 +100,13 @@ def get_props_stats(db_path: Path) -> dict:
 
     conn.close()
 
-    # Calculate totals
+    # Calculate totals (trades already filtered to filled only)
     total_trades = len(trades)
-    filled_trades = [t for t in trades if t["status"] in ("filled", "FILLED")]
-    settled_trades = [t for t in filled_trades if t.get("settled")]
+    settled_trades = [t for t in trades if t.get("settled")]
     wins = sum(1 for t in settled_trades if t.get("won"))
     losses = len(settled_trades) - wins
-    pending = len(filled_trades) - len(settled_trades)
-    total_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in filled_trades)
+    pending = total_trades - len(settled_trades)
+    total_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in trades)
     settled_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in settled_trades)
     total_payout = sum(t.get("payout_cents") or 0 for t in settled_trades)
     # Only calculate ROI on settled trades
@@ -114,7 +115,7 @@ def get_props_stats(db_path: Path) -> dict:
 
     return {
         "total_trades": total_trades,
-        "filled_trades": len(filled_trades),
+        "filled_trades": total_trades,  # All trades in list are filled (dry_run excluded)
         "total_cost_cents": total_cost,
         "avg_edge": avg_edge,
         "wins": wins,

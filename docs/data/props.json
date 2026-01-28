@@ -1,8 +1,8 @@
 {
-  "total_trades": 10,
+  "total_trades": 8,
   "filled_trades": 8,
   "total_cost_cents": 295,
-  "avg_edge": 0.16652591313366813,
+  "avg_edge": 0.15540028282060064,
   "wins": 3,
   "losses": 5,
   "pending": 0,
@@ -48,46 +48,6 @@
       "won": 1,
       "payout_cents": 100,
       "settled_at": "2026-01-28T08:38:43.588295-05:00"
-    },
-    {
-      "trade_date": "2026-01-28",
-      "ticker": "KXNBAAST-26JAN27MILPHI-PHIVEDGECOMBE77-4",
-      "player_name": "VJ Edgecombe",
-      "stat_type": "assists",
-      "line": 4.0,
-      "side": "OVER",
-      "quantity": 1,
-      "limit_price_cents": 46,
-      "fair_prob": 0.5723390905188072,
-      "edge": 0.11233909051880714,
-      "books_count": 5,
-      "order_id": "DRY_RUN",
-      "status": "dry_run",
-      "fill_price_cents": null,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
-    },
-    {
-      "trade_date": "2026-01-28",
-      "ticker": "KXNBAREB-26JAN27SACNYK-NYKJHART3-8",
-      "player_name": "Josh Hart",
-      "stat_type": "rebounds",
-      "line": 8.0,
-      "side": "UNDER",
-      "quantity": 1,
-      "limit_price_cents": 17,
-      "fair_prob": 0.47971777825306927,
-      "edge": 0.30971777825306923,
-      "books_count": 4,
-      "order_id": "DRY_RUN",
-      "status": "dry_run",
-      "fill_price_cents": null,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
     },
     {
       "trade_date": "2026-01-27",
@@ -224,16 +184,16 @@
   ],
   "by_stat_type": {
     "assists": {
-      "count": 5,
-      "avg_edge": 0.06585586342460638
+      "count": 4,
+      "avg_edge": 0.054235056651056185
     },
     "points": {
       "count": 2,
       "avg_edge": 0.45643333182958407
     },
     "rebounds": {
-      "count": 3,
-      "avg_edge": 0.14103771685149386
+      "count": 2,
+      "avg_edge": 0.05669768615070617
     }
   },
   "by_ev_bucket": {
