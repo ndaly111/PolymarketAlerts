@@ -1,0 +1,121 @@
+{
+  "total_trades": 6,
+  "filled_trades": 6,
+  "total_cost_cents": 282,
+  "avg_edge": 0.05505593315093951,
+  "trades": [
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAAST-26JAN27NOPOKC-NOPDQUEEN22-4",
+      "player_name": "Derik Queen",
+      "stat_type": "assists",
+      "line": 4.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 52,
+      "fair_prob": 0.5708091710568917,
+      "edge": 0.050809171056891644,
+      "books_count": 2,
+      "order_id": "341a9ceb-8673-425a-b826-3f7386f12208",
+      "status": "filled",
+      "fill_price_cents": 52
+    },
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAAST-26JAN27NOPOKC-NOPDQUEEN22-5",
+      "player_name": "Derik Queen",
+      "stat_type": "assists",
+      "line": 5.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 36,
+      "fair_prob": 0.4127618673895683,
+      "edge": 0.05276186738956834,
+      "books_count": 2,
+      "order_id": "1ef2fe93-2140-4518-a995-2aa24b605080",
+      "status": "filled",
+      "fill_price_cents": 36
+    },
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAAST-26JAN27BKNPHX-BKNMPORTER17-3",
+      "player_name": "Michael Porter Jr.",
+      "stat_type": "assists",
+      "line": 3.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 50,
+      "fair_prob": 0.5630646196298459,
+      "edge": 0.06306461962984589,
+      "books_count": 4,
+      "order_id": "8a1c61bf-d3b3-4566-8259-e9f60415b809",
+      "status": "filled",
+      "fill_price_cents": 50
+    },
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAREB-26JAN27SACNYK-SACDDEROZAN10-3",
+      "player_name": "DeMar DeRozan",
+      "stat_type": "rebounds",
+      "line": 3.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 46,
+      "fair_prob": 0.5163454583618377,
+      "edge": 0.05634545836183763,
+      "books_count": 4,
+      "order_id": "46b0076c-f418-4c60-8763-a878e9635ad9",
+      "status": "filled",
+      "fill_price_cents": 46
+    },
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAAST-26JAN27NOPOKC-OKCSGILGEOUSALEXANDER2-8",
+      "player_name": "Shai Gilgeous-Alexander",
+      "stat_type": "assists",
+      "line": 8.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 47,
+      "fair_prob": 0.5203045685279188,
+      "edge": 0.05030456852791887,
+      "books_count": 5,
+      "order_id": "bd813335-b202-4d9c-b24a-458760df3aca",
+      "status": "filled",
+      "fill_price_cents": 47
+    },
+    {
+      "trade_date": "2026-01-27",
+      "ticker": "KXNBAREB-26JAN27SACNYK-SACRWESTBROOK18-5",
+      "player_name": "Russell Westbrook",
+      "stat_type": "rebounds",
+      "line": 5.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 51,
+      "fair_prob": 0.5670499139395747,
+      "edge": 0.057049913939574703,
+      "books_count": 4,
+      "order_id": "95d37333-7b30-4199-b083-ac87c1ab978d",
+      "status": "filled",
+      "fill_price_cents": 51
+    }
+  ],
+  "daily_stats": [
+    {
+      "date": "2026-01-27",
+      "trades_attempted": 6,
+      "trades_filled": 0
+    }
+  ],
+  "by_stat_type": {
+    "assists": {
+      "count": 4,
+      "avg_edge": 0.054235056651056185
+    },
+    "rebounds": {
+      "count": 2,
+      "avg_edge": 0.05669768615070617
+    }
+  }
+}

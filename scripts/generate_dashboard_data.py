@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+Generate JSON data for the trading dashboard from props and weather databases.
+"""
+
+import json
+import sqlite3
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PROPS_DB = ROOT / "props_trades.db"
+WEATHER_DB = ROOT / "weather_trades.db"
+OUTPUT_DIR = ROOT / "docs" / "data"
+
+
+def get_props_stats(db_path: Path) -> dict:
+    """Get props trading statistics."""
+    if not db_path.exists():
+        return {"total_trades": 0, "trades": [], "by_sport": {}, "by_stat_type": {}}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Get all trades
+    cur.execute("""
+        SELECT
+            trade_date, ticker, player_name, stat_type, line, side,
+            quantity, limit_price_cents, fair_prob, edge, books_count,
+            order_id, status, fill_price_cents
+        FROM trades
+        ORDER BY trade_date DESC, created_at DESC
+    """)
+    trades = [dict(row) for row in cur.fetchall()]
+
+    # Get daily stats
+    cur.execute("""
+        SELECT date, trades_attempted, trades_filled
+        FROM daily_stats
+        ORDER BY date DESC
+        LIMIT 30
+    """)
+    daily_stats = [dict(row) for row in cur.fetchall()]
+
+    # Aggregate by stat type
+    cur.execute("""
+        SELECT stat_type, COUNT(*) as count, AVG(edge) as avg_edge
+        FROM trades
+        GROUP BY stat_type
+    """)
+    by_stat_type = {row["stat_type"]: {"count": row["count"], "avg_edge": row["avg_edge"]}
+                    for row in cur.fetchall()}
+
+    conn.close()
+
+    # Calculate totals
+    total_trades = len(trades)
+    filled_trades = [t for t in trades if t["status"] in ("filled", "FILLED")]
+    total_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in filled_trades)
+    avg_edge = sum(t["edge"] for t in trades) / len(trades) if trades else 0
+
+    return {
+        "total_trades": total_trades,
+        "filled_trades": len(filled_trades),
+        "total_cost_cents": total_cost,
+        "avg_edge": avg_edge,
+        "trades": trades[:50],  # Last 50 trades
+        "daily_stats": daily_stats,
+        "by_stat_type": by_stat_type,
+    }
+
+
+def get_weather_stats(db_path: Path) -> dict:
+    """Get weather trading statistics."""
+    if not db_path.exists():
+        return {"total_trades": 0, "trades": [], "by_city": {}, "by_ev_bucket": {}}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Get all trades
+    cur.execute("""
+        SELECT
+            trade_date, city_key, market_ticker, event_display, side,
+            quantity, limit_price_cents, fair_q, ev, forecast_high_f,
+            order_id, status, fill_price_cents, settled, won, payout_cents
+        FROM weather_trades
+        WHERE status IN ('filled', 'FILLED', 'PLACED', 'dry_run')
+        ORDER BY trade_date DESC, created_at DESC
+    """)
+    trades = [dict(row) for row in cur.fetchall()]
+
+    # Get daily stats
+    cur.execute("""
+        SELECT date, trades_attempted, trades_filled
+        FROM weather_daily_stats
+        ORDER BY date DESC
+        LIMIT 30
+    """)
+    daily_stats = [dict(row) for row in cur.fetchall()]
+
+    # Aggregate by city
+    cur.execute("""
+        SELECT city_key, COUNT(*) as count, AVG(ev) as avg_ev,
+               SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN settled=1 AND won=0 THEN 1 ELSE 0 END) as losses
+        FROM weather_trades
+        WHERE status IN ('filled', 'FILLED', 'PLACED')
+        GROUP BY city_key
+    """)
+    by_city = {row["city_key"]: {
+        "count": row["count"],
+        "avg_ev": row["avg_ev"],
+        "wins": row["wins"],
+        "losses": row["losses"]
+    } for row in cur.fetchall()}
+
+    # Aggregate by EV bucket
+    cur.execute("""
+        SELECT
+            CASE
+                WHEN ev < 0.05 THEN '0-5%'
+                WHEN ev < 0.10 THEN '5-10%'
+                WHEN ev < 0.15 THEN '10-15%'
+                WHEN ev < 0.20 THEN '15-20%'
+                ELSE '20%+'
+            END as ev_bucket,
+            COUNT(*) as count,
+            SUM(CASE WHEN won=1 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN settled=1 AND won=0 THEN 1 ELSE 0 END) as losses,
+            SUM(CASE WHEN settled=0 THEN 1 ELSE 0 END) as pending,
+            SUM(COALESCE(fill_price_cents, limit_price_cents)) as total_cost,
+            SUM(COALESCE(payout_cents, 0)) as total_payout
+        FROM weather_trades
+        WHERE status IN ('filled', 'FILLED', 'PLACED')
+        GROUP BY ev_bucket
+    """)
+    by_ev_bucket = {}
+    for row in cur.fetchall():
+        bucket = row["ev_bucket"]
+        total_cost = row["total_cost"] or 0
+        total_payout = row["total_payout"] or 0
+        roi = ((total_payout - total_cost) / total_cost * 100) if total_cost > 0 else 0
+        by_ev_bucket[bucket] = {
+            "count": row["count"],
+            "wins": row["wins"],
+            "losses": row["losses"],
+            "pending": row["pending"],
+            "total_cost_cents": total_cost,
+            "total_payout_cents": total_payout,
+            "roi": roi,
+        }
+
+    conn.close()
+
+    # Calculate totals
+    total_trades = len(trades)
+    settled_trades = [t for t in trades if t["settled"]]
+    wins = sum(1 for t in settled_trades if t["won"])
+    losses = len(settled_trades) - wins
+    total_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in trades)
+    total_payout = sum(t["payout_cents"] or 0 for t in settled_trades)
+    roi = ((total_payout - total_cost) / total_cost * 100) if total_cost > 0 else 0
+    avg_ev = sum(t["ev"] for t in trades) / len(trades) if trades else 0
+
+    return {
+        "total_trades": total_trades,
+        "settled_trades": len(settled_trades),
+        "wins": wins,
+        "losses": losses,
+        "pending": total_trades - len(settled_trades),
+        "total_cost_cents": total_cost,
+        "total_payout_cents": total_payout,
+        "roi": roi,
+        "avg_ev": avg_ev,
+        "trades": trades[:50],  # Last 50 trades
+        "daily_stats": daily_stats,
+        "by_city": by_city,
+        "by_ev_bucket": by_ev_bucket,
+    }
+
+
+def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Generate props data
+    props_stats = get_props_stats(PROPS_DB)
+
+    # Generate weather data
+    weather_stats = get_weather_stats(WEATHER_DB)
+
+    # Combined summary
+    summary = {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "props": {
+            "total_trades": props_stats["total_trades"],
+            "avg_edge": props_stats["avg_edge"],
+        },
+        "weather": {
+            "total_trades": weather_stats["total_trades"],
+            "record": f"{weather_stats['wins']}W-{weather_stats['losses']}L",
+            "roi": weather_stats["roi"],
+            "avg_ev": weather_stats["avg_ev"],
+        },
+    }
+
+    # Write files
+    (OUTPUT_DIR / "props.json").write_text(json.dumps(props_stats, indent=2))
+    (OUTPUT_DIR / "weather.json").write_text(json.dumps(weather_stats, indent=2))
+    (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    print(f"Dashboard data generated at {OUTPUT_DIR}")
+    print(f"  Props: {props_stats['total_trades']} trades")
+    print(f"  Weather: {weather_stats['total_trades']} trades, {weather_stats['wins']}W-{weather_stats['losses']}L")
+
+
+if __name__ == "__main__":
+    main()

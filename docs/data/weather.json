@@ -1,0 +1,40 @@
+{
+  "total_trades": 1,
+  "settled_trades": 0,
+  "wins": 0,
+  "losses": 0,
+  "pending": 1,
+  "total_cost_cents": 78,
+  "total_payout_cents": 0,
+  "roi": -100.0,
+  "avg_ev": 0.034569517620172616,
+  "trades": [
+    {
+      "trade_date": "2026-01-27",
+      "city_key": "AUSHIGH",
+      "market_ticker": "KXHIGHAUS-26JAN27-B45.5",
+      "event_display": "45 \u2264 TMAX \u2264 46",
+      "side": "NO",
+      "quantity": 1,
+      "limit_price_cents": 78,
+      "fair_q": 0.16543048237982735,
+      "ev": 0.034569517620172616,
+      "forecast_high_f": 48,
+      "order_id": "DRY_RUN",
+      "status": "dry_run",
+      "fill_price_cents": null,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null
+    }
+  ],
+  "daily_stats": [
+    {
+      "date": "2026-01-27",
+      "trades_attempted": 1,
+      "trades_filled": 0
+    }
+  ],
+  "by_city": {},
+  "by_ev_bucket": {}
+}
