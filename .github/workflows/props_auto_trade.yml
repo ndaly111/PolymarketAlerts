@@ -2,14 +2,18 @@ name: Props Auto Trade
 
 on:
   schedule:
-    # Run at scheduled refresh times only (6x/day) to conserve Odds API credits
-    # 6am, 8am, 12pm, 4pm, 6pm, 8pm EST = 11:00, 13:00, 17:00, 21:00, 23:00, 01:00 UTC
-    - cron: "0 11 * * *"   # 6am EST
-    - cron: "0 13 * * *"   # 8am EST
-    - cron: "0 17 * * *"   # 12pm EST
-    - cron: "0 21 * * *"   # 4pm EST
-    - cron: "0 23 * * *"   # 6pm EST
-    - cron: "0 1 * * *"    # 8pm EST
+    # Morning: run hourly 6am-12pm ET to fill 10 trades early (stops at limit)
+    # Afternoon: run at 4pm, 8pm ET for any remaining slots
+    # Once 10 filled, script exits before using Odds API credits
+    - cron: "0 11 * * *"   # 6am ET
+    - cron: "0 12 * * *"   # 7am ET
+    - cron: "0 13 * * *"   # 8am ET
+    - cron: "0 14 * * *"   # 9am ET
+    - cron: "0 15 * * *"   # 10am ET
+    - cron: "0 16 * * *"   # 11am ET
+    - cron: "0 17 * * *"   # 12pm ET
+    - cron: "0 21 * * *"   # 4pm ET
+    - cron: "0 1 * * *"    # 8pm ET
   workflow_dispatch:
     inputs:
       dry_run:
