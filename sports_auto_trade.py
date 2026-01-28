@@ -331,26 +331,50 @@ def ensure_db_schema(db_path: Path) -> None:
 
 
 def get_trades_today(db_path: Path) -> int:
-    """Get number of trades attempted today (ET timezone)."""
+    """Get number of actual filled trades today (ET timezone).
+
+    Only counts filled trades, not dry_run or other statuses.
+    This ensures the daily limit applies to real money only.
+    """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
-    cur.execute("SELECT trades_attempted FROM daily_stats WHERE date = ?", (today,))
+    # Count actual filled trades from trades table, excluding dry_run
+    cur.execute("""
+        SELECT COUNT(*) FROM trades
+        WHERE trade_date = ? AND status IN ('filled', 'FILLED')
+    """, (today,))
     row = cur.fetchone()
     conn.close()
     return row[0] if row else 0
 
 
-def increment_trades_today(db_path: Path) -> None:
-    """Increment trade counter for today (ET timezone)."""
+def increment_trades_today(db_path: Path, filled: bool = False) -> None:
+    """Increment trade counter for today (ET timezone).
+
+    Args:
+        db_path: Path to the database
+        filled: If True, also increment trades_filled
+    """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO daily_stats (date, trades_attempted)
-        VALUES (?, 1)
-        ON CONFLICT(date) DO UPDATE SET trades_attempted = trades_attempted + 1
-    """, (today,))
+
+    if filled:
+        cur.execute("""
+            INSERT INTO daily_stats (date, trades_attempted, trades_filled)
+            VALUES (?, 1, 1)
+            ON CONFLICT(date) DO UPDATE SET
+                trades_attempted = trades_attempted + 1,
+                trades_filled = trades_filled + 1
+        """, (today,))
+    else:
+        cur.execute("""
+            INSERT INTO daily_stats (date, trades_attempted)
+            VALUES (?, 1)
+            ON CONFLICT(date) DO UPDATE SET trades_attempted = trades_attempted + 1
+        """, (today,))
+
     conn.commit()
     conn.close()
 
@@ -633,18 +657,22 @@ def try_execute_trade(
     fair_prob: float,
     edge: float,
     books_count: int,
-) -> bool:
+) -> str:
     """
     Execute a trade on Kalshi for a sports line opportunity.
 
-    Returns True if trade was filled, False otherwise.
+    Returns status string:
+    - "filled": Trade was filled
+    - "dry_run": Trade would have been placed (DRY_RUN mode)
+    - "skip": Trade was skipped (filters, errors, etc.)
+    - "cancelled": Trade was placed but not filled
     """
     kalshi_side = "yes" if side.upper() in ("YES", "OVER") else "no"
 
     # Check if already traded this ticker today
     if already_traded_today(db_path, ticker):
         print(f"    [skip] Already traded today: {ticker}")
-        return False
+        return "skip"
 
     print(f"    Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
 
@@ -655,7 +683,7 @@ def try_execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
             "DRY_RUN", "dry_run"
         )
-        return True
+        return "dry_run"
 
     try:
         order = client.place_order(
@@ -692,7 +720,7 @@ def try_execute_trade(
             f"**Sports Order Failed** | {line_type.upper()} {line_label}\n"
             f"Event: {event_title}\nError: {str(e)[:100]}\n_{timestamp}_"
         )
-        return False
+        return "error"
 
     # Wait and check fill status
     print(f"    Waiting {ORDER_TIMEOUT_SECONDS}s for fill...")
@@ -728,7 +756,7 @@ def try_execute_trade(
                 f"_{timestamp}_"
             )
             post_discord(msg)
-            return True
+            return "filled"
 
         elif remaining > 0:
             # Cancel unfilled order
@@ -746,7 +774,7 @@ def try_execute_trade(
                 f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s\n"
                 f"_{timestamp}_"
             )
-            return False
+            return "cancelled"
 
     except Exception as e:
         print(f"    [error] Failed to check order status: {e}")
@@ -755,8 +783,9 @@ def try_execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
             order_id, "unknown"
         )
+        return "error"
 
-    return False
+    return "skip"
 
 
 def calculate_edge_for_market(
@@ -1057,16 +1086,17 @@ def main() -> int:
 
     # Execute trades
     print("\n--- Executing Trades ---")
-    trades_executed = 0
+    trades_filled = 0
+    trades_attempted = 0
 
     for opp in opportunities:
-        if trades_executed >= remaining_trades:
+        if trades_filled >= remaining_trades:
             print(f"Reached daily trade limit ({MAX_TRADES_PER_DAY})")
             break
 
         print(f"\n  Processing: {opp['line_type']} {opp['line_label']} @ {opp['edge']*100:.1f}% edge")
 
-        success = try_execute_trade(
+        result = try_execute_trade(
             client=client,
             db_path=DB_PATH,
             ticker=opp["ticker"],
@@ -1080,25 +1110,41 @@ def main() -> int:
             books_count=opp["books_count"],
         )
 
-        if success:
-            trades_executed += 1
-            increment_trades_today(DB_PATH)
+        if result == "filled":
+            trades_filled += 1
+            trades_attempted += 1
+            increment_trades_today(DB_PATH, filled=True)
+            # Update dashboard immediately when trade fills
+            try:
+                from scripts.generate_dashboard_data import update_dashboard
+                update_dashboard(quiet=True)
+            except Exception:
+                pass
+        elif result == "dry_run":
+            trades_attempted += 1
+            # Don't count dry_run toward limit
+        elif result in ("cancelled", "error"):
+            trades_attempted += 1
+            increment_trades_today(DB_PATH, filled=False)
+        # "skip" doesn't count at all
 
     # Session summary
     print(f"\n{'=' * 60}")
-    print(f"Session complete: {trades_executed} trades executed")
+    print(f"Session complete: {trades_filled} trades filled ({trades_attempted} attempted)")
     if opportunities:
         avg_edge = sum(o["edge"] for o in opportunities) / len(opportunities)
         print(f"Opportunities: {len(opportunities)}, Avg edge: {avg_edge:.1%}")
     print("=" * 60)
 
     # Post summary to Discord
-    if trades_executed > 0 or len(opportunities) > 0:
+    if trades_filled > 0 or len(opportunities) > 0:
         timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        trades_today_final = get_trades_today(DB_PATH)
         summary_lines = [f"**Sports Scan Summary** | {timestamp}"]
+        summary_lines.append(f"Trades today: {trades_today_final}/{MAX_TRADES_PER_DAY} (filled)")
         summary_lines.append(f"Markets scanned: {len(kalshi_markets)}")
         summary_lines.append(f"Opportunities: {len(opportunities)}")
-        summary_lines.append(f"Trades executed: {trades_executed}")
+        summary_lines.append(f"This session: {trades_filled} filled ({trades_attempted} attempted)")
 
         if opportunities:
             summary_lines.append("\nTop opportunities:")
