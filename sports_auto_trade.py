@@ -551,8 +551,8 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
     """Fetch sports markets from Kalshi (moneylines, spreads, totals)."""
     markets = []
 
-    # Series patterns for game lines
-    series_patterns = [
+    # Series tickers for game lines (not props)
+    series_tickers = [
         "KXNBA",      # NBA games
         "KXNCAAB",    # College basketball
         "KXNFL",      # NFL games
@@ -562,8 +562,15 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
     ]
 
     try:
-        # Get all markets and filter for sports
-        all_markets = client.get_markets(limit=1000)
+        # Fetch markets for each sports series
+        all_markets = []
+        for series in series_tickers:
+            try:
+                series_markets = client.list_markets(series_ticker=series, status="open", limit=200)
+                all_markets.extend(series_markets)
+                print(f"    {series}: {len(series_markets)} markets")
+            except Exception as e:
+                print(f"    {series}: error - {e}")
 
         for market in all_markets:
             ticker = market.get("ticker", "")

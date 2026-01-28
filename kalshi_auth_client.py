@@ -266,6 +266,37 @@ class KalshiAuthClient:
             raise RuntimeError(f"Failed to get orderbook: {status} {data}")
         return data.get("orderbook", data)
 
+    def list_markets(
+        self,
+        series_ticker: Optional[str] = None,
+        status: str = "open",
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """List markets, optionally filtered by series ticker."""
+        params: Dict[str, Any] = {"limit": limit}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if status:
+            params["status"] = status
+
+        markets: List[Dict[str, Any]] = []
+        cursor = None
+
+        for _ in range(50):  # Max pagination loops
+            if cursor:
+                params["cursor"] = cursor
+
+            status_code, data = self._request("GET", "/markets", params=params)
+            if status_code != 200:
+                break
+
+            markets.extend(data.get("markets", []) or [])
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+        return markets
+
 
 def prob_to_american(prob: float) -> int:
     """Convert probability to American odds."""
