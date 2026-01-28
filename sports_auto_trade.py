@@ -5,10 +5,11 @@ Automated sports betting script for moneylines, spreads, and totals.
 Workflow:
 1. Fetch Kalshi sports markets (moneylines, spreads, totals)
 2. Fetch sportsbook odds from Odds API (with caching)
-3. Calculate edges (fair prob vs Kalshi price)
-4. Filter for opportunities: EV >= threshold, min books
-5. Place limit orders on Kalshi
-6. Track in database with settlement support
+3. Match Kalshi markets to sportsbook events by team
+4. Calculate edges (fair prob vs Kalshi price)
+5. Filter for opportunities: EV >= threshold, min books
+6. Place limit orders on Kalshi
+7. Track in database with settlement support
 
 Similar to props_auto_trade.py but for game lines instead of player props.
 """
@@ -17,15 +18,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from kalshi_auth_client import KalshiAuthClient
+from oddsapi_lines import (
+    fair_prob_h2h,
+    fair_prob_spread,
+    fair_prob_total,
+    normalize_team_name,
+)
 
 # --- Configuration ---
 MIN_EDGE = float(os.getenv("SPORTS_MIN_EDGE", "0.05"))  # 5% min edge
@@ -56,6 +64,193 @@ SCHEDULED_REFRESH_HOURS = [6, 8, 12, 16, 18, 20]  # 6am, 8am, 12pm, 4pm, 6pm, 8p
 
 # Sports to include
 SPORT_KEYS = os.getenv("SPORTS_SPORT_KEYS", "basketball_nba,basketball_ncaab,americanfootball_nfl").split(",")
+
+
+# --- Parsing helpers from kalshi_sports_value.py ---
+
+TOTAL_RE = re.compile(r"\b(over|under)\s*([0-9]+(?:\.[0-9]+)?)\b", re.IGNORECASE)
+SPREAD_RE = re.compile(
+    r"^(?P<team>.+?)\s*(?P<spread>[+-]?\d+(?:\.\d+)?)\s*(?:pts?|points?)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_matchup(title: str) -> Optional[Tuple[str, str]]:
+    """Extract team A and team B from a title like 'Chicago at Brooklyn' or 'A vs B'."""
+    t = str(title or "")
+    if not t:
+        return None
+
+    def _clean_team_fragment(raw: str) -> str:
+        s = re.sub(r"[\(\[].*?[\)\]]", " ", raw)
+        s = re.sub(
+            r"(?i)\b(moneyline|money line|ml|spread|total|over|under|h2h|line|game|match|odds)\b",
+            " ",
+            s,
+        )
+        s = re.sub(r"(?i)\b(wins?|to win|beat|defeat)\b", " ", s)
+        s = re.sub(r"[|/]+", " ", s)
+        s = re.sub(r"\s+", " ", s).strip(" -–—:|")
+        return s.strip()
+
+    t = re.sub(r"[\(\[].*?[\)\]]", " ", t)
+    t = t.replace("@", " at ").replace(" vs. ", " vs ").replace(" v. ", " vs ").replace(" v ", " vs ")
+    t = " ".join(t.split()).strip()
+    if ":" in t:
+        t_tail = t.split(":")[-1].strip()
+        if len(t_tail) >= 5:
+            t = t_tail
+
+    patterns = [
+        r"(?i)\bwill\s+(.+?)\s+(?:beat|defeat|win(?:\s+against|\s+over|\s+vs)?)\s+(.+?)(?:\?|$)",
+        r"(?i)\b(.+?)\s+(?:beat|defeat|win(?:\s+against|\s+over|\s+vs)?)\s+(.+?)(?:\?|$)",
+        r"(?i)\b(.+?)\s+(at|vs|versus)\s+(.+?)(?:\s*(?:\||-|–|—|:).*)?$",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, t)
+        if not m:
+            continue
+        if len(m.groups()) >= 3 and m.group(2).lower() in ("at", "vs", "versus"):
+            a_raw, b_raw = m.group(1), m.group(3)
+        else:
+            a_raw, b_raw = m.group(1), m.group(2)
+        a = _clean_team_fragment(str(a_raw or ""))
+        b = _clean_team_fragment(str(b_raw or ""))
+        if not a or not b:
+            continue
+        if a.lower() == b.lower():
+            continue
+        return a, b
+
+    return None
+
+
+def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str, Any]]:
+    """Parse spread/total/h2h info from subtitle."""
+    s = " ".join(str(subtitle or "").split())
+    if not s:
+        return None
+
+    if line_type == "total":
+        m = TOTAL_RE.search(s)
+        if not m:
+            return None
+        side = m.group(1).lower()
+        pts = float(m.group(2))
+        return {"side": side, "points": pts, "label": f"{side.title()} {pts:g}"}
+
+    if line_type == "spread":
+        m = SPREAD_RE.match(s)
+        if not m:
+            return None
+        team = m.group("team").strip()
+        spread = float(m.group("spread"))
+        return {"team": team, "spread": spread, "label": f"{team} {spread:+g}"}
+
+    if line_type == "h2h":
+        team = s
+        team = re.sub(r"\b(wins|win|to win)\b", "", team, flags=re.IGNORECASE).strip()
+        if not team:
+            return None
+        return {"team": team, "label": team}
+
+    return None
+
+
+def name_similarity(a: str, b: str) -> float:
+    """Deterministic similarity score in [0,1] for team name matching."""
+    na = normalize_team_name(a)
+    nb = normalize_team_name(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    if na in nb or nb in na:
+        short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+        if len(short) >= 4:
+            return 0.90
+        if len(short) == 3 and long_.startswith(short):
+            return 0.85
+
+    stop = {
+        "pro", "professional", "football", "basketball", "baseball", "hockey",
+        "game", "match", "season", "playoffs", "postseason",
+        "nfl", "nba", "mlb", "nhl", "ncaaf", "ncaab",
+    }
+
+    ta = [t for t in na.split() if t not in stop]
+    tb = [t for t in nb.split() if t not in stop]
+    if not ta or not tb:
+        ta = na.split()
+        tb = nb.split()
+
+    sa = set(ta)
+    sb = set(tb)
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    if union == 0:
+        return 0.0
+    return inter / union
+
+
+def best_event_match(
+    events: List[Dict[str, Any]], team_a: str, team_b: str
+) -> Optional[Dict[str, Any]]:
+    """Find the best odds event matching the two team strings."""
+    best: Optional[Dict[str, Any]] = None
+    best_score = 0.0
+
+    for e in events:
+        home = e.get("home_team")
+        away = e.get("away_team")
+        if not home or not away:
+            continue
+        s1 = name_similarity(team_a, str(home)) + name_similarity(team_b, str(away))
+        s2 = name_similarity(team_a, str(away)) + name_similarity(team_b, str(home))
+        s = max(s1, s2)
+        if s > best_score:
+            best_score = s
+            best = e
+
+    # Require both teams to be at least somewhat close
+    if best is None or best_score < 1.30:
+        return None
+    return best
+
+
+def map_team_to_event_team(
+    team_guess: str, odds_event: Dict[str, Any], min_score: float = 0.72
+) -> Tuple[Optional[str], float]:
+    """Map a Kalshi team name to the corresponding Odds API team name."""
+    home = str(odds_event.get("home_team") or "")
+    away = str(odds_event.get("away_team") or "")
+    if not team_guess or not home or not away:
+        return None, 0.0
+
+    sh = name_similarity(team_guess, home)
+    sa = name_similarity(team_guess, away)
+
+    best_team = home if sh >= sa else away
+    best_score = max(sh, sa)
+
+    if best_score < float(min_score):
+        return None, best_score
+    return best_team, best_score
+
+
+def get_ev_bucket(edge: float) -> str:
+    """Classify edge into bucket for analytics."""
+    if edge < 0.05:
+        return "0-5%"
+    elif edge < 0.10:
+        return "5-10%"
+    elif edge < 0.15:
+        return "10-15%"
+    elif edge < 0.20:
+        return "15-20%"
+    else:
+        return "20%+"
 
 
 def ensure_db_schema(db_path: Path) -> None:
@@ -426,6 +621,335 @@ def fetch_odds_events_oddsapi(sport_keys: List[str]) -> List[Dict[str, Any]]:
         return []
 
 
+def try_execute_trade(
+    client: KalshiAuthClient,
+    db_path: Path,
+    ticker: str,
+    event_title: str,
+    line_type: str,
+    line_label: str,
+    side: str,
+    kalshi_ask: int,
+    fair_prob: float,
+    edge: float,
+    books_count: int,
+) -> bool:
+    """
+    Execute a trade on Kalshi for a sports line opportunity.
+
+    Returns True if trade was filled, False otherwise.
+    """
+    kalshi_side = "yes" if side.upper() in ("YES", "OVER") else "no"
+
+    # Check if already traded this ticker today
+    if already_traded_today(db_path, ticker):
+        print(f"    [skip] Already traded today: {ticker}")
+        return False
+
+    print(f"    Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
+
+    if DRY_RUN:
+        print("    [DRY_RUN] Would place order")
+        record_trade(
+            db_path, ticker, event_title, line_type, line_label, side,
+            CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
+            "DRY_RUN", "dry_run"
+        )
+        return True
+
+    try:
+        order = client.place_order(
+            ticker=ticker,
+            side=kalshi_side,
+            quantity=CONTRACTS_PER_TRADE,
+            limit_price=kalshi_ask,
+        )
+        order_id = order.get("order_id", order.get("id", ""))
+        print(f"    Order placed: {order_id}")
+
+        # Discord notification - order placed
+        ev_cents = edge * 100
+        timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        place_msg = (
+            f"**Sports Order Placed** | {line_type.upper()} {line_label}\n"
+            f"Event: {event_title}\n"
+            f"Order ID: {order_id}\n"
+            f"Side: {side} | Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
+            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
+            f"_{timestamp}_"
+        )
+        post_discord(place_msg)
+
+    except Exception as e:
+        print(f"    [error] Failed to place order: {e}")
+        record_trade(
+            db_path, ticker, event_title, line_type, line_label, side,
+            CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
+            None, "error"
+        )
+        timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        post_discord(
+            f"**Sports Order Failed** | {line_type.upper()} {line_label}\n"
+            f"Event: {event_title}\nError: {str(e)[:100]}\n_{timestamp}_"
+        )
+        return False
+
+    # Wait and check fill status
+    print(f"    Waiting {ORDER_TIMEOUT_SECONDS}s for fill...")
+    time.sleep(ORDER_TIMEOUT_SECONDS)
+
+    try:
+        order_status = client.get_order(order_id)
+        status = order_status.get("status", "").lower()
+        filled_count = order_status.get("filled_count", 0)
+        remaining = order_status.get("remaining_count", CONTRACTS_PER_TRADE)
+
+        if filled_count > 0 or status in {"filled", "executed"}:
+            if filled_count == 0:
+                filled_count = CONTRACTS_PER_TRADE
+            fill_price = order_status.get("avg_fill_price", kalshi_ask)
+            print(f"    FILLED: {filled_count} contract(s) at {fill_price}¢")
+            record_trade(
+                db_path, ticker, event_title, line_type, line_label, side,
+                filled_count, kalshi_ask, fair_prob, edge, books_count,
+                order_id, "filled", fill_price
+            )
+
+            # Discord notification - filled
+            actual_edge = fair_prob - (fill_price / 100.0)
+            ev_cents = actual_edge * 100
+            timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+            msg = (
+                f"**Sports FILLED** | {line_type.upper()} {line_label}\n"
+                f"Event: {event_title}\n"
+                f"Order ID: {order_id}\n"
+                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
+                f"Books: {books_count}\n"
+                f"_{timestamp}_"
+            )
+            post_discord(msg)
+            return True
+
+        elif remaining > 0:
+            # Cancel unfilled order
+            print(f"    Not filled, cancelling...")
+            client.cancel_order(order_id)
+            record_trade(
+                db_path, ticker, event_title, line_type, line_label, side,
+                CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
+                order_id, "cancelled"
+            )
+            timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+            post_discord(
+                f"**Sports Cancelled** | {line_type.upper()} {line_label}\n"
+                f"Event: {event_title}\n"
+                f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s\n"
+                f"_{timestamp}_"
+            )
+            return False
+
+    except Exception as e:
+        print(f"    [error] Failed to check order status: {e}")
+        record_trade(
+            db_path, ticker, event_title, line_type, line_label, side,
+            CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
+            order_id, "unknown"
+        )
+
+    return False
+
+
+def calculate_edge_for_market(
+    market: Dict[str, Any],
+    odds_events: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Match a Kalshi market to Odds API event and calculate edge.
+
+    Returns opportunity dict if edge >= MIN_EDGE, else None.
+    """
+    ticker = market.get("ticker", "")
+    title = market.get("title", "")
+    line_type = market.get("line_type", "")
+    yes_ask = market.get("yes_ask", 100)
+    no_ask = market.get("no_ask", 100)
+
+    # Parse matchup from title
+    matchup = parse_matchup(title)
+    if not matchup:
+        return None
+
+    team_a, team_b = matchup
+
+    # Find matching odds event
+    odds_event = best_event_match(odds_events, team_a, team_b)
+    if not odds_event:
+        return None
+
+    home_team = odds_event.get("home_team", "")
+    away_team = odds_event.get("away_team", "")
+    commence_time = odds_event.get("commence_time", "")
+
+    opportunities = []
+
+    if line_type == "moneyline":
+        # For moneyline, check both teams
+        for team_guess in [team_a, team_b]:
+            mapped_team, score = map_team_to_event_team(team_guess, odds_event)
+            if not mapped_team:
+                continue
+
+            fair = fair_prob_h2h(odds_event, mapped_team, min_books=MIN_BOOKS)
+            if not fair:
+                continue
+
+            fair_prob = fair.get("fair_prob", 0.5)
+            books_count = fair.get("books_used", 0)
+
+            # Check YES side (betting on this team to win)
+            yes_prob = yes_ask / 100.0
+            yes_edge = fair_prob - yes_prob
+
+            if yes_edge >= MIN_EDGE and yes_ask <= MAX_KALSHI_ASK_CENTS:
+                opportunities.append({
+                    "ticker": ticker,
+                    "event_title": f"{away_team} at {home_team}",
+                    "line_type": line_type,
+                    "line_label": f"{mapped_team} ML",
+                    "side": "YES",
+                    "kalshi_ask": yes_ask,
+                    "fair_prob": fair_prob,
+                    "edge": yes_edge,
+                    "books_count": books_count,
+                    "commence_time": commence_time,
+                })
+
+            # Check NO side (betting against this team)
+            no_prob = no_ask / 100.0
+            no_fair = 1.0 - fair_prob
+            no_edge = no_fair - no_prob
+
+            if no_edge >= MIN_EDGE and no_ask <= MAX_KALSHI_ASK_CENTS:
+                other_team = home_team if mapped_team == away_team else away_team
+                opportunities.append({
+                    "ticker": ticker,
+                    "event_title": f"{away_team} at {home_team}",
+                    "line_type": line_type,
+                    "line_label": f"{other_team} ML",
+                    "side": "NO",
+                    "kalshi_ask": no_ask,
+                    "fair_prob": no_fair,
+                    "edge": no_edge,
+                    "books_count": books_count,
+                    "commence_time": commence_time,
+                })
+
+    elif line_type == "spread":
+        # Parse spread from subtitle or title
+        yes_sub = market.get("yes_sub_title", "")
+        no_sub = market.get("no_sub_title", "")
+
+        yes_line = parse_line_from_subtitle("spread", yes_sub)
+        no_line = parse_line_from_subtitle("spread", no_sub)
+
+        for line_info, sub, kalshi_ask_val, side in [
+            (yes_line, yes_sub, yes_ask, "YES"),
+            (no_line, no_sub, no_ask, "NO"),
+        ]:
+            if not line_info:
+                continue
+
+            team_guess = line_info.get("team", "")
+            spread = line_info.get("spread", 0)
+
+            mapped_team, score = map_team_to_event_team(team_guess, odds_event)
+            if not mapped_team:
+                continue
+
+            fair = fair_prob_spread(odds_event, mapped_team, spread, min_books=MIN_BOOKS)
+            if not fair:
+                continue
+
+            fair_prob = fair.get("fair_prob", 0.5)
+            books_count = fair.get("books_used", 0)
+
+            kalshi_prob = kalshi_ask_val / 100.0
+            edge = fair_prob - kalshi_prob
+
+            if edge >= MIN_EDGE and kalshi_ask_val <= MAX_KALSHI_ASK_CENTS:
+                opportunities.append({
+                    "ticker": ticker,
+                    "event_title": f"{away_team} at {home_team}",
+                    "line_type": line_type,
+                    "line_label": f"{mapped_team} {spread:+g}",
+                    "side": side,
+                    "kalshi_ask": kalshi_ask_val,
+                    "fair_prob": fair_prob,
+                    "edge": edge,
+                    "books_count": books_count,
+                    "commence_time": commence_time,
+                })
+
+    elif line_type == "total":
+        # Parse total from title or subtitle
+        m = TOTAL_RE.search(title)
+        if not m:
+            return None
+
+        total_side = m.group(1).lower()  # "over" or "under"
+        total_points = float(m.group(2))
+
+        fair = fair_prob_total(odds_event, total_side, total_points, min_books=MIN_BOOKS)
+        if not fair:
+            return None
+
+        fair_prob = fair.get("fair_prob", 0.5)
+        books_count = fair.get("books_used", 0)
+
+        # YES means the total line hits
+        yes_prob = yes_ask / 100.0
+        yes_edge = fair_prob - yes_prob
+
+        if yes_edge >= MIN_EDGE and yes_ask <= MAX_KALSHI_ASK_CENTS:
+            opportunities.append({
+                "ticker": ticker,
+                "event_title": f"{away_team} at {home_team}",
+                "line_type": line_type,
+                "line_label": f"{total_side.title()} {total_points:g}",
+                "side": "YES",
+                "kalshi_ask": yes_ask,
+                "fair_prob": fair_prob,
+                "edge": yes_edge,
+                "books_count": books_count,
+                "commence_time": commence_time,
+            })
+
+        # NO means opposite side
+        no_prob = no_ask / 100.0
+        no_fair = 1.0 - fair_prob
+        no_edge = no_fair - no_prob
+        opposite_side = "under" if total_side == "over" else "over"
+
+        if no_edge >= MIN_EDGE and no_ask <= MAX_KALSHI_ASK_CENTS:
+            opportunities.append({
+                "ticker": ticker,
+                "event_title": f"{away_team} at {home_team}",
+                "line_type": line_type,
+                "line_label": f"{opposite_side.title()} {total_points:g}",
+                "side": "NO",
+                "kalshi_ask": no_ask,
+                "fair_prob": no_fair,
+                "edge": no_edge,
+                "books_count": books_count,
+                "commence_time": commence_time,
+            })
+
+    # Return best opportunity if any
+    if opportunities:
+        return max(opportunities, key=lambda x: x["edge"])
+    return None
+
+
 def main() -> int:
     print("=" * 60)
     print("SPORTS AUTO TRADER")
@@ -482,18 +1006,109 @@ def main() -> int:
     odds_events = fetch_odds_events_oddsapi(SPORT_KEYS)
     print(f"  Found {len(odds_events)} sportsbook events")
 
-    # TODO: Match Kalshi markets to Odds API events and calculate edges
-    # This requires implementing the matching logic from kalshi_sports_value.py
+    if not odds_events:
+        print("No sportsbook odds available. Exiting.")
+        return 0
 
+    # Match and find opportunities
     print("\n--- Matching and Edge Calculation ---")
-    print("  [TODO] Implement market matching and edge calculation")
-    print("  This will use the logic from kalshi_sports_value.py")
 
-    # For now, just log that we're set up
+    opportunities: List[Dict[str, Any]] = []
+    matched_count = 0
+    unmatched_count = 0
+
+    for market in kalshi_markets:
+        opp = calculate_edge_for_market(market, odds_events)
+        if opp:
+            opportunities.append(opp)
+            matched_count += 1
+        else:
+            unmatched_count += 1
+
+    print(f"  Matched: {matched_count}, Unmatched: {unmatched_count}")
+    print(f"  Opportunities with edge >= {MIN_EDGE:.0%}: {len(opportunities)}")
+
+    # Sort by edge
+    opportunities.sort(key=lambda x: x["edge"], reverse=True)
+
+    # Log all opportunities
+    for opp in opportunities[:20]:
+        bucket = get_ev_bucket(opp["edge"])
+        print(
+            f"  {opp['edge']*100:5.1f}% | {opp['line_type']:>10} | {opp['line_label']} | "
+            f"ask={opp['kalshi_ask']}¢ fair={opp['fair_prob']:.1%} | books={opp['books_count']} | {bucket}"
+        )
+
+        # Log to database for analysis
+        log_scanned_opportunity(
+            DB_PATH,
+            opp["ticker"],
+            opp["event_title"],
+            opp["line_type"],
+            opp["line_label"],
+            opp["side"],
+            0,  # bid not tracked
+            opp["kalshi_ask"],
+            opp["fair_prob"],
+            opp["edge"],
+            opp["books_count"],
+            opp.get("commence_time", ""),
+        )
+
+    # Execute trades
+    print("\n--- Executing Trades ---")
+    trades_executed = 0
+
+    for opp in opportunities:
+        if trades_executed >= remaining_trades:
+            print(f"Reached daily trade limit ({MAX_TRADES_PER_DAY})")
+            break
+
+        print(f"\n  Processing: {opp['line_type']} {opp['line_label']} @ {opp['edge']*100:.1f}% edge")
+
+        success = try_execute_trade(
+            client=client,
+            db_path=DB_PATH,
+            ticker=opp["ticker"],
+            event_title=opp["event_title"],
+            line_type=opp["line_type"],
+            line_label=opp["line_label"],
+            side=opp["side"],
+            kalshi_ask=opp["kalshi_ask"],
+            fair_prob=opp["fair_prob"],
+            edge=opp["edge"],
+            books_count=opp["books_count"],
+        )
+
+        if success:
+            trades_executed += 1
+            increment_trades_today(DB_PATH)
+
+    # Session summary
     print(f"\n{'=' * 60}")
-    print(f"Session complete: Infrastructure ready")
-    print(f"Next step: Implement matching logic from kalshi_sports_value.py")
+    print(f"Session complete: {trades_executed} trades executed")
+    if opportunities:
+        avg_edge = sum(o["edge"] for o in opportunities) / len(opportunities)
+        print(f"Opportunities: {len(opportunities)}, Avg edge: {avg_edge:.1%}")
     print("=" * 60)
+
+    # Post summary to Discord
+    if trades_executed > 0 or len(opportunities) > 0:
+        timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        summary_lines = [f"**Sports Scan Summary** | {timestamp}"]
+        summary_lines.append(f"Markets scanned: {len(kalshi_markets)}")
+        summary_lines.append(f"Opportunities: {len(opportunities)}")
+        summary_lines.append(f"Trades executed: {trades_executed}")
+
+        if opportunities:
+            summary_lines.append("\nTop opportunities:")
+            for opp in opportunities[:5]:
+                summary_lines.append(
+                    f"- {opp['line_type']} {opp['line_label']}: "
+                    f"{opp['edge']*100:.1f}% edge @ {opp['kalshi_ask']}¢"
+                )
+
+        post_discord("\n".join(summary_lines))
 
     # Update dashboard
     try:
