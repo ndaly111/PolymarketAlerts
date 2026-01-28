@@ -42,11 +42,20 @@
             gap: 20px;
             margin-bottom: 30px;
         }
+        .grid-wide {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
         .card {
             background: #16181c;
             border-radius: 12px;
             padding: 20px;
             border: 1px solid #2f3336;
+        }
+        .card-full {
+            grid-column: 1 / -1;
         }
         .card h2 {
             font-size: 1.1rem;
@@ -117,7 +126,12 @@
         .badge-no { background: #7856ff22; color: #7856ff; }
         .chart-container {
             position: relative;
-            height: 250px;
+            height: 280px;
+            margin-top: 15px;
+        }
+        .chart-container-tall {
+            position: relative;
+            height: 350px;
             margin-top: 15px;
         }
         .tabs {
@@ -156,11 +170,28 @@
         .ev-bucket-table td:first-child {
             font-weight: 600;
         }
+        .chart-legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 10px;
+            font-size: 0.8rem;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
         @media (max-width: 768px) {
             .stat-grid {
                 grid-template-columns: 1fr;
             }
-            .grid {
+            .grid, .grid-wide {
                 grid-template-columns: 1fr;
             }
         }
@@ -226,6 +257,46 @@
                 </div>
             </div>
 
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>Cumulative P&L Over Time</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="weather-pnl-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Expected EV vs Realized ROI</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="weather-ev-vs-realized-chart"></canvas>
+                    </div>
+                    <div class="chart-legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #1d9bf0;"></div>
+                            <span>Expected EV</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #00ba7c;"></div>
+                            <span>Realized ROI</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>Win Rate by City</h2>
+                    <div class="chart-container">
+                        <canvas id="weather-city-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Trade Distribution by EV</h2>
+                    <div class="chart-container">
+                        <canvas id="weather-ev-dist-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
             <div class="section">
                 <h2>Results by EV Bucket</h2>
                 <div class="card">
@@ -235,9 +306,10 @@
                                 <th>EV Bucket</th>
                                 <th>Trades</th>
                                 <th>W-L-P</th>
-                                <th>Cost</th>
-                                <th>Payout</th>
-                                <th>ROI</th>
+                                <th>Win Rate</th>
+                                <th>Avg Price</th>
+                                <th>Expected EV</th>
+                                <th>Realized ROI</th>
                             </tr>
                         </thead>
                         <tbody id="weather-ev-buckets"></tbody>
@@ -255,6 +327,7 @@
                                 <th>Trades</th>
                                 <th>Wins</th>
                                 <th>Losses</th>
+                                <th>Win Rate</th>
                                 <th>Avg EV</th>
                             </tr>
                         </thead>
@@ -316,6 +389,21 @@
                 </div>
             </div>
 
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>Cumulative Cost Over Time</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="props-pnl-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Edge Distribution</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="props-edge-dist-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
             <div class="section">
                 <h2>Recent Trades</h2>
                 <div class="card">
@@ -358,6 +446,10 @@
             date: (v) => v ? new Date(v).toLocaleDateString() : '-',
         };
 
+        // Chart.js defaults for dark theme
+        Chart.defaults.color = '#71767b';
+        Chart.defaults.borderColor = '#2f3336';
+
         // Load and render data
         async function loadData() {
             try {
@@ -396,33 +488,179 @@
             document.getElementById('weather-profit').classList.add(profit >= 0 ? 'positive' : 'negative');
             document.getElementById('weather-pending').textContent = data.pending;
 
-            // EV Buckets
+            // Cumulative P&L Chart
+            const trades = (data.trades || []).slice().reverse(); // oldest first
+            let cumPnl = 0;
+            const pnlData = trades.filter(t => t.settled).map((t, i) => {
+                const cost = t.fill_price_cents || t.limit_price_cents || 0;
+                const payout = t.won ? 100 : 0;
+                cumPnl += (payout - cost);
+                return { x: i + 1, y: cumPnl / 100 };
+            });
+
+            if (pnlData.length > 0) {
+                new Chart(document.getElementById('weather-pnl-chart'), {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Cumulative P&L ($)',
+                            data: pnlData,
+                            borderColor: '#1d9bf0',
+                            backgroundColor: '#1d9bf022',
+                            fill: true,
+                            tension: 0.3,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { type: 'linear', title: { display: true, text: 'Trade #' } },
+                            y: { title: { display: true, text: 'P&L ($)' } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // EV vs Realized ROI Chart
             const evBuckets = ['0-5%', '5-10%', '10-15%', '15-20%', '20%+'];
-            const evHtml = evBuckets.map(bucket => {
+            const evMidpoints = [2.5, 7.5, 12.5, 17.5, 25]; // midpoint EV for each bucket
+            const expectedEV = [];
+            const realizedROI = [];
+
+            evBuckets.forEach((bucket, i) => {
+                const b = data.by_ev_bucket[bucket];
+                if (b && b.count > 0) {
+                    expectedEV.push(evMidpoints[i]);
+                    realizedROI.push(b.roi || 0);
+                } else {
+                    expectedEV.push(evMidpoints[i]);
+                    realizedROI.push(null);
+                }
+            });
+
+            new Chart(document.getElementById('weather-ev-vs-realized-chart'), {
+                type: 'bar',
+                data: {
+                    labels: evBuckets,
+                    datasets: [
+                        {
+                            label: 'Expected EV (%)',
+                            data: expectedEV,
+                            backgroundColor: '#1d9bf0',
+                            borderRadius: 4,
+                        },
+                        {
+                            label: 'Realized ROI (%)',
+                            data: realizedROI,
+                            backgroundColor: '#00ba7c',
+                            borderRadius: 4,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { title: { display: true, text: 'Percentage (%)' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // City Win Rate Chart
+            const cities = Object.entries(data.by_city || {}).sort((a, b) => b[1].count - a[1].count);
+            if (cities.length > 0) {
+                const cityLabels = cities.map(c => c[0]);
+                const cityWinRates = cities.map(c => {
+                    const total = (c[1].wins || 0) + (c[1].losses || 0);
+                    return total > 0 ? ((c[1].wins || 0) / total * 100) : 0;
+                });
+
+                new Chart(document.getElementById('weather-city-chart'), {
+                    type: 'bar',
+                    data: {
+                        labels: cityLabels,
+                        datasets: [{
+                            label: 'Win Rate (%)',
+                            data: cityWinRates,
+                            backgroundColor: '#7856ff',
+                            borderRadius: 4,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        indexAxis: 'y',
+                        scales: {
+                            x: { max: 100, title: { display: true, text: 'Win Rate (%)' } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // EV Distribution Chart
+            const evCounts = evBuckets.map(bucket => {
+                const b = data.by_ev_bucket[bucket];
+                return b ? b.count : 0;
+            });
+
+            new Chart(document.getElementById('weather-ev-dist-chart'), {
+                type: 'doughnut',
+                data: {
+                    labels: evBuckets,
+                    datasets: [{
+                        data: evCounts,
+                        backgroundColor: ['#71767b', '#ffd400', '#00ba7c', '#1d9bf0', '#7856ff'],
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'right',
+                            labels: { color: '#e7e9ea' }
+                        }
+                    }
+                }
+            });
+
+            // EV Buckets Table (enhanced)
+            const evHtml = evBuckets.map((bucket, i) => {
                 const b = data.by_ev_bucket[bucket] || { count: 0, wins: 0, losses: 0, pending: 0, total_cost_cents: 0, total_payout_cents: 0, roi: 0 };
                 const roiClass = b.roi >= 0 ? 'positive' : 'negative';
+                const totalSettled = (b.wins || 0) + (b.losses || 0);
+                const winRate = totalSettled > 0 ? ((b.wins || 0) / totalSettled * 100).toFixed(0) : '-';
+                const avgPrice = b.count > 0 ? (b.total_cost_cents / b.count).toFixed(0) : '-';
                 return `<tr>
                     <td>${bucket}</td>
                     <td>${b.count}</td>
                     <td>${b.wins}-${b.losses}-${b.pending}</td>
-                    <td>${fmt.cents(b.total_cost_cents)}</td>
-                    <td>${fmt.cents(b.total_payout_cents)}</td>
+                    <td>${winRate}%</td>
+                    <td>${avgPrice}¢</td>
+                    <td>${evMidpoints[i]}%</td>
                     <td class="${roiClass}">${fmt.pctNum(b.roi)}</td>
                 </tr>`;
             }).join('');
             document.getElementById('weather-ev-buckets').innerHTML = evHtml;
 
-            // Cities
-            const cityHtml = Object.entries(data.by_city || {})
-                .sort((a, b) => b[1].count - a[1].count)
-                .map(([city, stats]) => `<tr>
+            // Cities Table (enhanced)
+            const cityHtml = cities.map(([city, stats]) => {
+                const totalSettled = (stats.wins || 0) + (stats.losses || 0);
+                const winRate = totalSettled > 0 ? ((stats.wins || 0) / totalSettled * 100).toFixed(0) : '-';
+                return `<tr>
                     <td>${city}</td>
                     <td>${stats.count}</td>
                     <td>${stats.wins || 0}</td>
                     <td>${stats.losses || 0}</td>
+                    <td>${winRate}%</td>
                     <td>${fmt.pct(stats.avg_ev)}</td>
-                </tr>`).join('');
-            document.getElementById('weather-cities').innerHTML = cityHtml || '<tr><td colspan="5">No data</td></tr>';
+                </tr>`;
+            }).join('');
+            document.getElementById('weather-cities').innerHTML = cityHtml || '<tr><td colspan="6">No data</td></tr>';
 
             // Trades table
             const tradesHtml = (data.trades || []).slice(0, 20).map(t => {
@@ -454,6 +692,72 @@
             document.getElementById('props-avg-edge').textContent = fmt.pct(data.avg_edge);
             document.getElementById('props-cost').textContent = fmt.cents(data.total_cost_cents);
 
+            // Cumulative Cost Chart
+            const trades = (data.trades || []).slice().reverse(); // oldest first
+            let cumCost = 0;
+            const costData = trades.map((t, i) => {
+                cumCost += (t.fill_price_cents || t.limit_price_cents || 0);
+                return { x: i + 1, y: cumCost / 100 };
+            });
+
+            if (costData.length > 0) {
+                new Chart(document.getElementById('props-pnl-chart'), {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Cumulative Cost ($)',
+                            data: costData,
+                            borderColor: '#ffd400',
+                            backgroundColor: '#ffd40022',
+                            fill: true,
+                            tension: 0.3,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { type: 'linear', title: { display: true, text: 'Trade #' } },
+                            y: { title: { display: true, text: 'Cost ($)' } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // Edge Distribution Histogram
+            const edges = trades.map(t => (t.edge || 0) * 100);
+            const edgeBuckets = ['0-5%', '5-10%', '10-15%', '15-20%', '20%+'];
+            const edgeCounts = [0, 0, 0, 0, 0];
+            edges.forEach(e => {
+                if (e < 5) edgeCounts[0]++;
+                else if (e < 10) edgeCounts[1]++;
+                else if (e < 15) edgeCounts[2]++;
+                else if (e < 20) edgeCounts[3]++;
+                else edgeCounts[4]++;
+            });
+
+            new Chart(document.getElementById('props-edge-dist-chart'), {
+                type: 'bar',
+                data: {
+                    labels: edgeBuckets,
+                    datasets: [{
+                        label: 'Trades',
+                        data: edgeCounts,
+                        backgroundColor: '#1d9bf0',
+                        borderRadius: 4,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { title: { display: true, text: 'Number of Trades' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
             // Trades table
             const tradesHtml = (data.trades || []).slice(0, 20).map(t => {
                 const sideBadge = t.side === 'over'
@@ -475,8 +779,7 @@
             // Stat type chart
             const statTypes = Object.keys(data.by_stat_type || {});
             if (statTypes.length > 0) {
-                const ctx = document.getElementById('props-stat-chart').getContext('2d');
-                new Chart(ctx, {
+                new Chart(document.getElementById('props-stat-chart'), {
                     type: 'doughnut',
                     data: {
                         labels: statTypes,
