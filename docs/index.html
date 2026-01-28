@@ -980,7 +980,7 @@
             document.getElementById('summary-pending').textContent = totalPending;
 
             // Strategy breakdown - Weather
-            const wPnl = wPayout - wCost;
+            const wPnl = wPayout - wSettledCost;
             document.getElementById('summary-weather-pnl').textContent = `${wPnl >= 0 ? '+' : ''}$${(wPnl / 100).toFixed(2)}`;
             document.getElementById('summary-weather-pnl').className = `stat-value ${wPnl >= 0 ? 'positive' : 'negative'}`;
             document.getElementById('summary-weather-roi').textContent = fmt.pctNum(weather.roi);
@@ -989,7 +989,7 @@
             document.getElementById('summary-weather-trades').textContent = weather.total_trades || 0;
 
             // Strategy breakdown - Props
-            const pPnl = pPayout - pCost;
+            const pPnl = pPayout - pSettledCost;
             document.getElementById('summary-props-pnl').textContent = `${pPnl >= 0 ? '+' : ''}$${(pPnl / 100).toFixed(2)}`;
             document.getElementById('summary-props-pnl').className = `stat-value ${pPnl >= 0 ? 'positive' : 'negative'}`;
             document.getElementById('summary-props-roi').textContent = fmt.pctNum(props.roi);
@@ -998,7 +998,7 @@
             document.getElementById('summary-props-trades').textContent = props.total_trades || 0;
 
             // Strategy breakdown - Sports
-            const sPnl = sPayout - sCost;
+            const sPnl = sPayout - sSettledCost;
             document.getElementById('summary-sports-pnl').textContent = `${sPnl >= 0 ? '+' : ''}$${(sPnl / 100).toFixed(2)}`;
             document.getElementById('summary-sports-pnl').className = `stat-value ${sPnl >= 0 ? 'positive' : 'negative'}`;
             document.getElementById('summary-sports-roi').textContent = fmt.pctNum(sports.roi);
