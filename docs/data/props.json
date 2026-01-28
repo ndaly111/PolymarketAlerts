@@ -1,11 +1,11 @@
 {
-  "total_trades": 8,
-  "filled_trades": 8,
-  "total_cost_cents": 295,
-  "avg_edge": 0.15540028282060064,
+  "total_trades": 10,
+  "filled_trades": 10,
+  "total_cost_cents": 388,
+  "avg_edge": 0.1384202262564805,
   "wins": 3,
   "losses": 5,
-  "pending": 0,
+  "pending": 2,
   "total_payout_cents": 300,
   "roi": 1.694915254237288,
   "trades": [
@@ -48,6 +48,46 @@
       "won": 1,
       "payout_cents": 100,
       "settled_at": "2026-01-28T08:38:43.588295-05:00"
+    },
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "MATHURIN-REB-5",
+      "player_name": "Bennedict Mathurin",
+      "stat_type": "rebounds",
+      "line": 5.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 48,
+      "fair_prob": 0.556,
+      "edge": 0.076,
+      "books_count": 5,
+      "order_id": "c4e5e2cb-7063-4233-ab8a-d3168713556d",
+      "status": "filled",
+      "fill_price_cents": 48,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "ADEBAYO-REB-11",
+      "player_name": "Bam Adebayo",
+      "stat_type": "rebounds",
+      "line": 11.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 45,
+      "fair_prob": 0.515,
+      "edge": 0.065,
+      "books_count": 4,
+      "order_id": "cd424d57-9a6f-45d1-9fa3-f268c8ce2dcf",
+      "status": "filled",
+      "fill_price_cents": 45,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
     },
     {
       "trade_date": "2026-01-27",
@@ -192,8 +232,8 @@
       "avg_edge": 0.45643333182958407
     },
     "rebounds": {
-      "count": 2,
-      "avg_edge": 0.05669768615070617
+      "count": 4,
+      "avg_edge": 0.06359884307535309
     }
   },
   "by_ev_bucket": {
@@ -207,11 +247,11 @@
       "roi": 669.2307692307693
     },
     "5-10%": {
-      "count": 6,
+      "count": 8,
       "wins": 2,
       "losses": 4,
-      "pending": 0,
-      "total_cost_cents": 282,
+      "pending": 2,
+      "total_cost_cents": 375,
       "total_payout_cents": 200,
       "roi": -29.078014184397162
     }
