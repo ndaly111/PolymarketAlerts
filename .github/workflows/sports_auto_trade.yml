@@ -43,7 +43,8 @@ jobs:
       # Trading parameters
       SPORTS_MIN_EDGE: "0.05"
       SPORTS_MIN_BOOKS: "2"
-      SPORTS_MAX_ASK: "75"
+      SPORTS_MAX_ASK: "67"
+      SPORTS_MIN_ASK: "33"
       SPORTS_MAX_TRADES_PER_DAY: "10"
       SPORTS_ORDER_TIMEOUT: "30"
       SPORTS_CONTRACTS_PER_TRADE: "1"

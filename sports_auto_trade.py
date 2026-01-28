@@ -38,7 +38,8 @@ from oddsapi_lines import (
 # --- Configuration ---
 MIN_EDGE = float(os.getenv("SPORTS_MIN_EDGE", "0.05"))  # 5% min edge
 MIN_BOOKS = int(os.getenv("SPORTS_MIN_BOOKS", "2"))  # Require 2+ books
-MAX_KALSHI_ASK_CENTS = int(os.getenv("SPORTS_MAX_ASK", "75"))  # ≤ 75¢
+MAX_KALSHI_ASK_CENTS = int(os.getenv("SPORTS_MAX_ASK", "67"))  # ≤ 67¢ (-200)
+MIN_KALSHI_ASK_CENTS = int(os.getenv("SPORTS_MIN_ASK", "33"))  # ≥ 33¢ (+200)
 MAX_TRADES_PER_DAY = int(os.getenv("SPORTS_MAX_TRADES_PER_DAY", "10"))
 ORDER_TIMEOUT_SECONDS = int(os.getenv("SPORTS_ORDER_TIMEOUT", "30"))
 CONTRACTS_PER_TRADE = int(os.getenv("SPORTS_CONTRACTS_PER_TRADE", "1"))
@@ -1016,7 +1017,7 @@ def calculate_edge_for_market(
             yes_prob = yes_ask / 100.0
             yes_edge = fair_prob - yes_prob
 
-            if yes_edge >= MIN_EDGE and yes_ask <= MAX_KALSHI_ASK_CENTS:
+            if yes_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS:
                 opportunities.append({
                     "ticker": ticker,
                     "event_title": f"{away_team} at {home_team}",
@@ -1035,7 +1036,7 @@ def calculate_edge_for_market(
             no_fair = 1.0 - fair_prob
             no_edge = no_fair - no_prob
 
-            if no_edge >= MIN_EDGE and no_ask <= MAX_KALSHI_ASK_CENTS:
+            if no_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS:
                 other_team = home_team if mapped_team == away_team else away_team
                 opportunities.append({
                     "ticker": ticker,
@@ -1082,7 +1083,7 @@ def calculate_edge_for_market(
             kalshi_prob = kalshi_ask_val / 100.0
             edge = fair_prob - kalshi_prob
 
-            if edge >= MIN_EDGE and kalshi_ask_val <= MAX_KALSHI_ASK_CENTS:
+            if edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= kalshi_ask_val <= MAX_KALSHI_ASK_CENTS:
                 opportunities.append({
                     "ticker": ticker,
                     "event_title": f"{away_team} at {home_team}",
@@ -1116,7 +1117,7 @@ def calculate_edge_for_market(
         yes_prob = yes_ask / 100.0
         yes_edge = fair_prob - yes_prob
 
-        if yes_edge >= MIN_EDGE and yes_ask <= MAX_KALSHI_ASK_CENTS:
+        if yes_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS:
             opportunities.append({
                 "ticker": ticker,
                 "event_title": f"{away_team} at {home_team}",
@@ -1136,7 +1137,7 @@ def calculate_edge_for_market(
         no_edge = no_fair - no_prob
         opposite_side = "under" if total_side == "over" else "over"
 
-        if no_edge >= MIN_EDGE and no_ask <= MAX_KALSHI_ASK_CENTS:
+        if no_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS:
             opportunities.append({
                 "ticker": ticker,
                 "event_title": f"{away_team} at {home_team}",
@@ -1161,7 +1162,7 @@ def main() -> int:
     print("SPORTS AUTO TRADER")
     print(f"Min edge: {MIN_EDGE:.0%}")
     print(f"Min books: {MIN_BOOKS}")
-    print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
+    print(f"Kalshi ask range: {MIN_KALSHI_ASK_CENTS}¢-{MAX_KALSHI_ASK_CENTS}¢ (+200 to -200)")
     print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Sports: {', '.join(SPORT_KEYS)}")
     print(f"Dry run: {DRY_RUN}")
