@@ -62,8 +62,11 @@ CACHE_TTL_SECONDS = int(os.getenv("SPORTS_CACHE_TTL", "14400"))  # 4 hours - but
 # Scheduled refresh times (ET) - only fetch fresh data at these times
 SCHEDULED_REFRESH_HOURS = [6, 8, 12, 16, 18, 20]  # 6am, 8am, 12pm, 4pm, 6pm, 8pm ET
 
-# Sports to include
-SPORT_KEYS = os.getenv("SPORTS_SPORT_KEYS", "basketball_nba,basketball_ncaab,americanfootball_nfl").split(",")
+# Sports to include (NFL, NHL, NBA, CBB, CFB, MLB)
+SPORT_KEYS = os.getenv(
+    "SPORTS_SPORT_KEYS",
+    "basketball_nba,basketball_ncaab,americanfootball_nfl,americanfootball_ncaaf,icehockey_nhl,baseball_mlb"
+).split(",")
 
 
 # --- Parsing helpers from kalshi_sports_value.py ---
@@ -502,6 +505,29 @@ def _write_cache(cache_key: str, events: List[Dict[str, Any]]) -> None:
         }))
     except Exception:
         pass
+
+
+def get_active_sports_from_kalshi(kalshi_markets: List[Dict[str, Any]]) -> List[str]:
+    """Determine which sports have active Kalshi markets to minimize Odds API calls."""
+    active_sports = set()
+
+    for market in kalshi_markets:
+        ticker = market.get("ticker", "").upper()
+
+        if "NBA" in ticker:
+            active_sports.add("basketball_nba")
+        elif "NCAAB" in ticker or "CBB" in ticker:
+            active_sports.add("basketball_ncaab")
+        elif "NFL" in ticker:
+            active_sports.add("americanfootball_nfl")
+        elif "NCAAF" in ticker or "CFB" in ticker:
+            active_sports.add("americanfootball_ncaaf")
+        elif "NHL" in ticker:
+            active_sports.add("icehockey_nhl")
+        elif "MLB" in ticker:
+            active_sports.add("baseball_mlb")
+
+    return list(active_sports)
 
 
 # --- Discord ---
@@ -1025,19 +1051,57 @@ def main() -> int:
         print("No Kalshi sports markets available. Exiting.")
         return 0
 
-    # Fetch odds - only at scheduled refresh times to conserve API credits
-    # At ~54 credits/day (6 refreshes × 9 sports), well under 650 limit
-    print("Fetching sportsbook odds...")
-    if is_scheduled_refresh_time():
-        print("  [scheduled refresh] Fetching fresh data from Odds API")
-    else:
-        print("  [off-schedule] Using cached data only (conserving API credits)")
-    odds_events = fetch_odds_events_oddsapi(SPORT_KEYS)
-    print(f"  Found {len(odds_events)} sportsbook events")
+    # Determine which sports have active Kalshi markets (minimize Odds API calls)
+    active_sports = get_active_sports_from_kalshi(kalshi_markets)
+    print(f"  Active sports: {', '.join(active_sports) or 'none'}")
 
-    if not odds_events:
+    if not active_sports:
+        print("No active sports found in Kalshi markets. Exiting.")
+        return 0
+
+    # Two-stage approach to conserve Odds API credits:
+    # Stage 1: Use DraftKings (FREE) for initial screening
+    # Stage 2: Only verify with Odds API for markets with potential edge
+
+    print("\n--- Stage 1: DraftKings Screening (FREE) ---")
+    dk_events = fetch_odds_events_draftkings(active_sports)
+    print(f"  Found {len(dk_events)} DraftKings events")
+
+    # Screen for potential edges using DraftKings
+    potential_edges: List[Dict[str, Any]] = []
+    if dk_events:
+        for market in kalshi_markets:
+            opp = calculate_edge_for_market(market, dk_events)
+            if opp and opp["edge"] >= MIN_EDGE * 0.5:  # 2.5%+ potential = worth verifying
+                potential_edges.append(opp)
+        print(f"  Found {len(potential_edges)} markets with potential edge (>= {MIN_EDGE*0.5:.1%})")
+    else:
+        print("  DraftKings unavailable, will check all Kalshi markets with Odds API")
+        potential_edges = [{"ticker": m["ticker"], "event_title": m.get("event_title", "")} for m in kalshi_markets]
+
+    # Stage 2: Verify with Odds API only for markets with potential edge
+    # Only fetch active sports (based on Kalshi markets)
+    print("\n--- Stage 2: Odds API Verification ---")
+    if not potential_edges:
+        print("  No potential edges found. Skipping Odds API.")
+        odds_events = []
+    elif len(potential_edges) > 20:
+        # Too many potentials - just fetch full slate for active sports
+        print(f"  {len(potential_edges)} potentials - fetching Odds API for {len(active_sports)} sports")
+        odds_events = fetch_odds_events_oddsapi(active_sports)
+    else:
+        # Few potentials - fetch for active sports only
+        print(f"  {len(potential_edges)} potentials - verifying with Odds API ({len(active_sports)} sports)")
+        odds_events = fetch_odds_events_oddsapi(active_sports)
+
+    print(f"  Found {len(odds_events)} sportsbook events for verification")
+
+    if not odds_events and not dk_events:
         print("No sportsbook odds available. Exiting.")
         return 0
+
+    # Use Odds API if available (multiple books), otherwise fall back to DraftKings
+    final_odds = odds_events if odds_events else dk_events
 
     # Match and find opportunities
     print("\n--- Matching and Edge Calculation ---")
@@ -1047,7 +1111,7 @@ def main() -> int:
     unmatched_count = 0
 
     for market in kalshi_markets:
-        opp = calculate_edge_for_market(market, odds_events)
+        opp = calculate_edge_for_market(market, final_odds)
         if opp:
             opportunities.append(opp)
             matched_count += 1
