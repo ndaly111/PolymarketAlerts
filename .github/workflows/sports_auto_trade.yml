@@ -1,0 +1,154 @@
+name: Sports Auto Trade
+
+on:
+  schedule:
+    # Morning: run hourly 9am-1pm ET for game day lines
+    # Afternoon: run at 4pm, 7pm ET for evening games
+    # Once 10 filled, script exits before using Odds API credits
+    - cron: "0 14 * * *"   # 9am ET
+    - cron: "0 15 * * *"   # 10am ET
+    - cron: "0 16 * * *"   # 11am ET
+    - cron: "0 17 * * *"   # 12pm ET
+    - cron: "0 18 * * *"   # 1pm ET
+    - cron: "0 21 * * *"   # 4pm ET
+    - cron: "0 0 * * *"    # 7pm ET
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run mode (no real trades)"
+        required: false
+        default: "true"
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sports-auto-trade
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      # Kalshi API credentials
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      # Odds API
+      THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
+      SPORTS_CACHE_DIR: /tmp/sports_odds_cache
+      # Trading parameters
+      SPORTS_MIN_EDGE: "0.05"
+      SPORTS_MIN_BOOKS: "2"
+      SPORTS_MAX_ASK: "75"
+      SPORTS_MAX_TRADES_PER_DAY: "10"
+      SPORTS_ORDER_TIMEOUT: "30"
+      SPORTS_CONTRACTS_PER_TRADE: "1"
+      # Sports to trade
+      SPORTS_SPORT_KEYS: "basketball_nba,basketball_ncaab,americanfootball_nfl"
+      # Database
+      SPORTS_DB_PATH: sports_trades.db
+      # Discord notifications
+      DISCORD_SPORTS_WEBHOOK: ${{ secrets.DISCORD_SPORTS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
+      # Dry run (default true for safety)
+      SPORTS_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests cryptography
+
+      - name: Restore Odds API cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sports_odds_cache
+          key: odds-sports-cache-${{ hashFiles('oddsapi_lines.py') }}
+          restore-keys: |
+            odds-sports-cache-
+
+      - name: Check credentials
+        run: |
+          if [ -z "$KALSHI_API_KEY_ID" ] || [ -z "$KALSHI_PRIVATE_KEY" ]; then
+            echo "ERROR: Kalshi credentials not configured"
+            echo "Please set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY secrets"
+            exit 1
+          fi
+          if [ -z "$THE_ODDS_API" ]; then
+            echo "ERROR: THE_ODDS_API key not configured"
+            exit 1
+          fi
+          echo "Credentials OK"
+
+      - name: Download latest database artifact
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          workflow: sports_auto_trade.yml
+          name: sports-trades-db-latest
+          path: .
+          search_artifacts: true
+          if_no_artifact_found: ignore
+
+      - name: Pull latest database from git
+        run: |
+          git pull --rebase origin main || true
+          if [ -f "$SPORTS_DB_PATH" ]; then
+            echo "Database found: $(ls -lh $SPORTS_DB_PATH)"
+            echo "Filled trades:"
+            sqlite3 "$SPORTS_DB_PATH" "SELECT trade_date, market_type, team_or_side, status FROM trades WHERE status='filled' ORDER BY created_at DESC LIMIT 5;" || true
+            echo "Trades today:"
+            TODAY=$(TZ='America/New_York' date '+%Y-%m-%d')
+            sqlite3 "$SPORTS_DB_PATH" "SELECT COUNT(*) FROM trades WHERE trade_date='$TODAY' AND status='filled';" || true
+          else
+            echo "No existing database, will create new one"
+          fi
+
+      - name: Run auto trader
+        run: |
+          echo "Running sports auto trader..."
+          echo "Dry run: $SPORTS_DRY_RUN"
+          python sports_auto_trade.py
+
+      - name: Upload trades DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: sports-trades-db-latest
+          path: ${{ env.SPORTS_DB_PATH }}
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Commit DB changes
+        if: success()
+        run: |
+          if [ -f "$SPORTS_DB_PATH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$SPORTS_DB_PATH" || true
+            if git diff --staged --quiet; then
+              echo "No DB changes to commit"
+            else
+              git commit -m "sports: update trades database"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+              done
+            fi
+          fi

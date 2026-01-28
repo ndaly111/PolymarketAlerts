@@ -10,6 +10,7 @@ on:
       - "*.db"
       - "weather_trades.db"
       - "props_trades.db"
+      - "sports_trades.db"
 
 permissions:
   contents: write
