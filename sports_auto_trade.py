@@ -613,11 +613,44 @@ def is_scheduled_refresh_time() -> bool:
     return now_et.hour in SCHEDULED_REFRESH_HOURS and now_et.minute <= 30
 
 
+def fetch_odds_events_espn(sport_keys: List[str]) -> List[Dict[str, Any]]:
+    """
+    Fetch events from ESPN's free API (returns DraftKings lines).
+
+    This is the preferred source - FREE, no API key, and reliably works.
+    """
+    from espn_lines import fetch_espn_odds
+
+    cache_key = "sports_lines_espn"
+
+    # Check cache first (unless at scheduled refresh time)
+    if not is_scheduled_refresh_time():
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache] ESPN: {len(cached)} events from cache")
+            return cached
+
+    try:
+        events = fetch_espn_odds(sport_keys)
+        if events:
+            _write_cache(cache_key, events)
+            print(f"  [ESPN] Fetched {len(events)} events (FREE - no API credits used)")
+        return events or []
+    except Exception as e:
+        print(f"  [error] ESPN fetch failed: {e}")
+        # Try cache as fallback
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache fallback] {len(cached)} events")
+            return cached
+        return []
+
+
 def fetch_odds_events_draftkings(sport_keys: List[str]) -> List[Dict[str, Any]]:
     """
     Fetch events from DraftKings API (FREE, no API key needed).
 
-    This is the preferred source for sports lines to conserve Odds API credits.
+    Note: DraftKings direct API is often blocked. Use ESPN instead.
     """
     from draftkings_lines import fetch_all_draftkings_events
 
@@ -1067,23 +1100,23 @@ def main() -> int:
         return 0
 
     # Two-stage approach to conserve Odds API credits:
-    # Stage 1: Use DraftKings (FREE) for initial screening
+    # Stage 1: Use ESPN (FREE) for initial screening - returns DraftKings lines
     # Stage 2: Only verify with Odds API for markets with potential edge
 
-    print("\n--- Stage 1: DraftKings Screening (FREE) ---")
-    dk_events = fetch_odds_events_draftkings(active_sports)
-    print(f"  Found {len(dk_events)} DraftKings events")
+    print("\n--- Stage 1: ESPN Screening (FREE) ---")
+    espn_events = fetch_odds_events_espn(active_sports)
+    print(f"  Found {len(espn_events)} ESPN events")
 
-    # Screen for potential edges using DraftKings
+    # Screen for potential edges using ESPN (single book)
     potential_edges: List[Dict[str, Any]] = []
-    if dk_events:
+    if espn_events:
         for market in kalshi_markets:
-            opp = calculate_edge_for_market(market, dk_events)
+            opp = calculate_edge_for_market(market, espn_events)
             if opp and opp["edge"] >= MIN_EDGE * 0.5:  # 2.5%+ potential = worth verifying
                 potential_edges.append(opp)
         print(f"  Found {len(potential_edges)} markets with potential edge (>= {MIN_EDGE*0.5:.1%})")
     else:
-        print("  DraftKings unavailable, will check all Kalshi markets with Odds API")
+        print("  ESPN unavailable, will check all Kalshi markets with Odds API")
         potential_edges = [{"ticker": m["ticker"], "event_title": m.get("event_title", "")} for m in kalshi_markets]
 
     # Stage 2: Verify with Odds API only for markets with potential edge
