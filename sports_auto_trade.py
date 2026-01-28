@@ -475,24 +475,6 @@ def already_traded_today(db_path: Path, ticker: str) -> bool:
     return row is not None
 
 
-def already_traded_team_today(db_path: Path, team_abbrev: str) -> bool:
-    """Check if we already bet on this team today (any game).
-
-    Prevents betting on the same team multiple times in a day.
-    """
-    today = datetime.now(ET).strftime("%Y-%m-%d")
-    conn = sqlite3.connect(str(db_path))
-    cur = conn.cursor()
-    # Check if ticker ends with the team abbreviation (e.g., -TB, -NYI, -NYR)
-    cur.execute(
-        "SELECT 1 FROM trades WHERE trade_date = ? AND ticker LIKE ? AND status IN ('filled', 'FILLED')",
-        (today, f"%-{team_abbrev}")
-    )
-    row = cur.fetchone()
-    conn.close()
-    return row is not None
-
-
 # --- Caching for Odds API ---
 
 def _get_cache_path(cache_key: str) -> Path:
@@ -778,13 +760,6 @@ def try_execute_trade(
     # Check if already traded this ticker today
     if already_traded_today(db_path, ticker):
         print(f"    [skip] Already traded today: {ticker}")
-        return "skip"
-
-    # Check if already bet on this team today (any game)
-    # Extract team abbreviation from ticker (e.g., "KXNHLGAME-26JAN29WPGTB-TB" -> "TB")
-    team_abbrev = ticker.split("-")[-1] if "-" in ticker else ""
-    if team_abbrev and already_traded_team_today(db_path, team_abbrev):
-        print(f"    [skip] Already bet on team {team_abbrev} today")
         return "skip"
 
     print(f"    Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
