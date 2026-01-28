@@ -576,11 +576,31 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
             ticker = market.get("ticker", "")
             title = market.get("title", "").upper()
 
-            # Check if it's a game line market (not props)
+            # Check if it's a game line market (not props, not futures)
             is_game_line = any(p in ticker for p in series_tickers)
             is_prop = "PROP" in title or "PLAYER" in title or "AST" in ticker or "REB" in ticker or "PTS" in ticker
 
-            if is_game_line and not is_prop:
+            # Exclude futures/championship markets
+            is_futures = (
+                "FINALS" in title or
+                "CHAMPIONSHIP" in title or
+                "SUPER BOWL" in title or
+                "WORLD SERIES" in title or
+                "STANLEY CUP" in title or
+                "WINNER" in title or
+                ("WIN THE" in title and "202" in title)  # "Will X win the 2026..."
+            )
+
+            # Must have "at" or "vs" or specific game date format to be a game line
+            is_actual_game = (
+                " AT " in title or
+                " VS " in title or
+                " V " in title or
+                "26JAN" in ticker or "26FEB" in ticker or "26MAR" in ticker or  # Date formats
+                "27JAN" in ticker or "27FEB" in ticker or "27MAR" in ticker
+            )
+
+            if is_game_line and not is_prop and not is_futures and is_actual_game:
                 # Determine line type
                 if "SPREAD" in title or "SPREAD" in ticker:
                     line_type = "spread"
@@ -1245,12 +1265,12 @@ def main() -> int:
 
     print(f"  Found {len(odds_events)} sportsbook events for verification")
 
-    if not odds_events and not dk_events:
+    if not odds_events and not espn_events:
         print("No sportsbook odds available. Exiting.")
         return 0
 
-    # Use Odds API if available (multiple books), otherwise fall back to DraftKings
-    final_odds = odds_events if odds_events else dk_events
+    # Use Odds API if available (multiple books), otherwise fall back to ESPN
+    final_odds = odds_events if odds_events else espn_events
 
     # Match and find opportunities
     print("\n--- Matching and Edge Calculation ---")
