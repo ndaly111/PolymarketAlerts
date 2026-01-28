@@ -22,8 +22,8 @@ CACHE_DIR = Path(os.getenv("ODDS_CACHE_DIR", "/tmp/odds_api_cache"))
 CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "14400"))  # 4 hours default (refresh at scheduled times only)
 
 # Scheduled refresh times (EST hours) - only fetch fresh odds at these times
-# 6am, 8am, 12pm, 4pm, 6pm EST
-SCHEDULED_REFRESH_HOURS_EST = [6, 8, 12, 16, 18]
+# Hourly 4am-8pm EST
+SCHEDULED_REFRESH_HOURS_EST = list(range(4, 21))  # 4, 5, 6, ... 20
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
 
