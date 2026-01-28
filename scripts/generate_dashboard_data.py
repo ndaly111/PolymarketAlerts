@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PROPS_DB = ROOT / "props_trades.db"
 WEATHER_DB = ROOT / "weather_trades.db"
 SPORTS_DB = ROOT / "sports_trades.db"
+WEATHER_ACCURACY_DB = ROOT / "weather" / "data" / "weather_forecast_accuracy.db"
 OUTPUT_DIR = ROOT / "docs" / "data"
 
 
@@ -398,6 +399,97 @@ def get_sports_stats(db_path: Path) -> dict:
     }
 
 
+def get_model_accuracy(db_path: Path) -> dict:
+    """Get weather model accuracy comparison data."""
+    if not db_path.exists():
+        return {"models": [], "by_city": {}, "recent_forecasts": []}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Get accuracy by model source
+    cur.execute("""
+        SELECT
+            fs.source,
+            COUNT(DISTINCT fs.target_date_local) as days,
+            COUNT(*) as total_forecasts,
+            ROUND(AVG(fs.forecast_high_f - oc.tmax_f), 2) as bias,
+            ROUND(AVG(ABS(fs.forecast_high_f - oc.tmax_f)), 2) as mae
+        FROM forecast_snapshots fs
+        INNER JOIN observed_cli oc
+            ON fs.city_key = oc.city_key
+            AND fs.target_date_local = oc.date_local
+        WHERE oc.tmax_f IS NOT NULL
+        GROUP BY fs.source
+        HAVING days >= 3
+        ORDER BY mae ASC
+    """)
+    models = []
+    for row in cur.fetchall():
+        models.append({
+            "source": row["source"],
+            "days": row["days"],
+            "total_forecasts": row["total_forecasts"],
+            "bias": row["bias"],
+            "mae": row["mae"],
+        })
+
+    # Get accuracy by model and city
+    cur.execute("""
+        SELECT
+            fs.source,
+            fs.city_key,
+            COUNT(*) as count,
+            ROUND(AVG(fs.forecast_high_f - oc.tmax_f), 2) as bias,
+            ROUND(AVG(ABS(fs.forecast_high_f - oc.tmax_f)), 2) as mae
+        FROM forecast_snapshots fs
+        INNER JOIN observed_cli oc
+            ON fs.city_key = oc.city_key
+            AND fs.target_date_local = oc.date_local
+        WHERE oc.tmax_f IS NOT NULL
+        GROUP BY fs.source, fs.city_key
+        ORDER BY fs.source, mae ASC
+    """)
+    by_city = {}
+    for row in cur.fetchall():
+        source = row["source"]
+        if source not in by_city:
+            by_city[source] = {}
+        by_city[source][row["city_key"]] = {
+            "count": row["count"],
+            "bias": row["bias"],
+            "mae": row["mae"],
+        }
+
+    # Get recent forecasts vs observed (last 7 days)
+    cur.execute("""
+        SELECT
+            fs.target_date_local as date,
+            fs.city_key,
+            fs.source,
+            fs.forecast_high_f as forecast,
+            oc.tmax_f as observed,
+            (fs.forecast_high_f - oc.tmax_f) as error
+        FROM forecast_snapshots fs
+        INNER JOIN observed_cli oc
+            ON fs.city_key = oc.city_key
+            AND fs.target_date_local = oc.date_local
+        WHERE oc.tmax_f IS NOT NULL
+        ORDER BY fs.target_date_local DESC, fs.city_key, fs.source
+        LIMIT 200
+    """)
+    recent_forecasts = [dict(row) for row in cur.fetchall()]
+
+    conn.close()
+
+    return {
+        "models": models,
+        "by_city": by_city,
+        "recent_forecasts": recent_forecasts,
+    }
+
+
 def update_dashboard(quiet: bool = False) -> None:
     """
     Regenerate all dashboard JSON files.
@@ -414,6 +506,9 @@ def update_dashboard(quiet: bool = False) -> None:
 
     # Generate sports data
     sports_stats = get_sports_stats(SPORTS_DB)
+
+    # Generate model accuracy data
+    model_accuracy = get_model_accuracy(WEATHER_ACCURACY_DB)
 
     # Combined summary
     summary = {
@@ -443,12 +538,16 @@ def update_dashboard(quiet: bool = False) -> None:
     (OUTPUT_DIR / "weather.json").write_text(json.dumps(weather_stats, indent=2))
     (OUTPUT_DIR / "sports.json").write_text(json.dumps(sports_stats, indent=2))
     (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2))
+    (OUTPUT_DIR / "model_accuracy.json").write_text(json.dumps(model_accuracy, indent=2))
 
     if not quiet:
         print(f"Dashboard data updated at {OUTPUT_DIR}")
         print(f"  Props: {props_stats['total_trades']} trades, {props_stats['wins']}W-{props_stats['losses']}L")
         print(f"  Weather: {weather_stats['total_trades']} trades, {weather_stats['wins']}W-{weather_stats['losses']}L")
         print(f"  Sports: {sports_stats['total_trades']} trades, {sports_stats['wins']}W-{sports_stats['losses']}L")
+        if model_accuracy["models"]:
+            best = model_accuracy["models"][0]
+            print(f"  Model Accuracy: {len(model_accuracy['models'])} models tracked, best={best['source']} (MAE: {best['mae']}°F)")
 
 
 def main():

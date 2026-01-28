@@ -47,7 +47,9 @@ jobs:
       WEATHER_CONTRACTS_PER_TRADE: "1"
       WEATHER_AUTOTRADE_ENABLED: "1"
       # Forecast/model config
-      WEATHER_FORECAST_SOURCE: nws_hourly_max
+      # Use Open-Meteo HRRR (best for US short-term, 3km resolution)
+      WEATHER_FORECAST_SOURCE: open_meteo
+      OPEN_METEO_MODEL: hrrr
       WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive
       WEATHER_ERROR_MODEL_HOUR: "12"
       WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"

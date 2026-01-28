@@ -209,6 +209,7 @@
             <div class="tab active" data-tab="weather">Weather</div>
             <div class="tab" data-tab="props">Props</div>
             <div class="tab" data-tab="sports">Sports</div>
+            <div class="tab" data-tab="models">Forecast Models</div>
         </div>
 
         <!-- Weather Tab -->
@@ -615,6 +616,80 @@
                 </div>
             </div>
         </div>
+
+        <!-- Models Tab -->
+        <div id="models-tab" class="tab-content">
+            <div class="grid">
+                <div class="card">
+                    <h2>Best Performing Model</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-value" id="models-best-name">-</div>
+                            <div class="stat-label">Model Name</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="models-best-mae">-</div>
+                            <div class="stat-label">MAE (°F)</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="models-best-bias">-</div>
+                            <div class="stat-label">Bias (°F)</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="models-days-tracked">-</div>
+                            <div class="stat-label">Days Tracked</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Model Comparison</h2>
+                    <p style="color: #71767b; font-size: 0.9rem; margin-bottom: 15px;">
+                        Lower MAE = More Accurate | Positive Bias = Forecasts Too Hot
+                    </p>
+                    <div class="chart-container">
+                        <canvas id="models-mae-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>All Models Accuracy</h2>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Model</th>
+                                <th>Days</th>
+                                <th>Forecasts</th>
+                                <th>MAE (°F)</th>
+                                <th>Bias (°F)</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="models-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Recent Forecasts vs Observed</h2>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>City</th>
+                                <th>Model</th>
+                                <th>Forecast</th>
+                                <th>Observed</th>
+                                <th>Error</th>
+                            </tr>
+                        </thead>
+                        <tbody id="models-recent-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -643,21 +718,24 @@
         // Load and render data
         async function loadData() {
             try {
-                const [summaryRes, weatherRes, propsRes, sportsRes] = await Promise.all([
+                const [summaryRes, weatherRes, propsRes, sportsRes, modelsRes] = await Promise.all([
                     fetch('data/summary.json'),
                     fetch('data/weather.json'),
                     fetch('data/props.json'),
                     fetch('data/sports.json'),
+                    fetch('data/model_accuracy.json'),
                 ]);
 
                 const summary = await summaryRes.json();
                 const weather = await weatherRes.json();
                 const props = await propsRes.json();
                 const sports = await sportsRes.json();
+                const models = await modelsRes.json();
 
                 renderWeather(weather);
                 renderProps(props);
                 renderSports(sports);
+                renderModels(models);
 
                 document.getElementById('lastUpdated').textContent =
                     `Last updated: ${new Date(summary.generated_at).toLocaleString()}`;
@@ -1245,6 +1323,90 @@
                     }
                 });
             }
+        }
+
+        function renderModels(data) {
+            const models = data.models || [];
+
+            // Best model stats
+            if (models.length > 0) {
+                const best = models[0];
+                document.getElementById('models-best-name').textContent = best.source.replace('open_meteo_', '').replace('_', ' ').toUpperCase();
+                document.getElementById('models-best-mae').textContent = `${best.mae}°`;
+                document.getElementById('models-best-bias').textContent = `${best.bias > 0 ? '+' : ''}${best.bias}°`;
+                document.getElementById('models-days-tracked').textContent = best.days;
+            }
+
+            // MAE Chart
+            if (models.length > 0) {
+                new Chart(document.getElementById('models-mae-chart'), {
+                    type: 'bar',
+                    data: {
+                        labels: models.map(m => m.source.replace('open_meteo_', '').replace('_', ' ').toUpperCase()),
+                        datasets: [
+                            {
+                                label: 'MAE (°F)',
+                                data: models.map(m => m.mae),
+                                backgroundColor: '#1d9bf0',
+                                borderRadius: 4
+                            },
+                            {
+                                label: 'Bias (°F)',
+                                data: models.map(m => m.bias),
+                                backgroundColor: models.map(m => m.bias >= 0 ? '#ffd400' : '#00ba7c'),
+                                borderRadius: 4
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: {
+                                title: { display: true, text: 'Error (°F)' },
+                                beginAtZero: true
+                            }
+                        },
+                        plugins: { legend: { display: true } }
+                    }
+                });
+            }
+
+            // Models table
+            const modelsHtml = models.map((m, i) => {
+                const statusBadge = i === 0
+                    ? '<span class="badge badge-win">Best</span>'
+                    : m.days < 30
+                        ? '<span class="badge badge-pending">Tracking</span>'
+                        : '';
+                const name = m.source.replace('open_meteo_', '').replace('_', ' ').toUpperCase();
+                const biasClass = Math.abs(m.bias) > 2 ? 'negative' : '';
+                return `<tr>
+                    <td>${name}</td>
+                    <td>${m.days}</td>
+                    <td>${m.total_forecasts}</td>
+                    <td>${m.mae}°F</td>
+                    <td class="${biasClass}">${m.bias > 0 ? '+' : ''}${m.bias}°F</td>
+                    <td>${statusBadge}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('models-table').innerHTML = modelsHtml || '<tr><td colspan="6">No data yet - tracking will begin after first forecast run</td></tr>';
+
+            // Recent forecasts table
+            const recent = (data.recent_forecasts || []).slice(0, 50);
+            const recentHtml = recent.map(f => {
+                const errorClass = Math.abs(f.error) <= 2 ? 'positive' : Math.abs(f.error) <= 4 ? '' : 'negative';
+                const modelName = f.source.replace('open_meteo_', '').replace('_', ' ').toUpperCase();
+                return `<tr>
+                    <td>${f.date}</td>
+                    <td>${f.city_key.replace('HIGH', '')}</td>
+                    <td>${modelName}</td>
+                    <td>${f.forecast}°F</td>
+                    <td>${f.observed}°F</td>
+                    <td class="${errorClass}">${f.error > 0 ? '+' : ''}${f.error}°F</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('models-recent-table').innerHTML = recentHtml || '<tr><td colspan="6">No recent forecasts with observed data</td></tr>';
         }
 
         loadData();

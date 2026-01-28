@@ -1,0 +1,58 @@
+name: Weather Multi-Model Tracking
+
+on:
+  schedule:
+    # Run at 4am ET (9am UTC in winter, 8am UTC in summer)
+    # Using 9am UTC to cover EST
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      NWS_USER_AGENT: "weather-model-tracker/1.0 (github.com/ndaly111/PolymarketAlerts)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests pyyaml
+
+      - name: Pull latest
+        run: git pull --rebase origin main || true
+
+      - name: Collect multi-model forecasts
+        run: |
+          echo "Collecting forecasts from HRRR, ECMWF, GFS, and NWS..."
+          python -m weather.scripts.collect_multi_model_forecasts
+
+      - name: Commit database changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add weather/data/*.db || true
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "weather: collect multi-model forecasts $(date +%Y-%m-%d)"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 2
+            done
+          fi
