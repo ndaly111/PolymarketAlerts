@@ -591,16 +591,7 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
                 ("WIN THE" in title and "202" in title)  # "Will X win the 2026..."
             )
 
-            # Must have "at" or "vs" or specific game date format to be a game line
-            is_actual_game = (
-                " AT " in title or
-                " VS " in title or
-                " V " in title or
-                "26JAN" in ticker or "26FEB" in ticker or "26MAR" in ticker or  # Date formats
-                "27JAN" in ticker or "27FEB" in ticker or "27MAR" in ticker
-            )
-
-            if is_game_line and not is_prop and not is_futures and is_actual_game:
+            if is_game_line and not is_prop and not is_futures:
                 # Determine line type
                 if "SPREAD" in title or "SPREAD" in ticker:
                     line_type = "spread"
