@@ -472,9 +472,14 @@ def main() -> int:
         print("No Kalshi sports markets available. Exiting.")
         return 0
 
-    # Use DraftKings (FREE) instead of Odds API to conserve credits
-    print("Fetching sportsbook odds from DraftKings (FREE)...")
-    odds_events = fetch_odds_events_draftkings(SPORT_KEYS)
+    # Fetch odds - only at scheduled refresh times to conserve API credits
+    # At ~54 credits/day (6 refreshes × 9 sports), well under 650 limit
+    print("Fetching sportsbook odds...")
+    if is_scheduled_refresh_time():
+        print("  [scheduled refresh] Fetching fresh data from Odds API")
+    else:
+        print("  [off-schedule] Using cached data only (conserving API credits)")
+    odds_events = fetch_odds_events_oddsapi(SPORT_KEYS)
     print(f"  Found {len(odds_events)} sportsbook events")
 
     # TODO: Match Kalshi markets to Odds API events and calculate edges
