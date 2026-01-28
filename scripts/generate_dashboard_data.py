@@ -80,13 +80,14 @@ def get_weather_stats(db_path: Path) -> dict:
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # Get all trades (including skipped for visibility)
+    # Get actual trades (placed/filled only)
     cur.execute("""
         SELECT
             trade_date, city_key, market_ticker, event_display, side,
             quantity, limit_price_cents, fair_q, ev, forecast_high_f,
             order_id, status, fill_price_cents, settled, won, payout_cents
         FROM weather_trades
+        WHERE status IN ('filled', 'FILLED', 'PLACED')
         ORDER BY trade_date DESC, created_at DESC
     """)
     trades = [dict(row) for row in cur.fetchall()]
