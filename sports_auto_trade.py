@@ -577,7 +577,7 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
             title = market.get("title", "").upper()
 
             # Check if it's a game line market (not props)
-            is_game_line = any(p in ticker for p in series_patterns)
+            is_game_line = any(p in ticker for p in series_tickers)
             is_prop = "PROP" in title or "PLAYER" in title or "AST" in ticker or "REB" in ticker or "PTS" in ticker
 
             if is_game_line and not is_prop:
