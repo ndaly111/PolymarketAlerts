@@ -35,6 +35,7 @@ import yaml
 
 from weather.lib import db as db_lib
 from weather.lib import nws as nws_lib
+from weather.lib import open_meteo as om_lib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -162,9 +163,12 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    # Default to open_meteo for better accuracy, fall back to nws_hourly_max
     forecast_source = (
-        args.source.strip() or os.getenv("FORECAST_SOURCE", "nws_hourly_max").strip() or "nws_hourly_max"
+        args.source.strip() or os.getenv("FORECAST_SOURCE", "open_meteo").strip() or "open_meteo"
     )
+    # Model for Open-Meteo: best_match (auto), hrrr (best 0-48h US), gfs, ecmwf
+    open_meteo_model = os.getenv("OPEN_METEO_MODEL", "best_match").strip()
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     minute_max = int(os.getenv("WEATHER_SNAPSHOT_MINUTE_MAX", "25"))
     late_window_hours = int(os.getenv("WEATHER_SNAPSHOT_LATE_WINDOW_HOURS", "0"))
@@ -172,13 +176,20 @@ def main() -> int:
     user_agent = os.getenv("NWS_USER_AGENT", "").strip()
     if not user_agent:
         user_agent = "weather-edge-bot/0.1 (contact: you@example.com)"
-        print("[warn] NWS_USER_AGENT not set; using placeholder.", file=sys.stderr)
+        if forecast_source.startswith("nws"):
+            print("[warn] NWS_USER_AGENT not set; using placeholder.", file=sys.stderr)
 
     cities = load_cities(Path(args.config))
     db_path = Path(args.db)
     db_lib.ensure_schema(db_path)
 
-    s = nws_lib.make_session(user_agent=user_agent)
+    # Create appropriate session based on forecast source
+    if forecast_source.startswith("open_meteo"):
+        s = om_lib.make_session()
+        print(f"[info] Using Open-Meteo forecast source (model={open_meteo_model})")
+    else:
+        s = nws_lib.make_session(user_agent=user_agent)
+        print(f"[info] Using NWS forecast source")
     fetched_at_utc = _now_utc().isoformat()
 
     wrote = 0
@@ -225,28 +236,51 @@ def main() -> int:
                     )
                     continue
 
-            endpoints = nws_lib.get_points_endpoints(s, c.lat, c.lon)
-            # Use city TZ from config for labeling; NWS also returns a tz we could compare
-            if endpoints.time_zone and endpoints.time_zone != c.tz:
-                qc.append(f"TZ_MISMATCH_NWS:{endpoints.time_zone}")
+            # Fetch forecast based on source
+            if forecast_source.startswith("open_meteo"):
+                # Use Open-Meteo API
+                forecast = om_lib.get_daily_high_forecast(
+                    s, c.lat, c.lon, target_date_local, c.tz, open_meteo_model
+                )
+                if forecast is None:
+                    raise RuntimeError(f"Open-Meteo returned no forecast for {target_date_local}")
 
-            hourly = nws_lib.fetch_json(s, endpoints.forecast_hourly_url)
-            fcst_high, qc2 = compute_hourly_max_for_local_date(hourly, c.tz, target_date_local)
-            qc.extend(qc2)
-            if fcst_high is None:
-                raise RuntimeError(f"Could not compute hourly max for {target_date_local}")
+                fcst_high = forecast.high_f
+                raw_trimmed = {
+                    "target_date_local": target_date_local,
+                    "city_key": c.key,
+                    "model": forecast.model,
+                    "source": "open_meteo",
+                }
+                points_url = f"open_meteo:{c.lat},{c.lon}"
+                forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={c.lat}&longitude={c.lon}"
 
-            # Store only a trimmed payload to keep DB smaller
-            raw_trimmed = {
-                "target_date_local": target_date_local,
-                "city_key": c.key,
-                "points": endpoints.points_url,
-                "forecastHourly": endpoints.forecast_hourly_url,
-                "properties": {
-                    "generatedAt": (hourly.get("properties") or {}).get("generatedAt"),
-                    "updateTime": (hourly.get("properties") or {}).get("updateTime"),
-                },
-            }
+            else:
+                # Use NWS API
+                endpoints = nws_lib.get_points_endpoints(s, c.lat, c.lon)
+                # Use city TZ from config for labeling; NWS also returns a tz we could compare
+                if endpoints.time_zone and endpoints.time_zone != c.tz:
+                    qc.append(f"TZ_MISMATCH_NWS:{endpoints.time_zone}")
+
+                hourly = nws_lib.fetch_json(s, endpoints.forecast_hourly_url)
+                fcst_high, qc2 = compute_hourly_max_for_local_date(hourly, c.tz, target_date_local)
+                qc.extend(qc2)
+                if fcst_high is None:
+                    raise RuntimeError(f"Could not compute hourly max for {target_date_local}")
+
+                # Store only a trimmed payload to keep DB smaller
+                raw_trimmed = {
+                    "target_date_local": target_date_local,
+                    "city_key": c.key,
+                    "points": endpoints.points_url,
+                    "forecastHourly": endpoints.forecast_hourly_url,
+                    "properties": {
+                        "generatedAt": (hourly.get("properties") or {}).get("generatedAt"),
+                        "updateTime": (hourly.get("properties") or {}).get("updateTime"),
+                    },
+                }
+                points_url = endpoints.points_url
+                forecast_url = endpoints.forecast_hourly_url
 
             db_lib.upsert_forecast_snapshot(
                 db_path,
@@ -257,17 +291,18 @@ def main() -> int:
                 snapshot_tz=c.tz,
                 forecast_high_f=int(fcst_high),
                 source=forecast_source,
-                points_url=endpoints.points_url,
-                forecast_url=endpoints.forecast_hourly_url,
+                points_url=points_url,
+                forecast_url=forecast_url,
                 qc_flags=qc,
                 raw=raw_trimmed,
             )
             wrote += 1
             print(
                 f"[ok] {c.key} {c.label}: {target_date_local} "
-                f"forecast_high={fcst_high}F (hour={snapshot_hour_for_city})"
+                f"forecast_high={fcst_high}F (hour={snapshot_hour_for_city}, source={forecast_source})"
             )
-            nws_lib.polite_sleep()
+            if forecast_source.startswith("nws"):
+                nws_lib.polite_sleep()
         except Exception as e:
             print(f"[err] {c.key} {c.label}: {e}", file=sys.stderr)
 

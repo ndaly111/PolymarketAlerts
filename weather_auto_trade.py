@@ -935,7 +935,8 @@ def main() -> int:
     # Get target date (today in ET)
     now_et = datetime.now(ZoneInfo("America/New_York"))
     target_date = now_et.strftime("%Y-%m-%d")
-    forecast_source = os.getenv("WEATHER_FORECAST_SOURCE", "nws_hourly_max")
+    # Default to open_meteo for better accuracy (can override with WEATHER_FORECAST_SOURCE)
+    forecast_source = os.getenv("WEATHER_FORECAST_SOURCE", "open_meteo")
 
     print(f"\nTarget date: {target_date}")
     print(f"Forecast source: {forecast_source}")
