@@ -47,8 +47,12 @@ DRY_RUN = os.getenv("SPORTS_DRY_RUN", "0") == "1"
 ET = ZoneInfo("America/New_York")
 
 # Cache settings for Odds API efficiency
+# Only refresh at scheduled times to conserve API credits (650/day limit)
 CACHE_DIR = Path(os.getenv("SPORTS_CACHE_DIR", "/tmp/sports_odds_cache"))
-CACHE_TTL_SECONDS = int(os.getenv("SPORTS_CACHE_TTL", "1800"))  # 30 min default
+CACHE_TTL_SECONDS = int(os.getenv("SPORTS_CACHE_TTL", "14400"))  # 4 hours - but we use scheduled refresh
+
+# Scheduled refresh times (ET) - only fetch fresh data at these times
+SCHEDULED_REFRESH_HOURS = [6, 8, 12, 16, 18, 20]  # 6am, 8am, 12pm, 4pm, 6pm, 8pm ET
 
 # Sports to include
 SPORT_KEYS = os.getenv("SPORTS_SPORT_KEYS", "basketball_nba,basketball_ncaab,americanfootball_nfl").split(",")
@@ -351,32 +355,75 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
     return markets
 
 
-def fetch_odds_events(sport_keys: List[str], use_cache: bool = True) -> List[Dict[str, Any]]:
-    """Fetch events from Odds API with caching."""
+def is_scheduled_refresh_time() -> bool:
+    """Check if current time is a scheduled refresh time (within 30 min window)."""
+    now_et = datetime.now(ET)
+    return now_et.hour in SCHEDULED_REFRESH_HOURS and now_et.minute <= 30
+
+
+def fetch_odds_events_draftkings(sport_keys: List[str]) -> List[Dict[str, Any]]:
+    """
+    Fetch events from DraftKings API (FREE, no API key needed).
+
+    This is the preferred source for sports lines to conserve Odds API credits.
+    """
+    from draftkings_lines import fetch_all_draftkings_events
+
+    cache_key = "sports_lines_draftkings"
+
+    # Check cache first (unless at scheduled refresh time)
+    if not is_scheduled_refresh_time():
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache] DraftKings: {len(cached)} events from cache")
+            return cached
+
+    try:
+        events = fetch_all_draftkings_events(sport_keys)
+        if events:
+            _write_cache(cache_key, events)
+            print(f"  [DraftKings] Fetched {len(events)} events (FREE - no API credits used)")
+        return events or []
+    except Exception as e:
+        print(f"  [error] DraftKings fetch failed: {e}")
+        # Try cache as fallback
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache fallback] {len(cached)} events")
+            return cached
+        return []
+
+
+def fetch_odds_events_oddsapi(sport_keys: List[str]) -> List[Dict[str, Any]]:
+    """
+    Fetch events from Odds API (uses API credits).
+
+    Only use this if DraftKings doesn't have the data you need.
+    """
     from oddsapi_lines import fetch_all_sports_events
 
-    all_events = []
+    cache_key = "sports_lines_oddsapi"
 
-    for sport_key in sport_keys:
-        cache_key = f"sports_lines_{sport_key}"
+    # Check cache first (unless at scheduled refresh time)
+    if not is_scheduled_refresh_time():
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache] Odds API: {len(cached)} events from cache")
+            return cached
 
-        if use_cache:
-            cached = _read_cache(cache_key)
-            if cached:
-                print(f"  [cache] {sport_key}: {len(cached)} events from cache")
-                all_events.extend(cached)
-                continue
-
-        try:
-            events = fetch_all_sports_events([sport_key], markets="h2h,spreads,totals", regions="us")
-            if events:
-                _write_cache(cache_key, events)
-                all_events.extend(events)
-                print(f"  [api] {sport_key}: {len(events)} events fetched")
-        except Exception as e:
-            print(f"  [error] {sport_key}: {e}")
-
-    return all_events
+    try:
+        events = fetch_all_sports_events(sport_keys, markets="h2h,spreads,totals", regions="us")
+        if events:
+            _write_cache(cache_key, events)
+            print(f"  [Odds API] Fetched {len(events)} events (uses API credits)")
+        return events or []
+    except Exception as e:
+        print(f"  [error] Odds API fetch failed: {e}")
+        cached = _read_cache(cache_key)
+        if cached:
+            print(f"  [cache fallback] {len(cached)} events")
+            return cached
+        return []
 
 
 def main() -> int:
@@ -425,8 +472,9 @@ def main() -> int:
         print("No Kalshi sports markets available. Exiting.")
         return 0
 
-    print("Fetching sportsbook odds (cached 30min)...")
-    odds_events = fetch_odds_events(SPORT_KEYS, use_cache=True)
+    # Use DraftKings (FREE) instead of Odds API to conserve credits
+    print("Fetching sportsbook odds from DraftKings (FREE)...")
+    odds_events = fetch_odds_events_draftkings(SPORT_KEYS)
     print(f"  Found {len(odds_events)} sportsbook events")
 
     # TODO: Match Kalshi markets to Odds API events and calculate edges
