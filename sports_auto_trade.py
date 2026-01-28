@@ -572,6 +572,11 @@ def fetch_kalshi_sports_markets(client: KalshiAuthClient) -> List[Dict[str, Any]
             except Exception as e:
                 print(f"    {series}: error - {e}")
 
+        # Debug: show raw market titles
+        print("  Sample market titles from Kalshi:")
+        for m in all_markets[:10]:
+            print(f"    {m.get('ticker', '')[:30]}: {m.get('title', '')[:60]}")
+
         for market in all_markets:
             ticker = market.get("ticker", "")
             title = market.get("title", "").upper()
