@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-01-28T16:46:16.317821Z",
+  "generated_at": "2026-01-28T17:36:52.597275Z",
   "props": {
     "total_trades": 10,
     "avg_edge": 0.1384202262564805,
@@ -13,8 +13,8 @@
     "avg_ev": 0.16099100689520449
   },
   "sports": {
-    "total_trades": 0,
-    "avg_edge": 0,
+    "total_trades": 4,
+    "avg_edge": 0.13550087139903577,
     "record": "0W-0L",
     "roi": 0
   }

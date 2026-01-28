@@ -1,15 +1,135 @@
 {
-  "total_trades": 0,
-  "filled_trades": 0,
-  "total_cost_cents": 0,
-  "avg_edge": 0,
+  "total_trades": 4,
+  "filled_trades": 4,
+  "total_cost_cents": 175,
+  "avg_edge": 0.13550087139903577,
   "wins": 0,
   "losses": 0,
-  "pending": 0,
+  "pending": 4,
   "total_payout_cents": 0,
   "roi": 0,
-  "trades": [],
-  "daily_stats": [],
-  "by_line_type": {},
-  "by_ev_bucket": {}
+  "trades": [
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "KXNHLGAME-26JAN29NYINYR-NYR",
+      "event_title": "New York Rangers at New York Islanders",
+      "line_type": "moneyline",
+      "line_label": "New York Islanders ML",
+      "side": "YES",
+      "quantity": 1,
+      "limit_price_cents": 48,
+      "fair_prob": 0.5427435387673957,
+      "edge": 0.06274353876739569,
+      "books_count": 11,
+      "order_id": "4576a482-892e-43dd-b99e-74c0d9cdd773",
+      "status": "filled",
+      "fill_price_cents": 48,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "KXNHLGAME-26JAN28NYRNYI-NYI",
+      "event_title": "New York Rangers at New York Islanders",
+      "line_type": "moneyline",
+      "line_label": "New York Islanders ML",
+      "side": "NO",
+      "quantity": 1,
+      "limit_price_cents": 46,
+      "fair_prob": 0.5427435387673956,
+      "edge": 0.08274353876739554,
+      "books_count": 11,
+      "order_id": "02c31e92-ee0b-43a7-8c20-465bfff9fa21",
+      "status": "filled",
+      "fill_price_cents": 46,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "KXNHLGAME-26JAN29NSHNJ-NJ",
+      "event_title": "Nashville Predators at New Jersey Devils",
+      "line_type": "moneyline",
+      "line_label": "New Jersey Devils ML",
+      "side": "NO",
+      "quantity": 1,
+      "limit_price_cents": 45,
+      "fair_prob": 0.5634920634920635,
+      "edge": 0.11349206349206348,
+      "books_count": 5,
+      "order_id": "3890c064-a9d9-4eb8-bb8a-d49318711780",
+      "status": "filled",
+      "fill_price_cents": 45,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-01-28",
+      "ticker": "KXNHLGAME-26JAN29WPGTB-TB",
+      "event_title": "Winnipeg Jets at Tampa Bay Lightning",
+      "line_type": "moneyline",
+      "line_label": "Tampa Bay Lightning ML",
+      "side": "NO",
+      "quantity": 1,
+      "limit_price_cents": 36,
+      "fair_prob": 0.6430243445692884,
+      "edge": 0.2830243445692884,
+      "books_count": 5,
+      "order_id": "5b7d3df7-14a8-429d-abfa-010b39142cd6",
+      "status": "filled",
+      "fill_price_cents": 36,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    }
+  ],
+  "daily_stats": [
+    {
+      "date": "2026-01-28",
+      "trades_attempted": 4,
+      "trades_filled": 4
+    }
+  ],
+  "by_line_type": {
+    "moneyline": {
+      "count": 4,
+      "avg_edge": 0.13550087139903577
+    }
+  },
+  "by_ev_bucket": {
+    "10-15%": {
+      "count": 1,
+      "wins": 0,
+      "losses": 0,
+      "pending": 1,
+      "total_cost_cents": 45,
+      "total_payout_cents": 0,
+      "roi": 0
+    },
+    "20%+": {
+      "count": 1,
+      "wins": 0,
+      "losses": 0,
+      "pending": 1,
+      "total_cost_cents": 36,
+      "total_payout_cents": 0,
+      "roi": 0
+    },
+    "5-10%": {
+      "count": 2,
+      "wins": 0,
+      "losses": 0,
+      "pending": 2,
+      "total_cost_cents": 94,
+      "total_payout_cents": 0,
+      "roi": 0
+    }
+  }
 }
