@@ -132,7 +132,8 @@ def get_weather_stats(db_path: Path) -> dict:
             SUM(CASE WHEN settled=1 AND won=0 THEN 1 ELSE 0 END) as losses,
             SUM(CASE WHEN settled=0 THEN 1 ELSE 0 END) as pending,
             SUM(COALESCE(fill_price_cents, limit_price_cents)) as total_cost,
-            SUM(COALESCE(payout_cents, 0)) as total_payout
+            SUM(COALESCE(payout_cents, 0)) as total_payout,
+            SUM(CASE WHEN settled=1 THEN COALESCE(fill_price_cents, limit_price_cents) ELSE 0 END) as settled_cost
         FROM weather_trades
         WHERE status IN ('filled', 'FILLED', 'PLACED')
         GROUP BY ev_bucket
@@ -142,7 +143,9 @@ def get_weather_stats(db_path: Path) -> dict:
         bucket = row["ev_bucket"]
         total_cost = row["total_cost"] or 0
         total_payout = row["total_payout"] or 0
-        roi = ((total_payout - total_cost) / total_cost * 100) if total_cost > 0 else 0
+        settled_cost = row["settled_cost"] or 0
+        # Only calculate ROI on settled trades to avoid showing -100% for pending
+        roi = ((total_payout - settled_cost) / settled_cost * 100) if settled_cost > 0 else 0
         by_ev_bucket[bucket] = {
             "count": row["count"],
             "wins": row["wins"],
@@ -161,8 +164,10 @@ def get_weather_stats(db_path: Path) -> dict:
     wins = sum(1 for t in settled_trades if t["won"])
     losses = len(settled_trades) - wins
     total_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in trades)
+    settled_cost = sum(t["fill_price_cents"] or t["limit_price_cents"] for t in settled_trades)
     total_payout = sum(t["payout_cents"] or 0 for t in settled_trades)
-    roi = ((total_payout - total_cost) / total_cost * 100) if total_cost > 0 else 0
+    # Only calculate ROI on settled trades to avoid showing -100% for pending
+    roi = ((total_payout - settled_cost) / settled_cost * 100) if settled_cost > 0 else 0
     avg_ev = sum(t["ev"] for t in trades) / len(trades) if trades else 0
 
     return {

@@ -6,7 +6,7 @@
   "pending": 29,
   "total_cost_cents": 1084,
   "total_payout_cents": 0,
-  "roi": -100.0,
+  "roi": 0,
   "avg_ev": 0.14936060679058194,
   "trades": [
     {
@@ -590,13 +590,13 @@
     },
     "NOLHIGH": {
       "count": 3,
-      "avg_ev": 0.10062387789085146,
+      "avg_ev": 0.10062387789085148,
       "wins": 0,
       "losses": 0
     },
     "PHLHIGH": {
       "count": 3,
-      "avg_ev": 0.1315473134064424,
+      "avg_ev": 0.13154731340644243,
       "wins": 0,
       "losses": 0
     },
@@ -621,7 +621,7 @@
       "pending": 19,
       "total_cost_cents": 661,
       "total_payout_cents": 0,
-      "roi": -100.0
+      "roi": 0
     },
     "15-20%": {
       "count": 5,
@@ -630,7 +630,7 @@
       "pending": 5,
       "total_cost_cents": 170,
       "total_payout_cents": 0,
-      "roi": -100.0
+      "roi": 0
     },
     "20%+": {
       "count": 5,
@@ -639,7 +639,7 @@
       "pending": 5,
       "total_cost_cents": 253,
       "total_payout_cents": 0,
-      "roi": -100.0
+      "roi": 0
     }
   }
 }
