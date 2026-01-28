@@ -1027,6 +1027,14 @@ def main() -> int:
     print(f"Session complete: {trades_placed} orders placed")
     print("=" * 60)
 
+    # Update dashboard JSON
+    try:
+        from scripts.generate_dashboard_data import update_dashboard
+        update_dashboard(quiet=True)
+        print("Dashboard data updated")
+    except Exception as e:
+        print(f"  [warn] Failed to update dashboard: {e}")
+
     return 0
 
 

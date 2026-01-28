@@ -238,6 +238,14 @@ def main() -> int:
 
         post_discord("\n".join(lines))
 
+    # Update dashboard JSON
+    try:
+        from scripts.generate_dashboard_data import update_dashboard
+        update_dashboard(quiet=True)
+        print("Dashboard data updated")
+    except Exception as e:
+        print(f"  [warn] Failed to update dashboard: {e}")
+
     return 0
 
 

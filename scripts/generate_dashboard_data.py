@@ -245,7 +245,12 @@ def get_weather_stats(db_path: Path) -> dict:
     }
 
 
-def main():
+def update_dashboard(quiet: bool = False) -> None:
+    """
+    Regenerate all dashboard JSON files.
+
+    Call this from trading workflows to keep dashboard data fresh.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Generate props data
@@ -276,9 +281,14 @@ def main():
     (OUTPUT_DIR / "weather.json").write_text(json.dumps(weather_stats, indent=2))
     (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    print(f"Dashboard data generated at {OUTPUT_DIR}")
-    print(f"  Props: {props_stats['total_trades']} trades, {props_stats['wins']}W-{props_stats['losses']}L")
-    print(f"  Weather: {weather_stats['total_trades']} trades, {weather_stats['wins']}W-{weather_stats['losses']}L")
+    if not quiet:
+        print(f"Dashboard data updated at {OUTPUT_DIR}")
+        print(f"  Props: {props_stats['total_trades']} trades, {props_stats['wins']}W-{props_stats['losses']}L")
+        print(f"  Weather: {weather_stats['total_trades']} trades, {weather_stats['wins']}W-{weather_stats['losses']}L")
+
+
+def main():
+    update_dashboard(quiet=False)
 
 
 if __name__ == "__main__":
