@@ -93,13 +93,27 @@ jobs:
           fi
           echo "Credentials OK"
 
+      - name: Download latest database artifact
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          workflow: props_auto_trade.yml
+          name: props-trades-db-latest
+          path: .
+          search_artifacts: true
+          if_no_artifact_found: ignore
+
       - name: Pull latest database from git
         run: |
-          # Ensure we have the latest database from git
+          # Also pull from git as backup
           git pull --rebase origin main || true
           if [ -f "$PROPS_DB_PATH" ]; then
             echo "Database found: $(ls -lh $PROPS_DB_PATH)"
-            sqlite3 "$PROPS_DB_PATH" "SELECT COUNT(*) as trades FROM trades WHERE status='filled';" || true
+            echo "Filled trades:"
+            sqlite3 "$PROPS_DB_PATH" "SELECT trade_date, player_name, status FROM trades WHERE status='filled' ORDER BY created_at DESC LIMIT 5;" || true
+            echo "Trades today:"
+            TODAY=$(TZ='America/New_York' date '+%Y-%m-%d')
+            sqlite3 "$PROPS_DB_PATH" "SELECT COUNT(*) FROM trades WHERE trade_date='$TODAY' AND status='filled';" || true
           else
             echo "No existing database, will create new one"
           fi
@@ -113,9 +127,10 @@ jobs:
       - name: Upload trades DB
         uses: actions/upload-artifact@v4
         with:
-          name: props-trades-db-${{ github.run_id }}
+          name: props-trades-db-latest
           path: ${{ env.PROPS_DB_PATH }}
-          retention-days: 30
+          retention-days: 7
+          overwrite: true
           if-no-files-found: ignore
 
       - name: Commit DB changes
