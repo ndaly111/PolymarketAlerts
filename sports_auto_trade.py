@@ -459,12 +459,15 @@ def log_scanned_opportunity(
 
 
 def already_traded_today(db_path: Path, ticker: str) -> bool:
-    """Check if we already traded this ticker today (ET timezone)."""
+    """Check if we already have a FILLED trade for this ticker today (ET timezone).
+
+    Only checks filled trades - dry_run trades don't count.
+    """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute(
-        "SELECT 1 FROM trades WHERE trade_date = ? AND ticker = ?",
+        "SELECT 1 FROM trades WHERE trade_date = ? AND ticker = ? AND status IN ('filled', 'FILLED')",
         (today, ticker)
     )
     row = cur.fetchone()
