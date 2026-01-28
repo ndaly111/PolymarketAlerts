@@ -854,6 +854,99 @@ def try_execute_trade(
     return "skip"
 
 
+def quick_screen_edge(
+    market: Dict[str, Any],
+    odds_events: List[Dict[str, Any]],
+    min_edge: float = 0.025,
+) -> Optional[Dict[str, Any]]:
+    """
+    Quick screening for potential edges using single-book data (ESPN).
+
+    Uses simpler matching and doesn't require multiple books.
+    Returns opportunity if potential edge >= min_edge.
+    """
+    ticker = market.get("ticker", "")
+    title = market.get("title", "")
+    line_type = market.get("line_type", "")
+    yes_ask = market.get("yes_ask", 100)
+    no_ask = market.get("no_ask", 100)
+
+    # Parse matchup from title
+    matchup = parse_matchup(title)
+    if not matchup:
+        return None
+
+    team_a, team_b = matchup
+
+    # Find matching odds event
+    odds_event = best_event_match(odds_events, team_a, team_b)
+    if not odds_event:
+        return None
+
+    home_team = odds_event.get("home_team", "")
+    away_team = odds_event.get("away_team", "")
+
+    # Get bookmaker data (just need one)
+    bookmakers = odds_event.get("bookmakers", [])
+    if not bookmakers:
+        return None
+
+    bm = bookmakers[0]
+    markets_data = {m.get("key"): m for m in bm.get("markets", [])}
+
+    # For moneyline, get odds from single book
+    if line_type == "moneyline" and "h2h" in markets_data:
+        h2h = markets_data["h2h"]
+        outcomes = {o.get("name"): o.get("price", 0) for o in h2h.get("outcomes", [])}
+
+        # Map our team to event team
+        for team_guess in [team_a, team_b]:
+            mapped_team, _ = map_team_to_event_team(team_guess, odds_event)
+            if not mapped_team or mapped_team not in outcomes:
+                continue
+
+            # Convert American odds to implied probability
+            odds = outcomes[mapped_team]
+            if odds < 0:
+                implied_prob = (-odds) / ((-odds) + 100.0)
+            else:
+                implied_prob = 100.0 / (odds + 100.0)
+
+            # Remove vig (approximate - assume 4% total vig, so fair prob ~= implied + 2%)
+            fair_prob = min(implied_prob + 0.02, 0.98)
+
+            # Check YES side
+            yes_prob = yes_ask / 100.0
+            edge = fair_prob - yes_prob
+
+            if edge >= min_edge:
+                return {
+                    "ticker": ticker,
+                    "event_title": f"{away_team} at {home_team}",
+                    "line_type": line_type,
+                    "line_label": f"{mapped_team} ML",
+                    "side": "YES",
+                    "kalshi_ask": yes_ask,
+                    "fair_prob": fair_prob,
+                    "edge": edge,
+                    "books_count": 1,
+                }
+
+    # For spreads
+    if line_type == "spread" and "spreads" in markets_data:
+        spreads = markets_data["spreads"]
+        # Similar logic but for spreads
+        pass  # TODO: implement spread screening
+
+    # For totals
+    if line_type == "total" and "totals" in markets_data:
+        totals = markets_data["totals"]
+        # Similar logic but for totals
+        pass  # TODO: implement total screening
+
+    return None
+
+
 def calculate_edge_for_market(
     market: Dict[str, Any],
     odds_events: List[Dict[str, Any]],
@@ -1108,11 +1201,12 @@ def main() -> int:
     print(f"  Found {len(espn_events)} ESPN events")
 
     # Screen for potential edges using ESPN (single book)
+    # Use quick_screen_edge which works with single-book data
     potential_edges: List[Dict[str, Any]] = []
     if espn_events:
         for market in kalshi_markets:
-            opp = calculate_edge_for_market(market, espn_events)
-            if opp and opp["edge"] >= MIN_EDGE * 0.5:  # 2.5%+ potential = worth verifying
+            opp = quick_screen_edge(market, espn_events, min_edge=MIN_EDGE * 0.5)
+            if opp:
                 potential_edges.append(opp)
         print(f"  Found {len(potential_edges)} markets with potential edge (>= {MIN_EDGE*0.5:.1%})")
     else:
