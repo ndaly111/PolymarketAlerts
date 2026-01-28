@@ -1,0 +1,15 @@
+{
+  "total_trades": 0,
+  "trades": [],
+  "by_line_type": {},
+  "by_ev_bucket": {},
+  "wins": 0,
+  "losses": 0,
+  "pending": 0,
+  "roi": 0,
+  "avg_edge": 0,
+  "total_cost_cents": 0,
+  "total_payout_cents": 0,
+  "filled_trades": 0,
+  "daily_stats": []
+}

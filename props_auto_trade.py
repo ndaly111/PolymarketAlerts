@@ -153,26 +153,50 @@ def ensure_db_schema(db_path: Path) -> None:
 
 
 def get_trades_today(db_path: Path) -> int:
-    """Get number of trades attempted today (ET timezone)."""
+    """Get number of actual filled trades today (ET timezone).
+
+    Only counts filled trades, not dry_run or other statuses.
+    This ensures the daily limit applies to real money only.
+    """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
-    cur.execute("SELECT trades_attempted FROM daily_stats WHERE date = ?", (today,))
+    # Count actual filled trades from trades table, excluding dry_run
+    cur.execute("""
+        SELECT COUNT(*) FROM trades
+        WHERE trade_date = ? AND status IN ('filled', 'FILLED')
+    """, (today,))
     row = cur.fetchone()
     conn.close()
     return row[0] if row else 0
 
 
-def increment_trades_today(db_path: Path) -> None:
-    """Increment trade counter for today (ET timezone)."""
+def increment_trades_today(db_path: Path, filled: bool = False) -> None:
+    """Increment trade counter for today (ET timezone).
+
+    Args:
+        db_path: Path to the database
+        filled: If True, also increment trades_filled
+    """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO daily_stats (date, trades_attempted)
-        VALUES (?, 1)
-        ON CONFLICT(date) DO UPDATE SET trades_attempted = trades_attempted + 1
-    """, (today,))
+
+    if filled:
+        cur.execute("""
+            INSERT INTO daily_stats (date, trades_attempted, trades_filled)
+            VALUES (?, 1, 1)
+            ON CONFLICT(date) DO UPDATE SET
+                trades_attempted = trades_attempted + 1,
+                trades_filled = trades_filled + 1
+        """, (today,))
+    else:
+        cur.execute("""
+            INSERT INTO daily_stats (date, trades_attempted)
+            VALUES (?, 1)
+            ON CONFLICT(date) DO UPDATE SET trades_attempted = trades_attempted + 1
+        """, (today,))
+
     conn.commit()
     conn.close()
 
@@ -444,20 +468,14 @@ def post_discord(message: str) -> None:
 def format_startup_message() -> str:
     """Build the startup status message for Discord."""
     dry_run_env = os.getenv("DRY_RUN", "0")
+    timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+    trades_today = get_trades_today(DB_PATH)
+
     lines = [
-        "Running props auto trader...",
+        f"**Props Auto Trader** | {timestamp}",
+        f"Trades today: {trades_today}/{MAX_TRADES_PER_DAY} (filled)",
+        f"EV: {MIN_INITIAL_EV:.0%}/{MIN_FINAL_EV:.0%} | Books: {MIN_BOOKS}+ | Ask: ≤{MAX_KALSHI_ASK_CENTS}¢",
         f"Dry run: {dry_run_env}",
-        "=" * 60,
-        "PROPS AUTO TRADER",
-        f"Initial EV threshold: {MIN_INITIAL_EV:.0%}",
-        f"Final EV threshold: {MIN_FINAL_EV:.0%}",
-        f"Min books: {MIN_BOOKS}",
-        f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢",
-        f"Min fair prob: {MIN_FAIR_PROB:.1%}",
-        f"Max trades/day: {MAX_TRADES_PER_DAY}",
-        f"Order timeout: {ORDER_TIMEOUT_SECONDS}s",
-        f"Dry run: {DRY_RUN}",
-        "=" * 60,
     ]
     return "\n".join(lines)
 
@@ -467,14 +485,18 @@ def execute_trade(
     db_path: Path,
     opportunity: Dict[str, Any],
     cached_odds: List[Dict[str, Any]],
-) -> bool:
+) -> str:
     """
     Execute the full trade workflow for a single opportunity.
 
     Uses cached_odds for verification (no new Odds API calls).
     Re-fetches Kalshi prices (free).
 
-    Returns True if trade was placed (filled or pending), False otherwise.
+    Returns status string:
+    - "filled": Trade was filled
+    - "dry_run": Trade would have been placed (DRY_RUN mode)
+    - "skip": Trade was skipped (filters, errors, etc.)
+    - "cancelled": Trade was placed but not filled
     """
     ticker = opportunity["kalshi_ticker"]
     player = opportunity["player_name"]
@@ -489,13 +511,13 @@ def execute_trade(
     # Step 2: Check if already traded today
     if already_traded_today(db_path, ticker):
         print(f"  [skip] Already traded {ticker} today")
-        return False
+        return "skip"
 
     # Step 2b: Check if we have existing position
     try:
         if client.has_position(ticker):
             print(f"  [skip] Already have position in {ticker}")
-            return False
+            return "skip"
     except Exception as e:
         print(f"  [warn] Could not check position: {e}")
 
@@ -504,7 +526,7 @@ def execute_trade(
     fresh_kalshi = fetch_fresh_kalshi_price(client, ticker)
     if not fresh_kalshi:
         print(f"  [skip] Could not get fresh Kalshi price")
-        return False
+        return "skip"
 
     # Determine which price to use based on side
     if side == "OVER":
@@ -519,7 +541,7 @@ def execute_trade(
     # Step 5a: Check Kalshi odds filter (better than -200 = ≤67¢)
     if kalshi_ask > MAX_KALSHI_ASK_CENTS:
         print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ (worse than -200)")
-        return False
+        return "skip"
 
     # Step 4a: Quick check with cached odds
     target_line = line - 0.5  # Kalshi "8+" = over 7.5
@@ -529,7 +551,7 @@ def execute_trade(
 
     if not cached_prop:
         print(f"  [skip] Could not find prop in cached odds with {MIN_BOOKS}+ books")
-        return False
+        return "skip"
 
     # Get event info for targeted API call
     event_id = cached_prop.get("event_id", "")
@@ -550,7 +572,7 @@ def execute_trade(
 
     if not fresh_prop:
         print(f"  [skip] Could not verify with fresh odds ({MIN_BOOKS}+ books)")
-        return False
+        return "skip"
 
     books_count = fresh_prop.get("books_used", 0)
     print(f"  Verified with fresh odds from {books_count} books")
@@ -565,7 +587,7 @@ def execute_trade(
     if fair_prob < MIN_FAIR_PROB:
         fair_american = prob_to_american(fair_prob) if 0 < fair_prob < 1 else 0
         print(f"  [skip] Fair prob {fair_prob:.1%} ({fair_american:+d}) < {MIN_FAIR_PROB:.1%} (worse than +200)")
-        return False
+        return "skip"
 
     # Step 6: Recalculate edge
     kalshi_prob = kalshi_ask / 100.0
@@ -576,7 +598,7 @@ def execute_trade(
     # Step 7: Check minimum edge
     if edge < MIN_FINAL_EV:
         print(f"  [skip] Edge {edge:.1%} < {MIN_FINAL_EV:.1%} threshold")
-        return False
+        return "skip"
 
     # All checks passed - place order
     print(f"  Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
@@ -588,7 +610,7 @@ def execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
             "DRY_RUN", "dry_run"
         )
-        return True
+        return "dry_run"
 
     try:
         order = client.place_order(
@@ -622,7 +644,7 @@ def execute_trade(
         # Discord notification - error
         timestamp = datetime.now(ET).strftime("%I:%M %p ET")
         post_discord(f"**Order Failed** | {player} {stat_type} {line:.0f}+ {side}\nError: {str(e)[:100]}\n_{timestamp}_")
-        return False
+        return "skip"
 
     # Step 8: Wait and check fill status
     print(f"  Waiting {ORDER_TIMEOUT_SECONDS}s for fill...")
@@ -657,7 +679,7 @@ def execute_trade(
                 f"_{timestamp}_"
             )
             post_discord(msg)
-            return True
+            return "filled"
 
         elif remaining > 0:
             # Cancel unfilled order
@@ -685,7 +707,7 @@ def execute_trade(
                 f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s\n"
                 f"_{timestamp}_"
             )
-            return False
+            return "cancelled"
 
     except Exception as e:
         print(f"  [error] Failed to check/cancel order: {e}")
@@ -694,9 +716,9 @@ def execute_trade(
             CONTRACTS_PER_TRADE, kalshi_ask, fair_prob, edge, books_count,
             order_id, "unknown"
         )
-        return False
+        return "error"
 
-    return False
+    return "skip"
 
 
 def main() -> int:
@@ -800,26 +822,42 @@ def main() -> int:
         # Process opportunities
         print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")
 
-        trades_placed = 0
+        trades_filled = 0
+        trades_attempted = 0
         for opp in opportunities:
-            if trades_placed >= remaining_trades:
+            if trades_filled >= remaining_trades:
                 print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
                 break
 
             # Pass cached odds to avoid new Odds API calls
-            success = execute_trade(client, DB_PATH, opp, cached_odds=odds_props)
-            if success:
-                trades_placed += 1
-                increment_trades_today(DB_PATH)
+            result = execute_trade(client, DB_PATH, opp, cached_odds=odds_props)
+
+            if result == "filled":
+                trades_filled += 1
+                trades_attempted += 1
+                increment_trades_today(DB_PATH, filled=True)
+                # Update dashboard immediately when a trade is filled
+                try:
+                    from scripts.generate_dashboard_data import update_dashboard
+                    update_dashboard(quiet=True)
+                except Exception:
+                    pass
+            elif result == "dry_run":
+                trades_attempted += 1
+                # Don't count dry_run toward limit, just log it
+            elif result in ("cancelled", "error"):
+                trades_attempted += 1
+                increment_trades_today(DB_PATH, filled=False)
+            # "skip" doesn't count at all
 
             # Rate limit between trades
             time.sleep(1)
 
         print(f"\n{'=' * 60}")
-        print(f"Session complete: {trades_placed} trades placed")
+        print(f"Session complete: {trades_filled} trades filled ({trades_attempted} attempted)")
         print("=" * 60)
 
-        # Update dashboard JSON
+        # Final dashboard update
         try:
             from scripts.generate_dashboard_data import update_dashboard
             update_dashboard(quiet=True)

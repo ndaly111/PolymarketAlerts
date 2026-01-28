@@ -208,6 +208,7 @@
         <div class="tabs">
             <div class="tab active" data-tab="weather">Weather</div>
             <div class="tab" data-tab="props">Props</div>
+            <div class="tab" data-tab="sports">Sports</div>
         </div>
 
         <!-- Weather Tab -->
@@ -485,6 +486,135 @@
                 </div>
             </div>
         </div>
+
+        <!-- Sports Tab -->
+        <div id="sports-tab" class="tab-content">
+            <div class="grid">
+                <div class="card">
+                    <h2>Performance</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-value" id="sports-record">-</div>
+                            <div class="stat-label">Record</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-roi">-</div>
+                            <div class="stat-label">ROI</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-trades">-</div>
+                            <div class="stat-label">Total Trades</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-avg-edge">-</div>
+                            <div class="stat-label">Avg Edge</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>P&L</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-value" id="sports-cost">-</div>
+                            <div class="stat-label">Total Cost</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-payout">-</div>
+                            <div class="stat-label">Total Payout</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-profit">-</div>
+                            <div class="stat-label">Net Profit</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="sports-pending">-</div>
+                            <div class="stat-label">Pending</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>Cumulative P&L Over Time</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="sports-pnl-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Expected EV vs Realized ROI</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="sports-ev-vs-realized-chart"></canvas>
+                    </div>
+                    <div class="chart-legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #1d9bf0;"></div>
+                            <span>Expected EV</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #00ba7c;"></div>
+                            <span>Realized ROI</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>By Line Type</h2>
+                    <div class="chart-container">
+                        <canvas id="sports-line-type-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Edge Distribution</h2>
+                    <div class="chart-container">
+                        <canvas id="sports-edge-dist-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Results by EV Bucket</h2>
+                <div class="card">
+                    <table class="ev-bucket-table">
+                        <thead>
+                            <tr>
+                                <th>EV Bucket</th>
+                                <th>Trades</th>
+                                <th>W-L-P</th>
+                                <th>Win Rate</th>
+                                <th>Avg Price</th>
+                                <th>Expected EV</th>
+                                <th>Realized ROI</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sports-ev-buckets"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Recent Trades</h2>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Event</th>
+                                <th>Type</th>
+                                <th>Line</th>
+                                <th>Side</th>
+                                <th>Price</th>
+                                <th>Edge</th>
+                                <th>Result</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sports-trades-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -513,18 +643,21 @@
         // Load and render data
         async function loadData() {
             try {
-                const [summaryRes, weatherRes, propsRes] = await Promise.all([
+                const [summaryRes, weatherRes, propsRes, sportsRes] = await Promise.all([
                     fetch('data/summary.json'),
                     fetch('data/weather.json'),
                     fetch('data/props.json'),
+                    fetch('data/sports.json'),
                 ]);
 
                 const summary = await summaryRes.json();
                 const weather = await weatherRes.json();
                 const props = await propsRes.json();
+                const sports = await sportsRes.json();
 
                 renderWeather(weather);
                 renderProps(props);
+                renderSports(sports);
 
                 document.getElementById('lastUpdated').textContent =
                     `Last updated: ${new Date(summary.generated_at).toLocaleString()}`;
@@ -928,6 +1061,175 @@
                         labels: statTypes,
                         datasets: [{
                             data: statTypes.map(s => data.by_stat_type[s].count),
+                            backgroundColor: ['#1d9bf0', '#00ba7c', '#ffd400', '#7856ff', '#f4212e'],
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: { color: '#e7e9ea' }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function renderSports(data) {
+            // Performance stats
+            document.getElementById('sports-record').textContent = `${data.wins || 0}W-${data.losses || 0}L`;
+            document.getElementById('sports-roi').textContent = fmt.pctNum(data.roi);
+            document.getElementById('sports-trades').textContent = data.total_trades || 0;
+            document.getElementById('sports-avg-edge').textContent = fmt.pct(data.avg_edge);
+
+            // P&L stats
+            const totalCost = (data.total_cost_cents || 0) / 100;
+            const totalPayout = (data.total_payout_cents || 0) / 100;
+            const profit = totalPayout - totalCost;
+            document.getElementById('sports-cost').textContent = `$${totalCost.toFixed(2)}`;
+            document.getElementById('sports-payout').textContent = `$${totalPayout.toFixed(2)}`;
+            document.getElementById('sports-profit').textContent = `${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}`;
+            document.getElementById('sports-profit').className = profit >= 0 ? 'stat-value positive' : 'stat-value negative';
+            document.getElementById('sports-pending').textContent = data.pending || 0;
+
+            // P&L Chart
+            const trades = data.trades || [];
+            if (trades.length > 0) {
+                const sortedTrades = [...trades].sort((a, b) => a.trade_date.localeCompare(b.trade_date));
+                let cumPnl = 0;
+                const pnlData = sortedTrades.map(t => {
+                    const cost = (t.fill_price_cents || t.limit_price_cents || 0);
+                    const payout = t.settled ? (t.payout_cents || 0) : 0;
+                    cumPnl += (payout - cost) / 100;
+                    return { date: t.trade_date, pnl: cumPnl };
+                });
+
+                new Chart(document.getElementById('sports-pnl-chart'), {
+                    type: 'line',
+                    data: {
+                        labels: pnlData.map(d => d.date),
+                        datasets: [{
+                            label: 'Cumulative P&L ($)',
+                            data: pnlData.map(d => d.pnl),
+                            borderColor: pnlData[pnlData.length-1].pnl >= 0 ? '#00ba7c' : '#f4212e',
+                            backgroundColor: 'transparent',
+                            tension: 0.3,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { y: { title: { display: true, text: 'P&L ($)' } } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // EV vs Realized Chart
+            const evBuckets = ['0-5%', '5-10%', '10-15%', '15-20%', '20%+'];
+            const evMidpoints = [2.5, 7.5, 12.5, 17.5, 25];
+            const evExpected = evMidpoints.map(m => m);
+            const evRealized = evBuckets.map(bucket => {
+                const b = (data.by_ev_bucket || {})[bucket];
+                return b ? b.roi : 0;
+            });
+
+            new Chart(document.getElementById('sports-ev-vs-realized-chart'), {
+                type: 'bar',
+                data: {
+                    labels: evBuckets,
+                    datasets: [
+                        { label: 'Expected EV', data: evExpected, backgroundColor: '#1d9bf0', borderRadius: 4 },
+                        { label: 'Realized ROI', data: evRealized, backgroundColor: '#00ba7c', borderRadius: 4 }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // Edge distribution chart
+            const edgeCounts = evBuckets.map(bucket => {
+                const b = (data.by_ev_bucket || {})[bucket];
+                return b ? b.count : 0;
+            });
+
+            new Chart(document.getElementById('sports-edge-dist-chart'), {
+                type: 'bar',
+                data: {
+                    labels: evBuckets,
+                    datasets: [{
+                        label: 'Trades',
+                        data: edgeCounts,
+                        backgroundColor: '#1d9bf0',
+                        borderRadius: 4,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { y: { title: { display: true, text: 'Number of Trades' } } },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
+            // EV Buckets Table
+            const evHtml = evBuckets.map((bucket, i) => {
+                const b = (data.by_ev_bucket || {})[bucket] || { count: 0, wins: 0, losses: 0, pending: 0, total_cost_cents: 0, total_payout_cents: 0, roi: 0 };
+                const roiClass = b.roi >= 0 ? 'positive' : 'negative';
+                const totalSettled = (b.wins || 0) + (b.losses || 0);
+                const winRate = totalSettled > 0 ? ((b.wins || 0) / totalSettled * 100).toFixed(0) : '-';
+                const avgPrice = b.count > 0 ? (b.total_cost_cents / b.count).toFixed(0) : '-';
+                return `<tr>
+                    <td>${bucket}</td>
+                    <td>${b.count}</td>
+                    <td>${b.wins || 0}-${b.losses || 0}-${b.pending || 0}</td>
+                    <td>${winRate}%</td>
+                    <td>${avgPrice}¢</td>
+                    <td>${evMidpoints[i]}%</td>
+                    <td class="${roiClass}">${fmt.pctNum(b.roi)}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('sports-ev-buckets').innerHTML = evHtml;
+
+            // Trades table with result
+            const tradesHtml = (data.trades || []).slice(0, 20).map(t => {
+                let resultBadge = '<span class="badge badge-pending">Pending</span>';
+                if (t.settled) {
+                    resultBadge = t.won
+                        ? '<span class="badge badge-win">Win</span>'
+                        : '<span class="badge badge-loss">Loss</span>';
+                }
+                const sideBadge = t.side === 'YES' || t.side === 'yes'
+                    ? '<span class="badge badge-yes">YES</span>'
+                    : '<span class="badge badge-no">NO</span>';
+                return `<tr>
+                    <td>${t.trade_date}</td>
+                    <td>${t.event_title}</td>
+                    <td>${t.line_type}</td>
+                    <td>${t.line_label}</td>
+                    <td>${sideBadge}</td>
+                    <td>${t.fill_price_cents || t.limit_price_cents}¢</td>
+                    <td>${fmt.pct(t.edge)}</td>
+                    <td>${resultBadge}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('sports-trades-table').innerHTML = tradesHtml || '<tr><td colspan="8">No trades</td></tr>';
+
+            // Line type chart
+            const lineTypes = Object.keys(data.by_line_type || {});
+            if (lineTypes.length > 0) {
+                new Chart(document.getElementById('sports-line-type-chart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: lineTypes,
+                        datasets: [{
+                            data: lineTypes.map(s => data.by_line_type[s].count),
                             backgroundColor: ['#1d9bf0', '#00ba7c', '#ffd400', '#7856ff', '#f4212e'],
                         }]
                     },
