@@ -2,10 +2,9 @@ name: Weather Auto Trade
 
 on:
   schedule:
-    # Run every 15 min from 4am to 8pm ET (no API costs - NWS and Kalshi are free)
-    - cron: "*/15 9-23 * * *"   # 4am-6:45pm ET (9-23 UTC)
-    - cron: "*/15 0 * * *"      # 7pm-7:45pm ET (0 UTC)
-    - cron: "0 1 * * *"         # 8pm ET final run (1 UTC)
+    # Run every 15 min from 4am to 1pm ET (no API costs - NWS and Kalshi are free)
+    - cron: "*/15 9-17 * * *"   # 4am-12:45pm ET (9-17 UTC)
+    - cron: "0 18 * * *"        # 1pm ET final run (18 UTC)
   workflow_dispatch:
     inputs:
       dry_run:
