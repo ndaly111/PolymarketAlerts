@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,6 +50,9 @@ DB_PATH = Path(os.getenv("PROPS_DB_PATH", "props_trades.db"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_PROPS_WEBHOOK", os.getenv("DISCORD_WEBHOOK_URL", ""))
 
 DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
+
+# Timezone for daily boundaries (Eastern Time, same as weather)
+ET = ZoneInfo("America/New_York")
 
 
 class TeeIO:
@@ -90,9 +94,24 @@ def ensure_db_schema(db_path: Path) -> None:
             fill_price_cents INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            settled INTEGER DEFAULT 0,
+            won INTEGER,
+            payout_cents INTEGER,
+            settled_at TEXT,
             UNIQUE(trade_date, ticker)
         )
     """)
+
+    # Migration: add settlement columns to existing tables
+    columns = {row[1] for row in cur.execute("PRAGMA table_info(trades);").fetchall()}
+    if "settled" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN settled INTEGER DEFAULT 0;")
+    if "won" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN won INTEGER;")
+    if "payout_cents" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN payout_cents INTEGER;")
+    if "settled_at" not in columns:
+        cur.execute("ALTER TABLE trades ADD COLUMN settled_at TEXT;")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS daily_stats (
@@ -134,8 +153,8 @@ def ensure_db_schema(db_path: Path) -> None:
 
 
 def get_trades_today(db_path: Path) -> int:
-    """Get number of trades attempted today."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Get number of trades attempted today (ET timezone)."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute("SELECT trades_attempted FROM daily_stats WHERE date = ?", (today,))
@@ -145,8 +164,8 @@ def get_trades_today(db_path: Path) -> int:
 
 
 def increment_trades_today(db_path: Path) -> None:
-    """Increment trade counter for today."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Increment trade counter for today (ET timezone)."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute("""
@@ -174,9 +193,9 @@ def record_trade(
     status: str,
     fill_price_cents: Optional[int] = None,
 ) -> None:
-    """Record a trade in the database."""
-    now = datetime.now(timezone.utc).isoformat()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Record a trade in the database (ET timezone)."""
+    now = datetime.now(ET).isoformat()
+    today = datetime.now(ET).strftime("%Y-%m-%d")
 
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
@@ -213,8 +232,8 @@ def log_scanned_opportunity(
     volume: int = 0,
     event_time: str = "",
 ) -> None:
-    """Log a scanned opportunity for later analysis."""
-    now = datetime.now(timezone.utc)
+    """Log a scanned opportunity for later analysis (ET timezone)."""
+    now = datetime.now(ET)
     scan_date = now.strftime("%Y-%m-%d")
     scan_time = now.isoformat()
 
@@ -237,9 +256,23 @@ def log_scanned_opportunity(
     conn.close()
 
 
+def get_ev_bucket(edge: float) -> str:
+    """Classify edge into bucket for analysis."""
+    if edge < 0.05:
+        return "0-5%"
+    elif edge < 0.10:
+        return "5-10%"
+    elif edge < 0.15:
+        return "10-15%"
+    elif edge < 0.20:
+        return "15-20%"
+    else:
+        return "20%+"
+
+
 def already_traded_today(db_path: Path, ticker: str) -> bool:
-    """Check if we already traded this ticker today."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Check if we already traded this ticker today (ET timezone)."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute(
@@ -569,11 +602,13 @@ def execute_trade(
 
         # Discord notification - order placed
         ev_cents = edge * 100
+        timestamp = datetime.now(ET).strftime("%I:%M %p ET")
         place_msg = (
             f"**Order Placed** | {player} {stat_type} {line:.0f}+ {side}\n"
             f"Order ID: {order_id}\n"
             f"Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
-            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill..."
+            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
+            f"_{timestamp}_"
         )
         post_discord(place_msg)
 
@@ -585,7 +620,8 @@ def execute_trade(
             None, "error"
         )
         # Discord notification - error
-        post_discord(f"**Order Failed** | {player} {stat_type} {line:.0f}+ {side}\nError: {str(e)[:100]}")
+        timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        post_discord(f"**Order Failed** | {player} {stat_type} {line:.0f}+ {side}\nError: {str(e)[:100]}\n_{timestamp}_")
         return False
 
     # Step 8: Wait and check fill status
@@ -612,11 +648,13 @@ def execute_trade(
             # Discord notification - filled
             actual_edge = fair_prob - (fill_price / 100.0)
             ev_cents = actual_edge * 100
+            timestamp = datetime.now(ET).strftime("%I:%M %p ET")
             msg = (
                 f"**FILLED** | {player} {stat_type} {line:.0f}+ {side}\n"
                 f"Order ID: {order_id}\n"
                 f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
-                f"Books: {books_count}"
+                f"Books: {books_count}\n"
+                f"_{timestamp}_"
             )
             post_discord(msg)
             return True
@@ -624,11 +662,13 @@ def execute_trade(
         elif remaining > 0:
             # Cancel unfilled order
             print(f"  Not filled, cancelling...")
+            timestamp = datetime.now(ET).strftime("%I:%M %p ET")
             post_discord(
                 f"**Timed Out** | {player} {stat_type} {line:.0f}+ {side}\n"
                 f"Order ID: {order_id}\n"
                 f"Limit: {kalshi_ask}¢ | Status: {status or 'unknown'} | Filled: {filled_count} | Remaining: {remaining}\n"
-                f"Not filled after {ORDER_TIMEOUT_SECONDS}s"
+                f"Not filled after {ORDER_TIMEOUT_SECONDS}s\n"
+                f"_{timestamp}_"
             )
             client.cancel_order(order_id)
             record_trade(
@@ -639,9 +679,11 @@ def execute_trade(
             print(f"  Order cancelled")
 
             # Discord notification - cancelled
+            timestamp = datetime.now(ET).strftime("%I:%M %p ET")
             post_discord(
                 f"**Cancelled** | {player} {stat_type} {line:.0f}+ {side}\n"
-                f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s"
+                f"Order ID: {order_id} | Limit: {kalshi_ask}¢ | Not filled after {ORDER_TIMEOUT_SECONDS}s\n"
+                f"_{timestamp}_"
             )
             return False
 

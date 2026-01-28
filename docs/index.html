@@ -364,43 +364,103 @@
                     <h2>Performance</h2>
                     <div class="stat-grid">
                         <div class="stat">
-                            <div class="stat-value" id="props-trades">-</div>
-                            <div class="stat-label">Total Trades</div>
+                            <div class="stat-value" id="props-record">-</div>
+                            <div class="stat-label">Record</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="props-filled">-</div>
-                            <div class="stat-label">Filled</div>
+                            <div class="stat-value" id="props-roi">-</div>
+                            <div class="stat-label">ROI</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="props-trades">-</div>
+                            <div class="stat-label">Total Trades</div>
                         </div>
                         <div class="stat">
                             <div class="stat-value" id="props-avg-edge">-</div>
                             <div class="stat-label">Avg Edge</div>
                         </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>P&L</h2>
+                    <div class="stat-grid">
                         <div class="stat">
                             <div class="stat-value" id="props-cost">-</div>
                             <div class="stat-label">Total Cost</div>
                         </div>
-                    </div>
-                </div>
-                <div class="card">
-                    <h2>By Stat Type</h2>
-                    <div class="chart-container">
-                        <canvas id="props-stat-chart"></canvas>
+                        <div class="stat">
+                            <div class="stat-value" id="props-payout">-</div>
+                            <div class="stat-label">Total Payout</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="props-profit">-</div>
+                            <div class="stat-label">Net Profit</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="props-pending">-</div>
+                            <div class="stat-label">Pending</div>
+                        </div>
                     </div>
                 </div>
             </div>
 
             <div class="grid-wide">
                 <div class="card">
-                    <h2>Cumulative Cost Over Time</h2>
+                    <h2>Cumulative P&L Over Time</h2>
                     <div class="chart-container-tall">
                         <canvas id="props-pnl-chart"></canvas>
                     </div>
                 </div>
                 <div class="card">
-                    <h2>Edge Distribution</h2>
+                    <h2>Expected EV vs Realized ROI</h2>
                     <div class="chart-container-tall">
+                        <canvas id="props-ev-vs-realized-chart"></canvas>
+                    </div>
+                    <div class="chart-legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #1d9bf0;"></div>
+                            <span>Expected EV</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #00ba7c;"></div>
+                            <span>Realized ROI</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>By Stat Type</h2>
+                    <div class="chart-container">
+                        <canvas id="props-stat-chart"></canvas>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Edge Distribution</h2>
+                    <div class="chart-container">
                         <canvas id="props-edge-dist-chart"></canvas>
                     </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Results by EV Bucket</h2>
+                <div class="card">
+                    <table class="ev-bucket-table">
+                        <thead>
+                            <tr>
+                                <th>EV Bucket</th>
+                                <th>Trades</th>
+                                <th>W-L-P</th>
+                                <th>Win Rate</th>
+                                <th>Avg Price</th>
+                                <th>Expected EV</th>
+                                <th>Realized ROI</th>
+                            </tr>
+                        </thead>
+                        <tbody id="props-ev-buckets"></tbody>
+                    </table>
                 </div>
             </div>
 
@@ -417,7 +477,7 @@
                                 <th>Side</th>
                                 <th>Price</th>
                                 <th>Edge</th>
-                                <th>Status</th>
+                                <th>Result</th>
                             </tr>
                         </thead>
                         <tbody id="props-trades-table"></tbody>
@@ -687,28 +747,41 @@
         }
 
         function renderProps(data) {
+            // Summary stats
+            document.getElementById('props-record').textContent =
+                `${data.wins || 0}W - ${data.losses || 0}L`;
+            document.getElementById('props-roi').textContent = fmt.pctNum(data.roi || 0);
+            document.getElementById('props-roi').classList.add((data.roi || 0) >= 0 ? 'positive' : 'negative');
             document.getElementById('props-trades').textContent = data.total_trades;
-            document.getElementById('props-filled').textContent = data.filled_trades;
             document.getElementById('props-avg-edge').textContent = fmt.pct(data.avg_edge);
-            document.getElementById('props-cost').textContent = fmt.cents(data.total_cost_cents);
 
-            // Cumulative Cost Chart
+            // P&L stats
+            document.getElementById('props-cost').textContent = fmt.cents(data.total_cost_cents);
+            document.getElementById('props-payout').textContent = fmt.cents(data.total_payout_cents || 0);
+            const profit = (data.total_payout_cents || 0) - (data.total_cost_cents || 0);
+            document.getElementById('props-profit').textContent = fmt.cents(profit);
+            document.getElementById('props-profit').classList.add(profit >= 0 ? 'positive' : 'negative');
+            document.getElementById('props-pending').textContent = data.pending || 0;
+
+            // Cumulative P&L Chart (for settled trades only)
             const trades = (data.trades || []).slice().reverse(); // oldest first
-            let cumCost = 0;
-            const costData = trades.map((t, i) => {
-                cumCost += (t.fill_price_cents || t.limit_price_cents || 0);
-                return { x: i + 1, y: cumCost / 100 };
+            let cumPnl = 0;
+            const pnlData = trades.filter(t => t.settled).map((t, i) => {
+                const cost = t.fill_price_cents || t.limit_price_cents || 0;
+                const payout = t.won ? 100 : 0;
+                cumPnl += (payout - cost);
+                return { x: i + 1, y: cumPnl / 100 };
             });
 
-            if (costData.length > 0) {
+            if (pnlData.length > 0) {
                 new Chart(document.getElementById('props-pnl-chart'), {
                     type: 'line',
                     data: {
                         datasets: [{
-                            label: 'Cumulative Cost ($)',
-                            data: costData,
-                            borderColor: '#ffd400',
-                            backgroundColor: '#ffd40022',
+                            label: 'Cumulative P&L ($)',
+                            data: pnlData,
+                            borderColor: '#1d9bf0',
+                            backgroundColor: '#1d9bf022',
                             fill: true,
                             tension: 0.3,
                         }]
@@ -718,16 +791,61 @@
                         maintainAspectRatio: false,
                         scales: {
                             x: { type: 'linear', title: { display: true, text: 'Trade #' } },
-                            y: { title: { display: true, text: 'Cost ($)' } }
+                            y: { title: { display: true, text: 'P&L ($)' } }
                         },
                         plugins: { legend: { display: false } }
                     }
                 });
             }
 
+            // EV vs Realized ROI Chart
+            const evBuckets = ['0-5%', '5-10%', '10-15%', '15-20%', '20%+'];
+            const evMidpoints = [2.5, 7.5, 12.5, 17.5, 25];
+            const expectedEV = [];
+            const realizedROI = [];
+
+            evBuckets.forEach((bucket, i) => {
+                const b = (data.by_ev_bucket || {})[bucket];
+                if (b && b.count > 0) {
+                    expectedEV.push(evMidpoints[i]);
+                    realizedROI.push(b.roi || 0);
+                } else {
+                    expectedEV.push(evMidpoints[i]);
+                    realizedROI.push(null);
+                }
+            });
+
+            new Chart(document.getElementById('props-ev-vs-realized-chart'), {
+                type: 'bar',
+                data: {
+                    labels: evBuckets,
+                    datasets: [
+                        {
+                            label: 'Expected EV (%)',
+                            data: expectedEV,
+                            backgroundColor: '#1d9bf0',
+                            borderRadius: 4,
+                        },
+                        {
+                            label: 'Realized ROI (%)',
+                            data: realizedROI,
+                            backgroundColor: '#00ba7c',
+                            borderRadius: 4,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: { title: { display: true, text: 'Percentage (%)' } }
+                    },
+                    plugins: { legend: { display: false } }
+                }
+            });
+
             // Edge Distribution Histogram
             const edges = trades.map(t => (t.edge || 0) * 100);
-            const edgeBuckets = ['0-5%', '5-10%', '10-15%', '15-20%', '20%+'];
             const edgeCounts = [0, 0, 0, 0, 0];
             edges.forEach(e => {
                 if (e < 5) edgeCounts[0]++;
@@ -740,7 +858,7 @@
             new Chart(document.getElementById('props-edge-dist-chart'), {
                 type: 'bar',
                 data: {
-                    labels: edgeBuckets,
+                    labels: evBuckets,
                     datasets: [{
                         label: 'Trades',
                         data: edgeCounts,
@@ -758,9 +876,34 @@
                 }
             });
 
-            // Trades table
+            // EV Buckets Table
+            const evHtml = evBuckets.map((bucket, i) => {
+                const b = (data.by_ev_bucket || {})[bucket] || { count: 0, wins: 0, losses: 0, pending: 0, total_cost_cents: 0, total_payout_cents: 0, roi: 0 };
+                const roiClass = b.roi >= 0 ? 'positive' : 'negative';
+                const totalSettled = (b.wins || 0) + (b.losses || 0);
+                const winRate = totalSettled > 0 ? ((b.wins || 0) / totalSettled * 100).toFixed(0) : '-';
+                const avgPrice = b.count > 0 ? (b.total_cost_cents / b.count).toFixed(0) : '-';
+                return `<tr>
+                    <td>${bucket}</td>
+                    <td>${b.count}</td>
+                    <td>${b.wins || 0}-${b.losses || 0}-${b.pending || 0}</td>
+                    <td>${winRate}%</td>
+                    <td>${avgPrice}¢</td>
+                    <td>${evMidpoints[i]}%</td>
+                    <td class="${roiClass}">${fmt.pctNum(b.roi)}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('props-ev-buckets').innerHTML = evHtml;
+
+            // Trades table with result
             const tradesHtml = (data.trades || []).slice(0, 20).map(t => {
-                const sideBadge = t.side === 'over'
+                let resultBadge = '<span class="badge badge-pending">Pending</span>';
+                if (t.settled) {
+                    resultBadge = t.won
+                        ? '<span class="badge badge-win">Win</span>'
+                        : '<span class="badge badge-loss">Loss</span>';
+                }
+                const sideBadge = t.side === 'OVER' || t.side === 'over'
                     ? '<span class="badge badge-yes">OVER</span>'
                     : '<span class="badge badge-no">UNDER</span>';
                 return `<tr>
@@ -771,7 +914,7 @@
                     <td>${sideBadge}</td>
                     <td>${t.fill_price_cents || t.limit_price_cents}¢</td>
                     <td>${fmt.pct(t.edge)}</td>
-                    <td>${t.status}</td>
+                    <td>${resultBadge}</td>
                 </tr>`;
             }).join('');
             document.getElementById('props-trades-table').innerHTML = tradesHtml || '<tr><td colspan="8">No trades</td></tr>';
