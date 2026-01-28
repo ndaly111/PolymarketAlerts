@@ -5,6 +5,8 @@
   "losses": 21,
   "pending": 10,
   "total_cost_cents": 1557,
+  "settled_cost_cents": 1084,
+  "pending_cost_cents": 473,
   "total_payout_cents": 800,
   "roi": -26.199261992619927,
   "avg_ev": 0.16099100689520449,

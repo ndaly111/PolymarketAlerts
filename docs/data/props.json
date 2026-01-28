@@ -2,6 +2,8 @@
   "total_trades": 10,
   "filled_trades": 10,
   "total_cost_cents": 388,
+  "settled_cost_cents": 295,
+  "pending_cost_cents": 93,
   "avg_edge": 0.1384202262564805,
   "wins": 3,
   "losses": 5,

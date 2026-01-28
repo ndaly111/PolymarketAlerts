@@ -918,27 +918,27 @@
         }
 
         function renderSummary(weather, props, sports) {
-            // Calculate totals across all strategies
-            const wCost = weather.total_cost_cents || 0;
+            // Calculate totals across all strategies - use settled costs only for P/L
+            const wSettledCost = weather.settled_cost_cents || 0;
+            const wPendingCost = weather.pending_cost_cents || 0;
             const wPayout = weather.total_payout_cents || 0;
-            const pCost = props.total_cost_cents || 0;
+            const pSettledCost = props.settled_cost_cents || 0;
+            const pPendingCost = props.pending_cost_cents || 0;
             const pPayout = props.total_payout_cents || 0;
-            const sCost = sports.total_cost_cents || 0;
+            const sSettledCost = sports.settled_cost_cents || 0;
+            const sPendingCost = sports.pending_cost_cents || 0;
             const sPayout = sports.total_payout_cents || 0;
 
-            const totalCost = wCost + pCost + sCost;
+            const totalSettledCost = wSettledCost + pSettledCost + sSettledCost;
+            const totalPendingCost = wPendingCost + pPendingCost + sPendingCost;
             const totalPayout = wPayout + pPayout + sPayout;
-            const totalPnl = totalPayout - totalCost;
+            const totalPnl = totalPayout - totalSettledCost;  // P/L only from settled trades
             const totalWins = (weather.wins || 0) + (props.wins || 0) + (sports.wins || 0);
             const totalLosses = (weather.losses || 0) + (props.losses || 0) + (sports.losses || 0);
             const totalPending = (weather.pending || 0) + (props.pending || 0) + (sports.pending || 0);
             const totalTrades = (weather.total_trades || 0) + (props.total_trades || 0) + (sports.total_trades || 0);
 
-            // Calculate settled cost for ROI (exclude pending)
-            const wSettledCost = (weather.trades || []).filter(t => t.settled).reduce((sum, t) => sum + (t.fill_price_cents || t.limit_price_cents || 0), 0);
-            const pSettledCost = (props.trades || []).filter(t => t.settled).reduce((sum, t) => sum + (t.fill_price_cents || t.limit_price_cents || 0), 0);
-            const sSettledCost = (sports.trades || []).filter(t => t.settled).reduce((sum, t) => sum + (t.fill_price_cents || t.limit_price_cents || 0), 0);
-            const totalSettledCost = wSettledCost + pSettledCost + sSettledCost;
+            // ROI based on settled cost only
             const totalROI = totalSettledCost > 0 ? ((totalPayout - totalSettledCost) / totalSettledCost * 100) : 0;
 
             // Calculate days trading for annualized ROI
@@ -1146,12 +1146,16 @@
             document.getElementById('weather-roi').classList.add(data.roi >= 0 ? 'positive' : 'negative');
             document.getElementById('weather-trades').textContent = data.total_trades;
             document.getElementById('weather-avg-ev').textContent = fmt.pct(data.avg_ev);
-            document.getElementById('weather-cost').textContent = fmt.cents(data.total_cost_cents);
-            document.getElementById('weather-payout').textContent = fmt.cents(data.total_payout_cents);
-            const profit = data.total_payout_cents - data.total_cost_cents;
+            // P&L stats - only count settled trades for profit calculation
+            const settledCost = data.settled_cost_cents || 0;
+            const pendingCost = data.pending_cost_cents || 0;
+            const payout = data.total_payout_cents || 0;
+            const profit = payout - settledCost;
+            document.getElementById('weather-cost').textContent = fmt.cents(settledCost);
+            document.getElementById('weather-payout').textContent = fmt.cents(payout);
             document.getElementById('weather-profit').textContent = fmt.cents(profit);
             document.getElementById('weather-profit').classList.add(profit >= 0 ? 'positive' : 'negative');
-            document.getElementById('weather-pending').textContent = data.pending;
+            document.getElementById('weather-pending').textContent = `${data.pending} (${fmt.cents(pendingCost)})`;
 
             // Cumulative P&L Chart
             const trades = (data.trades || []).slice().reverse(); // oldest first
@@ -1360,13 +1364,17 @@
             document.getElementById('props-trades').textContent = data.total_trades;
             document.getElementById('props-avg-edge').textContent = fmt.pct(data.avg_edge);
 
-            // P&L stats
-            document.getElementById('props-cost').textContent = fmt.cents(data.total_cost_cents);
-            document.getElementById('props-payout').textContent = fmt.cents(data.total_payout_cents || 0);
-            const profit = (data.total_payout_cents || 0) - (data.total_cost_cents || 0);
+            // P&L stats - only count settled trades for profit calculation
+            const settledCost = data.settled_cost_cents || 0;
+            const pendingCost = data.pending_cost_cents || 0;
+            const payout = data.total_payout_cents || 0;
+            const profit = payout - settledCost;
+
+            document.getElementById('props-cost').textContent = fmt.cents(settledCost);
+            document.getElementById('props-payout').textContent = fmt.cents(payout);
             document.getElementById('props-profit').textContent = fmt.cents(profit);
             document.getElementById('props-profit').classList.add(profit >= 0 ? 'positive' : 'negative');
-            document.getElementById('props-pending').textContent = data.pending || 0;
+            document.getElementById('props-pending').textContent = `${data.pending || 0} (${fmt.cents(pendingCost)})`;
 
             // Cumulative P&L Chart (for settled trades only)
             const trades = (data.trades || []).slice().reverse(); // oldest first
@@ -1558,14 +1566,16 @@
             document.getElementById('sports-avg-edge').textContent = fmt.pct(data.avg_edge);
 
             // P&L stats
-            const totalCost = (data.total_cost_cents || 0) / 100;
+            // P&L stats - only count settled trades for profit calculation
+            const settledCost = (data.settled_cost_cents || 0) / 100;
+            const pendingCost = (data.pending_cost_cents || 0) / 100;
             const totalPayout = (data.total_payout_cents || 0) / 100;
-            const profit = totalPayout - totalCost;
-            document.getElementById('sports-cost').textContent = `$${totalCost.toFixed(2)}`;
+            const profit = totalPayout - settledCost;
+            document.getElementById('sports-cost').textContent = `$${settledCost.toFixed(2)}`;
             document.getElementById('sports-payout').textContent = `$${totalPayout.toFixed(2)}`;
             document.getElementById('sports-profit').textContent = `${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}`;
             document.getElementById('sports-profit').className = profit >= 0 ? 'stat-value positive' : 'stat-value negative';
-            document.getElementById('sports-pending').textContent = data.pending || 0;
+            document.getElementById('sports-pending').textContent = `${data.pending || 0} ($${pendingCost.toFixed(2)})`;
 
             // P&L Chart
             const trades = data.trades || [];

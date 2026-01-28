@@ -119,6 +119,8 @@ def get_props_stats(db_path: Path) -> dict:
         "total_trades": total_trades,
         "filled_trades": total_trades,  # All trades in list are filled (dry_run excluded)
         "total_cost_cents": total_cost,
+        "settled_cost_cents": settled_cost,  # Cost of settled trades only (for P/L calc)
+        "pending_cost_cents": total_cost - settled_cost,  # Cost of pending trades
         "avg_edge": avg_edge,
         "wins": wins,
         "losses": losses,
@@ -238,6 +240,8 @@ def get_weather_stats(db_path: Path) -> dict:
         "losses": losses,
         "pending": total_trades - len(settled_trades),
         "total_cost_cents": total_cost,
+        "settled_cost_cents": settled_cost,  # Cost of settled trades only (for P/L calc)
+        "pending_cost_cents": total_cost - settled_cost,  # Cost of pending trades
         "total_payout_cents": total_payout,
         "roi": roi,
         "avg_ev": avg_ev,
@@ -385,6 +389,8 @@ def get_sports_stats(db_path: Path) -> dict:
         "total_trades": total_trades,
         "filled_trades": total_trades,
         "total_cost_cents": total_cost,
+        "settled_cost_cents": settled_cost,  # Cost of settled trades only (for P/L calc)
+        "pending_cost_cents": total_cost - settled_cost,  # Cost of pending trades
         "avg_edge": avg_edge,
         "wins": wins,
         "losses": losses,
