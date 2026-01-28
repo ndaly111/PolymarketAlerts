@@ -2,10 +2,14 @@ name: Props Auto Trade
 
 on:
   schedule:
-    # Run every 15 min from 5am to 8pm EST (10:00-01:00 UTC)
-    - cron: "*/15 10-23 * * *"  # 5am-6:45pm EST
-    - cron: "*/15 0 * * *"      # 7pm-7:45pm EST
-    - cron: "0 1 * * *"         # 8pm EST (last run)
+    # Run at scheduled refresh times only (6x/day) to conserve Odds API credits
+    # 6am, 8am, 12pm, 4pm, 6pm, 8pm EST = 11:00, 13:00, 17:00, 21:00, 23:00, 01:00 UTC
+    - cron: "0 11 * * *"   # 6am EST
+    - cron: "0 13 * * *"   # 8am EST
+    - cron: "0 17 * * *"   # 12pm EST
+    - cron: "0 21 * * *"   # 4pm EST
+    - cron: "0 23 * * *"   # 6pm EST
+    - cron: "0 1 * * *"    # 8pm EST
   workflow_dispatch:
     inputs:
       dry_run:
@@ -72,9 +76,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/odds_api_cache
-          key: odds-cache-${{ github.run_id }}
+          key: odds-props-cache-${{ hashFiles('oddsapi_props.py') }}
           restore-keys: |
-            odds-cache-
+            odds-props-cache-
 
       - name: Check credentials
         run: |
@@ -89,14 +93,13 @@ jobs:
           fi
           echo "Credentials OK"
 
-      - name: Download trades DB (if exists)
-        continue-on-error: true
+      - name: Pull latest database from git
         run: |
-          # Try to get the latest DB from artifacts
-          # This ensures continuity of daily trade limits
-          echo "Looking for existing trades database..."
+          # Ensure we have the latest database from git
+          git pull --rebase origin main || true
           if [ -f "$PROPS_DB_PATH" ]; then
-            echo "Database exists locally"
+            echo "Database found: $(ls -lh $PROPS_DB_PATH)"
+            sqlite3 "$PROPS_DB_PATH" "SELECT COUNT(*) as trades FROM trades WHERE status='filled';" || true
           else
             echo "No existing database, will create new one"
           fi
