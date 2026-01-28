@@ -1203,11 +1203,26 @@ def main() -> int:
     # Screen for potential edges using ESPN (single book)
     # Use quick_screen_edge which works with single-book data
     potential_edges: List[Dict[str, Any]] = []
+    debug_matches = 0
+    debug_no_match = 0
     if espn_events:
+        # Debug: show what we're matching
+        print("  ESPN teams:")
+        for ev in espn_events[:5]:
+            print(f"    {ev.get('away_team')} @ {ev.get('home_team')}")
+
+        print("  Kalshi markets (sample):")
+        for m in kalshi_markets[:5]:
+            print(f"    {m.get('title')}")
+
         for market in kalshi_markets:
             opp = quick_screen_edge(market, espn_events, min_edge=MIN_EDGE * 0.5)
             if opp:
                 potential_edges.append(opp)
+                debug_matches += 1
+            else:
+                debug_no_match += 1
+        print(f"  Matched: {debug_matches}, No match: {debug_no_match}")
         print(f"  Found {len(potential_edges)} markets with potential edge (>= {MIN_EDGE*0.5:.1%})")
     else:
         print("  ESPN unavailable, will check all Kalshi markets with Odds API")
