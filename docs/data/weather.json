@@ -1,14 +1,14 @@
 {
   "total_trades": 39,
-  "settled_trades": 29,
+  "settled_trades": 34,
   "wins": 8,
-  "losses": 21,
-  "pending": 10,
+  "losses": 26,
+  "pending": 5,
   "total_cost_cents": 1557,
-  "settled_cost_cents": 1084,
-  "pending_cost_cents": 473,
+  "settled_cost_cents": 1256,
+  "pending_cost_cents": 301,
   "total_payout_cents": 800,
-  "roi": -26.199261992619927,
+  "roi": -36.30573248407643,
   "avg_ev": 0.16099100689520449,
   "trades": [
     {
@@ -25,9 +25,9 @@
       "order_id": "10581062-ae12-4d6f-bbd3-fef405f63d32",
       "status": "FILLED",
       "fill_price_cents": 1,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0
     },
     {
       "trade_date": "2026-01-28",
@@ -61,9 +61,9 @@
       "order_id": "f7be010b-01ef-4872-9d7c-bfabaee3e1ca",
       "status": "FILLED",
       "fill_price_cents": 58,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0
     },
     {
       "trade_date": "2026-01-28",
@@ -97,9 +97,9 @@
       "order_id": "2f3e017c-f49f-4464-95f9-3123a5a7e3f0",
       "status": "FILLED",
       "fill_price_cents": 61,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0
     },
     {
       "trade_date": "2026-01-28",
@@ -169,9 +169,9 @@
       "order_id": "20cd087c-f0ec-4a90-9e68-752f434f933b",
       "status": "FILLED",
       "fill_price_cents": 1,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0
     },
     {
       "trade_date": "2026-01-28",
@@ -187,9 +187,9 @@
       "order_id": "1f683db8-1c3b-4fc8-9d20-d96b8e16f08d",
       "status": "FILLED",
       "fill_price_cents": 51,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0
     },
     {
       "trade_date": "2026-01-27",
@@ -743,7 +743,7 @@
       "count": 5,
       "avg_ev": 0.21441803206944826,
       "wins": 1,
-      "losses": 2
+      "losses": 4
     },
     "DENHIGH": {
       "count": 3,
@@ -767,13 +767,13 @@
       "count": 2,
       "avg_ev": 0.1859609629679974,
       "wins": 0,
-      "losses": 1
+      "losses": 2
     },
     "NHIGH": {
       "count": 4,
       "avg_ev": 0.11867244063101615,
       "wins": 1,
-      "losses": 2
+      "losses": 3
     },
     "NOLHIGH": {
       "count": 4,
@@ -785,7 +785,7 @@
       "count": 4,
       "avg_ev": 0.15476343073666562,
       "wins": 0,
-      "losses": 3
+      "losses": 4
     },
     "SEAHIGH": {
       "count": 2,
@@ -813,20 +813,20 @@
     "15-20%": {
       "count": 11,
       "wins": 1,
-      "losses": 4,
-      "pending": 6,
+      "losses": 7,
+      "pending": 3,
       "total_cost_cents": 482,
       "total_payout_cents": 100,
-      "roi": -41.17647058823529
+      "roi": -65.51724137931035
     },
     "20%+": {
       "count": 9,
       "wins": 3,
-      "losses": 2,
-      "pending": 4,
+      "losses": 4,
+      "pending": 2,
       "total_cost_cents": 414,
       "total_payout_cents": 300,
-      "roi": 18.57707509881423
+      "roi": -1.639344262295082
     }
   }
 }
