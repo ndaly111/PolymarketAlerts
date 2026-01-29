@@ -2,14 +2,14 @@
   "total_trades": 4,
   "filled_trades": 4,
   "total_cost_cents": 175,
-  "settled_cost_cents": 0,
-  "pending_cost_cents": 175,
+  "settled_cost_cents": 46,
+  "pending_cost_cents": 129,
   "avg_edge": 0.13550087139903577,
   "wins": 0,
-  "losses": 0,
-  "pending": 4,
+  "losses": 1,
+  "pending": 3,
   "total_payout_cents": 0,
-  "roi": 0,
+  "roi": -100.0,
   "trades": [
     {
       "trade_date": "2026-01-28",
@@ -46,10 +46,10 @@
       "order_id": "02c31e92-ee0b-43a7-8c20-465bfff9fa21",
       "status": "filled",
       "fill_price_cents": 46,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0,
+      "settled_at": "2026-01-29T15:53:21.644267-05:00"
     },
     {
       "trade_date": "2026-01-28",
@@ -110,8 +110,8 @@
       "count": 4,
       "avg_edge": 0.13550087139903577,
       "wins": 0,
-      "losses": 0,
-      "pending": 4
+      "losses": 1,
+      "pending": 3
     }
   },
   "by_ev_bucket": {
@@ -136,11 +136,11 @@
     "5-10%": {
       "count": 2,
       "wins": 0,
-      "losses": 0,
-      "pending": 2,
+      "losses": 1,
+      "pending": 1,
       "total_cost_cents": 94,
       "total_payout_cents": 0,
-      "roi": 0
+      "roi": -100.0
     }
   }
 }

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-01-29T20:37:42.630026Z",
+  "generated_at": "2026-01-29T20:53:22.186614Z",
   "props": {
     "total_trades": 10,
     "avg_edge": 0.1384202262564805,
@@ -8,14 +8,14 @@
   },
   "weather": {
     "total_trades": 39,
-    "record": "8W-26L",
-    "roi": -36.30573248407643,
+    "record": "9W-30L",
+    "roi": -42.19653179190752,
     "avg_ev": 0.16099100689520449
   },
   "sports": {
     "total_trades": 4,
     "avg_edge": 0.13550087139903577,
-    "record": "0W-0L",
-    "roi": 0
+    "record": "0W-1L",
+    "roi": -100.0
   }
 }
