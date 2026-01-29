@@ -10,10 +10,14 @@ Includes caching to minimize API calls.
 import json
 import os
 import re
+import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
+
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -26,6 +30,8 @@ CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL", "14400"))  # 4 hours default
 SCHEDULED_REFRESH_HOURS_EST = list(range(4, 21))  # 4, 5, 6, ... 20
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports"
+ODDS_API_USAGE_DB = Path(os.getenv("ODDS_API_USAGE_DB", os.getenv("PROPS_DB_PATH", "props_trades.db")))
+ODDS_API_USAGE_TABLE = "odds_api_usage"
 
 # Prop market keys supported by The Odds API
 # See: https://the-odds-api.com/sports-odds-data/betting-markets.html
@@ -182,6 +188,114 @@ def _get_odds_api_key() -> str:
     if not k:
         raise RuntimeError("Missing THE_ODDS_API env var (Odds API key).")
     return k
+
+
+def _today_est() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+
+def _parse_int(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def _ensure_usage_db_schema(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {ODDS_API_USAGE_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            logged_at TEXT NOT NULL,
+            logged_date TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            sport_key TEXT,
+            event_id TEXT,
+            credits_last INTEGER,
+            credits_used INTEGER,
+            credits_remaining INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _log_odds_api_usage(
+    response: requests.Response,
+    endpoint: str,
+    sport_key: str = "",
+    event_id: str = "",
+) -> None:
+    headers = response.headers
+    credits_last = _parse_int(headers.get("x-requests-last"))
+    credits_used = _parse_int(headers.get("x-requests-used"))
+    credits_remaining = _parse_int(headers.get("x-requests-remaining"))
+
+    if credits_last is None and credits_used is None and credits_remaining is None:
+        return
+
+    try:
+        _ensure_usage_db_schema(ODDS_API_USAGE_DB)
+        conn = sqlite3.connect(str(ODDS_API_USAGE_DB))
+        cur = conn.cursor()
+        cur.execute(f"""
+            INSERT INTO {ODDS_API_USAGE_TABLE} (
+                logged_at, logged_date, endpoint, sport_key, event_id,
+                credits_last, credits_used, credits_remaining
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now(ZoneInfo("America/New_York")).isoformat(),
+            _today_est(),
+            endpoint,
+            sport_key or None,
+            event_id or None,
+            credits_last,
+            credits_used,
+            credits_remaining,
+        ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        return
+
+
+def get_daily_odds_api_usage(
+    date: Optional[str] = None,
+    db_path: Path = ODDS_API_USAGE_DB,
+) -> Dict[str, Any]:
+    """Return summed Odds API credits for a given EST date."""
+    date = date or _today_est()
+    _ensure_usage_db_schema(db_path)
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT
+            COALESCE(SUM(credits_last), 0) AS credits_used,
+            COUNT(*) AS request_count
+        FROM {ODDS_API_USAGE_TABLE}
+        WHERE logged_date = ?
+    """, (date,))
+    row = cur.fetchone() or (0, 0)
+    cur.execute(f"""
+        SELECT credits_used, credits_remaining
+        FROM {ODDS_API_USAGE_TABLE}
+        WHERE logged_date = ? AND (credits_used IS NOT NULL OR credits_remaining IS NOT NULL)
+        ORDER BY id DESC
+        LIMIT 1
+    """, (date,))
+    last_row = cur.fetchone()
+    conn.close()
+    return {
+        "date": date,
+        "credits_used": row[0] or 0,
+        "request_count": row[1] or 0,
+        "credits_used_header": last_row[0] if last_row else None,
+        "credits_remaining_header": last_row[1] if last_row else None,
+    }
 
 
 def _get_cache_path(cache_key: str) -> Path:
@@ -347,6 +461,7 @@ def fetch_events(
     }
     url = f"{ODDS_API_BASE}/{sport_key}/events"
     r = requests.get(url, params=params, timeout=30)
+    _log_odds_api_usage(r, endpoint="events", sport_key=sport_key)
     r.raise_for_status()
     time.sleep(sleep_s)
     return r.json()
@@ -369,6 +484,7 @@ def fetch_event_props(
     }
     url = f"{ODDS_API_BASE}/{sport_key}/events/{event_id}/odds"
     r = requests.get(url, params=params, timeout=30)
+    _log_odds_api_usage(r, endpoint="event_odds", sport_key=sport_key, event_id=event_id)
     r.raise_for_status()
     time.sleep(sleep_s)
     return r.json()
@@ -669,6 +785,7 @@ def fetch_tennis_moneylines(
             url = f"{ODDS_API_BASE}/{sport_key}/odds"
             r = requests.get(url, params=params, timeout=30)
             api_calls += 1
+            _log_odds_api_usage(r, endpoint="odds", sport_key=sport_key)
 
             if r.status_code == 404:
                 # No events for this tournament
