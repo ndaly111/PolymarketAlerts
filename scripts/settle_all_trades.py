@@ -25,10 +25,25 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import re
+
 from kalshi_auth_client import KalshiAuthClient
 
 ET = ZoneInfo("America/New_York")
 UTC = ZoneInfo("UTC")
+
+# Kalshi ticker patterns for validation
+KALSHI_TICKER_PATTERNS = [
+    r"^KX[A-Z]+-.+",  # Standard Kalshi format: KXNBAREB-26JAN28-...
+    r"^KXHIGH.+",     # Weather high temp markets
+]
+
+
+def is_valid_kalshi_ticker(ticker: str) -> bool:
+    """Check if a ticker matches known Kalshi ticker patterns."""
+    if not ticker:
+        return False
+    return any(re.match(pattern, ticker) for pattern in KALSHI_TICKER_PATTERNS)
 
 # Database paths
 WEATHER_DB = Path(os.getenv("WEATHER_TRADES_DB_PATH", str(ROOT / "weather_trades.db")))
@@ -258,6 +273,12 @@ def settle_props_trades(client: KalshiAuthClient) -> SettlementResult:
         line = trade["line"]
 
         print(f"  Checking {player} {stat_type} {line}+ ({side})...", end=" ")
+
+        # Validate ticker format
+        if not is_valid_kalshi_ticker(ticker):
+            print(f"INVALID TICKER '{ticker}' - needs manual settlement")
+            continue
+
         settlement = check_market_settlement(client, ticker)
 
         if settlement is None or not settlement["settled"]:
@@ -352,6 +373,12 @@ def settle_sports_trades(client: KalshiAuthClient) -> SettlementResult:
         line_label = trade["line_label"]
 
         print(f"  Checking {event} {line_label} ({side})...", end=" ")
+
+        # Validate ticker format
+        if not is_valid_kalshi_ticker(ticker):
+            print(f"INVALID TICKER '{ticker}' - needs manual settlement")
+            continue
+
         settlement = check_market_settlement(client, ticker)
 
         if settlement is None or not settlement["settled"]:
