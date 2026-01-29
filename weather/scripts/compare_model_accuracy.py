@@ -41,19 +41,33 @@ def get_model_accuracy(db_path: Path, min_days: int = 7) -> Dict[str, Dict]:
     cur = conn.cursor()
 
     # Get all sources with matched forecasts and observations
+    # Use only the earliest snapshot per (city, date, source) for fair comparison
     cur.execute("""
+        WITH earliest_snapshots AS (
+            SELECT fs.*
+            FROM forecast_snapshots fs
+            INNER JOIN (
+                SELECT city_key, target_date_local, source, MIN(snapshot_hour_local) as min_hour
+                FROM forecast_snapshots
+                GROUP BY city_key, target_date_local, source
+            ) earliest
+            ON fs.city_key = earliest.city_key
+            AND fs.target_date_local = earliest.target_date_local
+            AND fs.source = earliest.source
+            AND fs.snapshot_hour_local = earliest.min_hour
+        )
         SELECT
-            fs.source,
-            fs.city_key,
-            fs.target_date_local,
-            fs.forecast_high_f,
+            es.source,
+            es.city_key,
+            es.target_date_local,
+            es.forecast_high_f,
             oc.tmax_f as observed
-        FROM forecast_snapshots fs
+        FROM earliest_snapshots es
         INNER JOIN observed_cli oc
-            ON fs.city_key = oc.city_key
-            AND fs.target_date_local = oc.date_local
+            ON es.city_key = oc.city_key
+            AND es.target_date_local = oc.date_local
         WHERE oc.tmax_f IS NOT NULL
-        ORDER BY fs.source, fs.city_key, fs.target_date_local
+        ORDER BY es.source, es.city_key, es.target_date_local
     """)
 
     rows = cur.fetchall()

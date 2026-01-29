@@ -415,19 +415,33 @@ def get_model_accuracy(db_path: Path) -> dict:
     cur = conn.cursor()
 
     # Get accuracy by model source
+    # Use only the earliest snapshot per (city, date, source) for fair comparison
     cur.execute("""
+        WITH earliest_snapshots AS (
+            SELECT fs.*
+            FROM forecast_snapshots fs
+            INNER JOIN (
+                SELECT city_key, target_date_local, source, MIN(snapshot_hour_local) as min_hour
+                FROM forecast_snapshots
+                GROUP BY city_key, target_date_local, source
+            ) earliest
+            ON fs.city_key = earliest.city_key
+            AND fs.target_date_local = earliest.target_date_local
+            AND fs.source = earliest.source
+            AND fs.snapshot_hour_local = earliest.min_hour
+        )
         SELECT
-            fs.source,
-            COUNT(DISTINCT fs.target_date_local) as days,
+            es.source,
+            COUNT(DISTINCT es.target_date_local) as days,
             COUNT(*) as total_forecasts,
-            ROUND(AVG(fs.forecast_high_f - oc.tmax_f), 2) as bias,
-            ROUND(AVG(ABS(fs.forecast_high_f - oc.tmax_f)), 2) as mae
-        FROM forecast_snapshots fs
+            ROUND(AVG(es.forecast_high_f - oc.tmax_f), 2) as bias,
+            ROUND(AVG(ABS(es.forecast_high_f - oc.tmax_f)), 2) as mae
+        FROM earliest_snapshots es
         INNER JOIN observed_cli oc
-            ON fs.city_key = oc.city_key
-            AND fs.target_date_local = oc.date_local
+            ON es.city_key = oc.city_key
+            AND es.target_date_local = oc.date_local
         WHERE oc.tmax_f IS NOT NULL
-        GROUP BY fs.source
+        GROUP BY es.source
         HAVING days >= 3
         ORDER BY mae ASC
     """)
@@ -442,20 +456,34 @@ def get_model_accuracy(db_path: Path) -> dict:
         })
 
     # Get accuracy by model and city
+    # Use only the earliest snapshot per (city, date, source) for fair comparison
     cur.execute("""
+        WITH earliest_snapshots AS (
+            SELECT fs.*
+            FROM forecast_snapshots fs
+            INNER JOIN (
+                SELECT city_key, target_date_local, source, MIN(snapshot_hour_local) as min_hour
+                FROM forecast_snapshots
+                GROUP BY city_key, target_date_local, source
+            ) earliest
+            ON fs.city_key = earliest.city_key
+            AND fs.target_date_local = earliest.target_date_local
+            AND fs.source = earliest.source
+            AND fs.snapshot_hour_local = earliest.min_hour
+        )
         SELECT
-            fs.source,
-            fs.city_key,
+            es.source,
+            es.city_key,
             COUNT(*) as count,
-            ROUND(AVG(fs.forecast_high_f - oc.tmax_f), 2) as bias,
-            ROUND(AVG(ABS(fs.forecast_high_f - oc.tmax_f)), 2) as mae
-        FROM forecast_snapshots fs
+            ROUND(AVG(es.forecast_high_f - oc.tmax_f), 2) as bias,
+            ROUND(AVG(ABS(es.forecast_high_f - oc.tmax_f)), 2) as mae
+        FROM earliest_snapshots es
         INNER JOIN observed_cli oc
-            ON fs.city_key = oc.city_key
-            AND fs.target_date_local = oc.date_local
+            ON es.city_key = oc.city_key
+            AND es.target_date_local = oc.date_local
         WHERE oc.tmax_f IS NOT NULL
-        GROUP BY fs.source, fs.city_key
-        ORDER BY fs.source, mae ASC
+        GROUP BY es.source, es.city_key
+        ORDER BY es.source, mae ASC
     """)
     by_city = {}
     for row in cur.fetchall():
@@ -469,20 +497,34 @@ def get_model_accuracy(db_path: Path) -> dict:
         }
 
     # Get recent forecasts vs observed (last 7 days)
+    # Use only the earliest snapshot per (city, date, source) for fair comparison
     cur.execute("""
+        WITH earliest_snapshots AS (
+            SELECT fs.*
+            FROM forecast_snapshots fs
+            INNER JOIN (
+                SELECT city_key, target_date_local, source, MIN(snapshot_hour_local) as min_hour
+                FROM forecast_snapshots
+                GROUP BY city_key, target_date_local, source
+            ) earliest
+            ON fs.city_key = earliest.city_key
+            AND fs.target_date_local = earliest.target_date_local
+            AND fs.source = earliest.source
+            AND fs.snapshot_hour_local = earliest.min_hour
+        )
         SELECT
-            fs.target_date_local as date,
-            fs.city_key,
-            fs.source,
-            fs.forecast_high_f as forecast,
+            es.target_date_local as date,
+            es.city_key,
+            es.source,
+            es.forecast_high_f as forecast,
             oc.tmax_f as observed,
-            (fs.forecast_high_f - oc.tmax_f) as error
-        FROM forecast_snapshots fs
+            (es.forecast_high_f - oc.tmax_f) as error
+        FROM earliest_snapshots es
         INNER JOIN observed_cli oc
-            ON fs.city_key = oc.city_key
-            AND fs.target_date_local = oc.date_local
+            ON es.city_key = oc.city_key
+            AND es.target_date_local = oc.date_local
         WHERE oc.tmax_f IS NOT NULL
-        ORDER BY fs.target_date_local DESC, fs.city_key, fs.source
+        ORDER BY es.target_date_local DESC, es.city_key, es.source
         LIMIT 200
     """)
     recent_forecasts = [dict(row) for row in cur.fetchall()]
