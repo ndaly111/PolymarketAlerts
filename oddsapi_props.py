@@ -267,7 +267,7 @@ def _update_cache_with_prop(cache_key: str, updated_prop: Dict[str, Any]) -> Non
 
 
 def is_scheduled_refresh_time() -> bool:
-    """Check if current time is a scheduled refresh time (within 15 min window)."""
+    """Check if current time is a scheduled refresh time (within 30 min window)."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -275,9 +275,10 @@ def is_scheduled_refresh_time() -> bool:
     current_hour = now_est.hour
     current_minute = now_est.minute
 
-    # Check if we're within 15 minutes of a scheduled hour
+    # Check if we're within 30 minutes of a scheduled hour
+    # (widened from 15 to accommodate GitHub Actions scheduling delays)
     for scheduled_hour in SCHEDULED_REFRESH_HOURS_EST:
-        if current_hour == scheduled_hour and current_minute < 15:
+        if current_hour == scheduled_hour and current_minute < 30:
             return True
 
     return False
