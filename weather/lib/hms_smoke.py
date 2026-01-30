@@ -17,12 +17,18 @@ Usage:
 from __future__ import annotations
 
 import re
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 import xml.etree.ElementTree as ET
+
+# Create SSL context that doesn't verify certificates
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 @dataclass
@@ -140,7 +146,7 @@ def fetch_hms_smoke_kml(date: datetime, timeout: int = 30) -> Optional[str]:
 
     try:
         req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             return resp.read().decode("utf-8", errors="ignore")
     except HTTPError as e:
         if e.code == 404:

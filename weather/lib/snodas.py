@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import ssl
 import struct
 import tarfile
 from dataclasses import dataclass
@@ -28,6 +29,11 @@ from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 
 import numpy as np
+
+# Create SSL context that doesn't verify certificates (needed for NSIDC)
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 @dataclass
@@ -175,7 +181,7 @@ def fetch_snow_depth(
 
     try:
         req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             tar_data = resp.read()
     except HTTPError as e:
         if e.code == 404:
@@ -265,7 +271,7 @@ def fetch_snow_depth_cached(
         url = _build_snodas_url(date_dt)
         try:
             req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-            with urlopen(req, timeout=timeout) as resp:
+            with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
                 tar_data = resp.read()
             # Save to cache
             cache_file.write_bytes(tar_data)

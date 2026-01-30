@@ -17,11 +17,17 @@ Usage:
 from __future__ import annotations
 
 import re
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
+
+# Create SSL context that doesn't verify certificates
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 @dataclass
@@ -187,7 +193,7 @@ def fetch_buoy_sst_realtime(
 
     try:
         req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             data = resp.read().decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return None
@@ -246,7 +252,7 @@ def fetch_buoy_sst_historical(
         import io
 
         req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             compressed = resp.read()
 
         with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as gz:

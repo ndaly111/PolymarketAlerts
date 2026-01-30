@@ -20,12 +20,18 @@ Usage:
 from __future__ import annotations
 
 import re
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+
+# Create SSL context that doesn't verify certificates (needed for IEM)
+_SSL_CONTEXT = ssl.create_default_context()
+_SSL_CONTEXT.check_hostname = False
+_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 
 
 @dataclass
@@ -293,7 +299,7 @@ def fetch_metar_iem(
 
     try:
         req = Request(url, headers={"User-Agent": "weather-ml-model/1.0"})
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             data = resp.read().decode("utf-8", errors="ignore")
     except (HTTPError, URLError, TimeoutError):
         return []
