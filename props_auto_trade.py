@@ -8,8 +8,8 @@ Workflow:
 3. Re-fetch Kalshi orderbook (get actual ask)
 4. Re-fetch Odds API (min 2 books)
 5. Filters: Kalshi ask ≤ 67¢, Books fair prob ≥ 33%
-6. Recalculate edge with fresh data
-7. If edge ≥ 5%, place limit order at ask for 1 contract
+6. Recalculate edge with fresh data (with fee adjustment)
+7. If net edge ≥ 5%, place limit order at ask for 1 contract
 8. Wait 30 sec, cancel if not filled
 9. Max 10 trades/day
 """
@@ -29,8 +29,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kalshi_auth_client import KalshiAuthClient, prob_to_american, american_to_prob
 from kalshi_props import fetch_kalshi_props, KALSHI_TO_ODDSAPI
-from oddsapi_props import fetch_all_props, normalize_player_name
+from oddsapi_props import fetch_all_props
 from props_value import match_props, filter_and_rank
+
+# Import from lib/ modules
+from lib.config import TradingConfig
+from lib.edge import calculate_edge_with_fee, DEFAULT_FEE_CENTS
+from lib.validation import validate_price, validate_edge, run_all_validations, has_blocking_failure
+from lib.normalization import normalize_player_name
 
 
 # --- Configuration ---
@@ -42,6 +48,14 @@ MIN_FAIR_PROB = float(os.getenv("MIN_FAIR_PROB", "0.333"))  # ≥ 33% (better th
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
 ORDER_TIMEOUT_SECONDS = int(os.getenv("ORDER_TIMEOUT", "30"))
 CONTRACTS_PER_TRADE = int(os.getenv("CONTRACTS_PER_TRADE", "1"))
+
+# New: Price guardrails
+MIN_PRICE_CENTS = int(os.getenv("MIN_PRICE_CENTS", "5"))  # Block < 5 cent trades
+MAX_PRICE_CENTS = int(os.getenv("MAX_PRICE_CENTS", "95"))  # Block > 95 cent trades
+MAX_EDGE_SUSPICIOUS = float(os.getenv("MAX_EDGE_SUSPICIOUS", "0.30"))  # Flag > 30% edge
+
+# Fee configuration
+FEE_CENTS = int(os.getenv("FEE_CENTS", str(DEFAULT_FEE_CENTS)))  # 2 cent fee
 
 # Database for tracking trades
 DB_PATH = Path(os.getenv("PROPS_DB_PATH", "props_trades.db"))
@@ -538,7 +552,13 @@ def execute_trade(
 
     print(f"  Kalshi ask: {kalshi_ask}¢")
 
-    # Step 5a: Check Kalshi odds filter (better than -200 = ≤67¢)
+    # Step 5a: Price guardrails
+    price_check = validate_price(kalshi_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+    if not price_check.is_valid:
+        print(f"  [skip] {price_check.message}")
+        return "skip"
+
+    # Check Kalshi odds filter (better than -200 = ≤67¢)
     if kalshi_ask > MAX_KALSHI_ASK_CENTS:
         print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ (worse than -200)")
         return "skip"
@@ -589,19 +609,30 @@ def execute_trade(
         print(f"  [skip] Fair prob {fair_prob:.1%} ({fair_american:+d}) < {MIN_FAIR_PROB:.1%} (worse than +200)")
         return "skip"
 
-    # Step 6: Recalculate edge
+    # Step 6: Recalculate edge with fee adjustment
     kalshi_prob = kalshi_ask / 100.0
-    edge = fair_prob - kalshi_prob
+    edge_info = calculate_edge_with_fee(fair_prob, kalshi_ask, FEE_CENTS)
+    raw_edge = edge_info["raw_edge"]
+    net_edge = edge_info["net_edge"]
 
-    print(f"  Fair prob: {fair_prob:.1%}, Kalshi: {kalshi_prob:.1%}, Edge: {edge:.1%}")
+    print(f"  Fair prob: {fair_prob:.1%}, Kalshi: {kalshi_prob:.1%}, Raw edge: {raw_edge:.1%}, Net edge: {net_edge:.1%}")
 
-    # Step 7: Check minimum edge
-    if edge < MIN_FINAL_EV:
-        print(f"  [skip] Edge {edge:.1%} < {MIN_FINAL_EV:.1%} threshold")
+    # Step 7: Check minimum edge (use net_edge after fees)
+    if net_edge < MIN_FINAL_EV:
+        print(f"  [skip] Net edge {net_edge:.1%} < {MIN_FINAL_EV:.1%} threshold (raw: {raw_edge:.1%})")
         return "skip"
+
+    # Check for suspicious edge
+    edge_check = validate_edge(net_edge, MIN_FINAL_EV, MAX_EDGE_SUSPICIOUS)
+    if not edge_check.is_valid and not edge_check.is_blocking:
+        print(f"  [warn] {edge_check.message}")
+        # Continue but flag in Discord
 
     # All checks passed - place order
     print(f"  Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
+
+    # Use net_edge for recording (fee-adjusted)
+    edge = net_edge
 
     if DRY_RUN:
         print("  [DRY_RUN] Would place order")
@@ -623,13 +654,14 @@ def execute_trade(
         print(f"  Order placed: {order_id}")
 
         # Discord notification - order placed
-        ev_cents = edge * 100
+        ev_cents = net_edge * 100
         timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        edge_warning = " ⚠️" if net_edge > MAX_EDGE_SUSPICIOUS else ""
         place_msg = (
-            f"**Order Placed** | {player} {stat_type} {line:.0f}+ {side}\n"
+            f"**Order Placed**{edge_warning} | {player} {stat_type} {line:.0f}+ {side}\n"
             f"Order ID: {order_id}\n"
-            f"Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
-            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
+            f"Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Net Edge: {net_edge:.1%} | EV: {ev_cents:.1f}¢\n"
+            f"Books: {books_count} | Fee: {FEE_CENTS}¢ | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
             f"_{timestamp}_"
         )
         post_discord(place_msg)
@@ -668,14 +700,16 @@ def execute_trade(
             )
 
             # Discord notification - filled
-            actual_edge = fair_prob - (fill_price / 100.0)
-            ev_cents = actual_edge * 100
+            # Recalculate edge with actual fill price
+            fill_edge_info = calculate_edge_with_fee(fair_prob, fill_price, FEE_CENTS)
+            actual_net_edge = fill_edge_info["net_edge"]
+            ev_cents = actual_net_edge * 100
             timestamp = datetime.now(ET).strftime("%I:%M %p ET")
             msg = (
                 f"**FILLED** | {player} {stat_type} {line:.0f}+ {side}\n"
                 f"Order ID: {order_id}\n"
-                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
-                f"Books: {books_count}\n"
+                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Net Edge: {actual_net_edge:.1%} | EV: {ev_cents:.1f}¢\n"
+                f"Books: {books_count} | Fee: {FEE_CENTS}¢\n"
                 f"_{timestamp}_"
             )
             post_discord(msg)

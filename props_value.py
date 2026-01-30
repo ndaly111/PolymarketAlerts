@@ -13,29 +13,18 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-from oddsapi_props import fetch_all_props, normalize_player_name
+from oddsapi_props import fetch_all_props
 from kalshi_props import fetch_kalshi_props, kalshi_props_by_player
 
-
-def make_session() -> requests.Session:
-    """Create a requests session with retry logic."""
-    s = requests.Session()
-    retries = Retry(
-        total=6,
-        backoff_factor=1.0,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
-        raise_on_status=False,
-    )
-    s.mount("https://", HTTPAdapter(max_retries=retries))
-    s.headers.update({"Accept": "application/json", "User-Agent": "props-value/1.0"})
-    return s
+# Import from lib/ modules
+from lib.http import make_session, get_session
+from lib.edge import calculate_edge_with_fee, kelly_fraction, round_kelly, DEFAULT_FEE_CENTS
+from lib.validation import validate_price, validate_edge
+from lib.normalization import normalize_player_name
 
 
-SESSION = make_session()
+SESSION = get_session()
 
 # Environment config
 def env_int(name: str, default: int) -> int:
@@ -56,8 +45,16 @@ TOP_N = env_int("TOP_N", 20)
 DEBUG_MODE = env_int("DEBUG_MODE", 0)
 DRY_RUN = env_int("DRY_RUN", 0)
 
+# Price guardrails (new)
+MIN_PRICE_CENTS = env_int("MIN_PRICE_CENTS", 5)  # Block <5 cent trades
+MAX_PRICE_CENTS = env_int("MAX_PRICE_CENTS", 95)  # Block >95 cent trades
+MAX_EDGE_SUSPICIOUS = env_float("MAX_EDGE_SUSPICIOUS", 0.30)  # Flag >30% edge
+
+# Fee configuration
+FEE_CENTS = env_int("FEE_CENTS", DEFAULT_FEE_CENTS)  # 2 cent fee per contract
+
 # Kelly criterion config
-KELLY_FRACTION = env_float("KELLY_FRACTION", 0.5)  # Half Kelly by default
+KELLY_FRACTION_VAL = env_float("KELLY_FRACTION", 0.5)  # Half Kelly by default
 
 # Discord config
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
@@ -162,25 +159,23 @@ def match_props(
             fair_prob = odds_under_prob
             kalshi_price = 1 - kalshi_over_prob  # Price to buy NO (under)
 
-        # EV per contract: Expected profit per $1 notional
-        # Buy at kalshi_price, win $1 with prob fair_prob
-        # EV = fair_prob * (1 - kalshi_price) - (1 - fair_prob) * kalshi_price
-        #    = fair_prob - kalshi_price = edge
-        ev_per_contract = best_edge  # In dollars (contracts pay $1)
+        # Convert to cents for edge calculation
+        price_cents = int(kalshi_price * 100)
+
+        # Use fee-adjusted edge calculation from lib/edge.py
+        edge_info = calculate_edge_with_fee(fair_prob, price_cents, FEE_CENTS)
+        raw_edge = edge_info["raw_edge"]
+        net_edge = edge_info["net_edge"]
+
+        # EV per contract is net edge after fees
+        ev_per_contract = net_edge
 
         # ROI: Return on capital risked
         # ROI = EV / cost = edge / kalshi_price
-        roi = best_edge / kalshi_price if kalshi_price > 0 else 0
+        roi = net_edge / kalshi_price if kalshi_price > 0 else 0
 
-        # Kelly criterion: optimal fraction of bankroll to bet
-        # For binary bet: kelly = (p * b - q) / b where p=win prob, q=lose prob, b=odds
-        # For Kalshi: b = (1 - price) / price (profit per dollar risked)
-        # kelly = (fair_prob * (1-price)/price - (1-fair_prob)) / ((1-price)/price)
-        #       = (fair_prob * (1-price) - (1-fair_prob) * price) / (1-price)
-        #       = (fair_prob - price) / (1 - price)
-        #       = edge / (1 - kalshi_price)
-        full_kelly = best_edge / (1 - kalshi_price) if kalshi_price < 1 else 0
-        kelly_bet = full_kelly * KELLY_FRACTION
+        # Kelly criterion using fee-adjusted edge
+        kelly_bet = kelly_fraction(fair_prob, price_cents, FEE_CENTS, KELLY_FRACTION_VAL)
 
         match = {
             # Player info
@@ -209,17 +204,20 @@ def match_props(
             "away_team": op.get("away_team", ""),
             "commence_time": op.get("commence_time", ""),
             "sport_key": op.get("sport_key", ""),
-            # Edge calculations
+            # Edge calculations (raw and net after fees)
             "over_edge": over_edge,
             "under_edge": under_edge,
-            "best_edge": best_edge,
+            "best_edge": best_edge,  # Raw edge for compatibility
+            "raw_edge": raw_edge,  # Raw edge before fees
+            "net_edge": net_edge,  # Net edge after 2 cent fee
             "best_side": best_side,
             # EV and Kelly
-            "ev_per_contract": ev_per_contract,
+            "ev_per_contract": ev_per_contract,  # Now uses net_edge
             "roi": roi,
-            "full_kelly": full_kelly,
             "kelly_bet": kelly_bet,
             "bet_price": kalshi_price,  # The price you'd pay for the recommended side
+            "price_cents": price_cents,
+            "fee_cents": FEE_CENTS,
         }
         matches.append(match)
 
@@ -231,9 +229,35 @@ def filter_and_rank(
     min_edge: float = MIN_EDGE,
     top_n: int = TOP_N,
 ) -> List[Dict[str, Any]]:
-    """Filter by minimum edge and rank by best edge."""
-    filtered = [m for m in matches if m.get("best_edge", 0) >= min_edge]
-    filtered.sort(key=lambda x: x.get("best_edge", 0), reverse=True)
+    """Filter by minimum edge and rank by best edge.
+
+    Now uses net_edge (after fees) for filtering and ranking.
+    Also applies price guardrails.
+    """
+    filtered = []
+    for m in matches:
+        # Use net_edge for threshold comparison (accounts for 2 cent fee)
+        net_edge = m.get("net_edge", m.get("best_edge", 0))
+        price_cents = m.get("price_cents", int(m.get("bet_price", 0.5) * 100))
+
+        # Apply price guardrails
+        price_check = validate_price(price_cents, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+        if not price_check.is_valid:
+            continue
+
+        # Check edge threshold
+        if net_edge < min_edge:
+            continue
+
+        # Flag suspicious edges but don't filter them
+        edge_check = validate_edge(net_edge, min_edge, MAX_EDGE_SUSPICIOUS)
+        if not edge_check.is_valid and not edge_check.is_blocking:
+            m["edge_warning"] = edge_check.message
+
+        filtered.append(m)
+
+    # Sort by net_edge (fee-adjusted)
+    filtered.sort(key=lambda x: x.get("net_edge", x.get("best_edge", 0)), reverse=True)
     return filtered[:top_n]
 
 
@@ -298,16 +322,7 @@ def prob_to_american(prob: float) -> str:
         return f"+{int(odds)}"
 
 
-def round_kelly(kelly: float) -> float:
-    """Round Kelly down to nearest 5% increment, with 2.5% as an option."""
-    if kelly <= 0:
-        return 0
-    if kelly < 0.025:
-        return 0
-    if kelly < 0.05:
-        return 0.025
-    # Round down to nearest 5%
-    return (int(kelly * 20) / 20)
+# round_kelly imported from lib.edge
 
 
 def format_matchup(home_team: str, away_team: str) -> str:

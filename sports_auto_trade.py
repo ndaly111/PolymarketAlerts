@@ -6,10 +6,11 @@ Workflow:
 1. Fetch Kalshi sports markets (moneylines, spreads, totals)
 2. Fetch sportsbook odds from Odds API (with caching)
 3. Match Kalshi markets to sportsbook events by team
-4. Calculate edges (fair prob vs Kalshi price)
-5. Filter for opportunities: EV >= threshold, min books
-6. Place limit orders on Kalshi
-7. Track in database with settlement support
+4. Calculate edges with fee adjustment
+5. Filter for opportunities: Net EV >= threshold, min books
+6. Apply price guardrails and ticker validation
+7. Place limit orders on Kalshi
+8. Track in database with settlement support
 
 Similar to props_auto_trade.py but for game lines instead of player props.
 """
@@ -32,8 +33,13 @@ from oddsapi_lines import (
     fair_prob_h2h,
     fair_prob_spread,
     fair_prob_total,
-    normalize_team_name,
 )
+
+# Import from lib/ modules
+from lib.config import TradingConfig
+from lib.edge import calculate_edge_with_fee, DEFAULT_FEE_CENTS
+from lib.validation import validate_price, validate_edge, validate_ticker_matchup
+from lib.normalization import normalize_team_name, name_similarity
 
 # --- Configuration ---
 MIN_EDGE = float(os.getenv("SPORTS_MIN_EDGE", "0.05"))  # 5% min edge
@@ -43,6 +49,14 @@ MIN_KALSHI_ASK_CENTS = int(os.getenv("SPORTS_MIN_ASK", "33"))  # ≥ 33¢ (+200)
 MAX_TRADES_PER_DAY = int(os.getenv("SPORTS_MAX_TRADES_PER_DAY", "10"))
 ORDER_TIMEOUT_SECONDS = int(os.getenv("SPORTS_ORDER_TIMEOUT", "30"))
 CONTRACTS_PER_TRADE = int(os.getenv("SPORTS_CONTRACTS_PER_TRADE", "1"))
+
+# New: Price guardrails
+MIN_PRICE_CENTS = int(os.getenv("SPORTS_MIN_PRICE_CENTS", "5"))  # Block < 5 cent trades
+MAX_PRICE_CENTS = int(os.getenv("SPORTS_MAX_PRICE_CENTS", "95"))  # Block > 95 cent trades
+MAX_EDGE_SUSPICIOUS = float(os.getenv("SPORTS_MAX_EDGE_SUSPICIOUS", "0.30"))  # Flag > 30% edge
+
+# Fee configuration
+FEE_CENTS = int(os.getenv("SPORTS_FEE_CENTS", str(DEFAULT_FEE_CENTS)))  # 2 cent fee
 
 # Database for tracking trades
 DB_PATH = Path(os.getenv("SPORTS_DB_PATH", "sports_trades.db"))
@@ -162,40 +176,7 @@ def parse_line_from_subtitle(line_type: str, subtitle: str) -> Optional[Dict[str
     return None
 
 
-def name_similarity(a: str, b: str) -> float:
-    """Deterministic similarity score in [0,1] for team name matching."""
-    na = normalize_team_name(a)
-    nb = normalize_team_name(b)
-    if not na or not nb:
-        return 0.0
-    if na == nb:
-        return 1.0
-    if na in nb or nb in na:
-        short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
-        if len(short) >= 4:
-            return 0.90
-        if len(short) == 3 and long_.startswith(short):
-            return 0.85
-
-    stop = {
-        "pro", "professional", "football", "basketball", "baseball", "hockey",
-        "game", "match", "season", "playoffs", "postseason",
-        "nfl", "nba", "mlb", "nhl", "ncaaf", "ncaab",
-    }
-
-    ta = [t for t in na.split() if t not in stop]
-    tb = [t for t in nb.split() if t not in stop]
-    if not ta or not tb:
-        ta = na.split()
-        tb = nb.split()
-
-    sa = set(ta)
-    sb = set(tb)
-    inter = len(sa & sb)
-    union = len(sa | sb)
-    if union == 0:
-        return 0.0
-    return inter / union
+# name_similarity imported from lib.normalization
 
 
 def best_event_match(
@@ -782,7 +763,37 @@ def try_execute_trade(
         print(f"    [skip] Already traded today: {ticker}")
         return "skip"
 
-    print(f"    Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
+    # Price guardrails validation
+    price_check = validate_price(kalshi_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+    if not price_check.is_valid:
+        print(f"    [skip] {price_check.message}")
+        return "skip"
+
+    # Ticker/title validation
+    ticker_check = validate_ticker_matchup(ticker, event_title)
+    if not ticker_check.is_valid and ticker_check.is_blocking:
+        print(f"    [skip] {ticker_check.message}")
+        return "skip"
+
+    # Calculate fee-adjusted edge
+    edge_info = calculate_edge_with_fee(fair_prob, kalshi_ask, FEE_CENTS)
+    raw_edge = edge_info["raw_edge"]
+    net_edge = edge_info["net_edge"]
+
+    # Check edge with fee adjustment
+    if net_edge < MIN_EDGE:
+        print(f"    [skip] Net edge {net_edge:.1%} < {MIN_EDGE:.1%} (raw: {raw_edge:.1%})")
+        return "skip"
+
+    # Check for suspicious edge
+    edge_check = validate_edge(net_edge, MIN_EDGE, MAX_EDGE_SUSPICIOUS)
+    if not edge_check.is_valid and not edge_check.is_blocking:
+        print(f"    [warn] {edge_check.message}")
+
+    # Use net_edge for recording
+    edge = net_edge
+
+    print(f"    Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢ (net edge: {net_edge:.1%})")
 
     if DRY_RUN:
         print("    [DRY_RUN] Would place order")
@@ -804,14 +815,15 @@ def try_execute_trade(
         print(f"    Order placed: {order_id}")
 
         # Discord notification - order placed
-        ev_cents = edge * 100
+        ev_cents = net_edge * 100
         timestamp = datetime.now(ET).strftime("%I:%M %p ET")
+        edge_warning = " ⚠️" if net_edge > MAX_EDGE_SUSPICIOUS else ""
         place_msg = (
-            f"**Sports Order Placed** | {line_type.upper()} {line_label}\n"
+            f"**Sports Order Placed**{edge_warning} | {line_type.upper()} {line_label}\n"
             f"Event: {event_title}\n"
             f"Order ID: {order_id}\n"
-            f"Side: {side} | Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Edge: {edge:.1%} | EV: {ev_cents:.1f}¢\n"
-            f"Books: {books_count} | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
+            f"Side: {side} | Limit: {kalshi_ask}¢ | Fair: {fair_prob:.1%} | Net Edge: {net_edge:.1%} | EV: {ev_cents:.1f}¢\n"
+            f"Books: {books_count} | Fee: {FEE_CENTS}¢ | Waiting {ORDER_TIMEOUT_SECONDS}s for fill...\n"
             f"_{timestamp}_"
         )
         post_discord(place_msg)
@@ -852,15 +864,16 @@ def try_execute_trade(
             )
 
             # Discord notification - filled
-            actual_edge = fair_prob - (fill_price / 100.0)
-            ev_cents = actual_edge * 100
+            fill_edge_info = calculate_edge_with_fee(fair_prob, fill_price, FEE_CENTS)
+            actual_net_edge = fill_edge_info["net_edge"]
+            ev_cents = actual_net_edge * 100
             timestamp = datetime.now(ET).strftime("%I:%M %p ET")
             msg = (
                 f"**Sports FILLED** | {line_type.upper()} {line_label}\n"
                 f"Event: {event_title}\n"
                 f"Order ID: {order_id}\n"
-                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Edge: {actual_edge:.1%} | EV: {ev_cents:.1f}¢\n"
-                f"Books: {books_count}\n"
+                f"Fill: {fill_price}¢ | Fair: {fair_prob:.1%} | Net Edge: {actual_net_edge:.1%} | EV: {ev_cents:.1f}¢\n"
+                f"Books: {books_count} | Fee: {FEE_CENTS}¢\n"
                 f"_{timestamp}_"
             )
             post_discord(msg)
@@ -1037,10 +1050,16 @@ def calculate_edge_for_market(
             books_count = fair.get("books_used", 0)
 
             # Check YES side (betting on this team to win)
-            yes_prob = yes_ask / 100.0
-            yes_edge = fair_prob - yes_prob
+            # Use fee-adjusted edge calculation
+            yes_edge_info = calculate_edge_with_fee(fair_prob, yes_ask, FEE_CENTS)
+            yes_net_edge = yes_edge_info["net_edge"]
 
-            if yes_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS:
+            # Apply price guardrails
+            yes_price_check = validate_price(yes_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+
+            if (yes_net_edge >= MIN_EDGE and
+                MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS and
+                yes_price_check.is_valid):
                 opportunities.append({
                     "ticker": ticker,
                     "event_title": f"{away_team} at {home_team}",
@@ -1049,17 +1068,22 @@ def calculate_edge_for_market(
                     "side": "YES",
                     "kalshi_ask": yes_ask,
                     "fair_prob": fair_prob,
-                    "edge": yes_edge,
+                    "edge": yes_net_edge,  # Net edge after fees
+                    "raw_edge": yes_edge_info["raw_edge"],
                     "books_count": books_count,
                     "commence_time": commence_time,
                 })
 
             # Check NO side (betting against this team)
-            no_prob = no_ask / 100.0
             no_fair = 1.0 - fair_prob
-            no_edge = no_fair - no_prob
+            no_edge_info = calculate_edge_with_fee(no_fair, no_ask, FEE_CENTS)
+            no_net_edge = no_edge_info["net_edge"]
 
-            if no_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS:
+            no_price_check = validate_price(no_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+
+            if (no_net_edge >= MIN_EDGE and
+                MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS and
+                no_price_check.is_valid):
                 other_team = home_team if mapped_team == away_team else away_team
                 opportunities.append({
                     "ticker": ticker,
@@ -1069,7 +1093,8 @@ def calculate_edge_for_market(
                     "side": "NO",
                     "kalshi_ask": no_ask,
                     "fair_prob": no_fair,
-                    "edge": no_edge,
+                    "edge": no_net_edge,  # Net edge after fees
+                    "raw_edge": no_edge_info["raw_edge"],
                     "books_count": books_count,
                     "commence_time": commence_time,
                 })
@@ -1103,10 +1128,15 @@ def calculate_edge_for_market(
             fair_prob = fair.get("fair_prob", 0.5)
             books_count = fair.get("books_used", 0)
 
-            kalshi_prob = kalshi_ask_val / 100.0
-            edge = fair_prob - kalshi_prob
+            # Calculate fee-adjusted edge
+            spread_edge_info = calculate_edge_with_fee(fair_prob, kalshi_ask_val, FEE_CENTS)
+            spread_net_edge = spread_edge_info["net_edge"]
 
-            if edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= kalshi_ask_val <= MAX_KALSHI_ASK_CENTS:
+            spread_price_check = validate_price(kalshi_ask_val, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+
+            if (spread_net_edge >= MIN_EDGE and
+                MIN_KALSHI_ASK_CENTS <= kalshi_ask_val <= MAX_KALSHI_ASK_CENTS and
+                spread_price_check.is_valid):
                 opportunities.append({
                     "ticker": ticker,
                     "event_title": f"{away_team} at {home_team}",
@@ -1115,7 +1145,8 @@ def calculate_edge_for_market(
                     "side": side,
                     "kalshi_ask": kalshi_ask_val,
                     "fair_prob": fair_prob,
-                    "edge": edge,
+                    "edge": spread_net_edge,
+                    "raw_edge": spread_edge_info["raw_edge"],
                     "books_count": books_count,
                     "commence_time": commence_time,
                 })
@@ -1137,10 +1168,14 @@ def calculate_edge_for_market(
         books_count = fair.get("books_used", 0)
 
         # YES means the total line hits
-        yes_prob = yes_ask / 100.0
-        yes_edge = fair_prob - yes_prob
+        total_yes_edge_info = calculate_edge_with_fee(fair_prob, yes_ask, FEE_CENTS)
+        total_yes_net_edge = total_yes_edge_info["net_edge"]
 
-        if yes_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS:
+        total_yes_price_check = validate_price(yes_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+
+        if (total_yes_net_edge >= MIN_EDGE and
+            MIN_KALSHI_ASK_CENTS <= yes_ask <= MAX_KALSHI_ASK_CENTS and
+            total_yes_price_check.is_valid):
             opportunities.append({
                 "ticker": ticker,
                 "event_title": f"{away_team} at {home_team}",
@@ -1149,18 +1184,23 @@ def calculate_edge_for_market(
                 "side": "YES",
                 "kalshi_ask": yes_ask,
                 "fair_prob": fair_prob,
-                "edge": yes_edge,
+                "edge": total_yes_net_edge,
+                "raw_edge": total_yes_edge_info["raw_edge"],
                 "books_count": books_count,
                 "commence_time": commence_time,
             })
 
         # NO means opposite side
-        no_prob = no_ask / 100.0
         no_fair = 1.0 - fair_prob
-        no_edge = no_fair - no_prob
+        total_no_edge_info = calculate_edge_with_fee(no_fair, no_ask, FEE_CENTS)
+        total_no_net_edge = total_no_edge_info["net_edge"]
         opposite_side = "under" if total_side == "over" else "over"
 
-        if no_edge >= MIN_EDGE and MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS:
+        total_no_price_check = validate_price(no_ask, MIN_PRICE_CENTS, MAX_PRICE_CENTS)
+
+        if (total_no_net_edge >= MIN_EDGE and
+            MIN_KALSHI_ASK_CENTS <= no_ask <= MAX_KALSHI_ASK_CENTS and
+            total_no_price_check.is_valid):
             opportunities.append({
                 "ticker": ticker,
                 "event_title": f"{away_team} at {home_team}",
@@ -1169,7 +1209,8 @@ def calculate_edge_for_market(
                 "side": "NO",
                 "kalshi_ask": no_ask,
                 "fair_prob": no_fair,
-                "edge": no_edge,
+                "edge": total_no_net_edge,
+                "raw_edge": total_no_edge_info["raw_edge"],
                 "books_count": books_count,
                 "commence_time": commence_time,
             })
