@@ -25,6 +25,8 @@ cities:
       issuedby: MIA
       site: MFL
       product: CLI
+    # Weather feature config
+    ndbc_buoy: FWYF1  # Fowey Rocks, FL
 
   - key: LAXHIGH
     label: Los Angeles (LAX)
@@ -38,6 +40,9 @@ cities:
       issuedby: LAX
       site: LOX
       product: CLI
+    # Weather feature config
+    ndbc_buoy: "46025"  # Santa Monica Basin
+    smoke_relevant: true
 
   - key: CHIHIGH
     label: Chicago
@@ -104,6 +109,10 @@ cities:
       issuedby: SFO
       site: MTR
       product: CLI
+    # Weather feature config
+    ndbc_buoy: "46026"  # San Francisco
+    smoke_relevant: true
+    fog_prone: true
 
   - key: PHLHIGH
     label: Philadelphia
@@ -130,6 +139,9 @@ cities:
       issuedby: SEA
       site: SEW
       product: CLI
+    # Weather feature config
+    ndbc_buoy: "46029"  # Columbia River Bar
+    smoke_relevant: true
 
   - key: DCHIGH
     label: Washington DC
@@ -169,3 +181,5 @@ cities:
       issuedby: MSY
       site: LIX
       product: CLI
+    # Weather feature config
+    ndbc_buoy: "42040"  # Gulf of Mexico

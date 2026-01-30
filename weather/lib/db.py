@@ -61,6 +61,13 @@ def ensure_schema(db_path: Path) -> None:
             """
         )
 
+        # Add forecast_context column if it doesn't exist (migration)
+        forecast_cols = {row[1] for row in conn.execute("PRAGMA table_info(forecast_snapshots);").fetchall()}
+        if "forecast_context_json" not in forecast_cols:
+            conn.execute(
+                "ALTER TABLE forecast_snapshots ADD COLUMN forecast_context_json TEXT;"
+            )
+
         # Observed highs from CLI (you already create this in collect_cli_observed.py)
         conn.execute(
             """
@@ -229,6 +236,142 @@ def ensure_schema(db_path: Path) -> None:
             """
         )
 
+        # NBM probabilistic forecasts with native percentiles and exceedance probabilities
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nbm_probabilistic_forecasts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              target_date_local TEXT NOT NULL,      -- YYYY-MM-DD
+              snapshot_time_utc TEXT NOT NULL,      -- ISO, when we captured this
+              model_run_utc TEXT NOT NULL,          -- ISO, NBM model initialization time
+              lead_hours INTEGER NOT NULL,          -- hours from model_run to target date's afternoon
+              metric TEXT NOT NULL DEFAULT 'tmax',  -- 'tmax' or 'tmin'
+              p10 INTEGER,                          -- 10th percentile (°F)
+              p25 INTEGER,                          -- 25th percentile (°F)
+              p50 INTEGER,                          -- 50th percentile (median, °F)
+              p75 INTEGER,                          -- 75th percentile (°F)
+              p90 INTEGER,                          -- 90th percentile (°F)
+              exceedance_json TEXT,                 -- {threshold_int: P(T >= threshold)}
+              raw_source TEXT,                      -- S3 path or URL
+              qc_flags TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_nbm_prob_forecasts_unique
+            ON nbm_probabilistic_forecasts(city_key, target_date_local, model_run_utc, lead_hours, metric);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_nbm_prob_forecasts_lookup
+            ON nbm_probabilistic_forecasts(city_key, target_date_local, metric);
+            """
+        )
+
+        # Snow observations from SNODAS
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS snow_observations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              snapshot_time_utc TEXT NOT NULL,
+              snow_depth_inches REAL,
+              swe_inches REAL,
+              source TEXT NOT NULL,
+              lat REAL NOT NULL,
+              lon REAL NOT NULL,
+              raw_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_snow_unique
+            ON snow_observations(city_key, date_local, source);
+            """
+        )
+
+        # SST observations from NDBC buoys
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sst_observations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              observation_time_utc TEXT NOT NULL,
+              sst_f REAL NOT NULL,
+              sst_anomaly_f REAL,
+              buoy_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              raw_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_sst_unique
+            ON sst_observations(city_key, date_local, buoy_id);
+            """
+        )
+
+        # Visibility observations from METAR
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS visibility_observations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              observation_time_utc TEXT NOT NULL,
+              visibility_miles REAL NOT NULL,
+              ceiling_ft INTEGER,
+              fog_present INTEGER NOT NULL DEFAULT 0,
+              station_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              raw_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_visibility_unique
+            ON visibility_observations(city_key, date_local, observation_time_utc, station_id);
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_visibility_lookup
+            ON visibility_observations(city_key, date_local);
+            """
+        )
+
+        # Smoke observations from NOAA HMS
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS smoke_observations (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              observation_time_utc TEXT NOT NULL,
+              smoke_present INTEGER NOT NULL DEFAULT 0,
+              smoke_density TEXT,
+              source TEXT NOT NULL,
+              lat REAL NOT NULL,
+              lon REAL NOT NULL,
+              raw_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smoke_unique
+            ON smoke_observations(city_key, date_local, source);
+            """
+        )
+
 
 def upsert_forecast_snapshot(
     db_path: Path,
@@ -244,17 +387,23 @@ def upsert_forecast_snapshot(
     forecast_url: str,
     qc_flags: Iterable[str],
     raw: Dict[str, Any],
+    forecast_context: Optional[Dict[str, Any]] = None,
 ) -> None:
     ensure_schema(db_path)
     qc = ",".join(sorted(set(qc_flags))) if qc_flags else ""
     raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False)
+    context_json = (
+        json.dumps(forecast_context, separators=(",", ":"), ensure_ascii=False)
+        if forecast_context
+        else None
+    )
     with connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO forecast_snapshots
               (city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
-               forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json, forecast_context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city_key, target_date_local, snapshot_hour_local, source) DO UPDATE SET
               snapshot_time_utc=excluded.snapshot_time_utc,
               snapshot_tz=excluded.snapshot_tz,
@@ -263,7 +412,8 @@ def upsert_forecast_snapshot(
               points_url=excluded.points_url,
               forecast_url=excluded.forecast_url,
               qc_flags=excluded.qc_flags,
-              raw_json=excluded.raw_json;
+              raw_json=excluded.raw_json,
+              forecast_context_json=excluded.forecast_context_json;
             """,
             (
                 city_key,
@@ -277,6 +427,7 @@ def upsert_forecast_snapshot(
                 forecast_url,
                 qc,
                 raw_json,
+                context_json,
             ),
         )
 
@@ -626,7 +777,8 @@ def fetch_forecast_snapshot(
                   points_url,
                   forecast_url,
                   qc_flags,
-                  raw_json
+                  raw_json,
+                  forecast_context_json
                 FROM forecast_snapshots
                 WHERE city_key = ?
                   AND target_date_local = ?
@@ -650,7 +802,8 @@ def fetch_forecast_snapshot(
                   points_url,
                   forecast_url,
                   qc_flags,
-                  raw_json
+                  raw_json,
+                  forecast_context_json
                 FROM forecast_snapshots
                 WHERE city_key = ?
                   AND target_date_local = ?
@@ -677,6 +830,8 @@ def fetch_forecast_snapshot(
         "qc_flags": row[9],
         "raw_json": row[10],
         "raw": json.loads(row[10]) if row[10] else {},
+        "forecast_context_json": row[11],
+        "forecast_context": json.loads(row[11]) if row[11] else None,
     }
 
 
@@ -703,7 +858,8 @@ def fetch_latest_forecast_snapshot(
               points_url,
               forecast_url,
               qc_flags,
-              raw_json
+              raw_json,
+              forecast_context_json
             FROM forecast_snapshots
             WHERE city_key = ?
               AND target_date_local = ?
@@ -728,6 +884,8 @@ def fetch_latest_forecast_snapshot(
         "qc_flags": row[9],
         "raw_json": row[10],
         "raw": json.loads(row[10]) if row[10] else {},
+        "forecast_context_json": row[11],
+        "forecast_context": json.loads(row[11]) if row[11] else None,
     }
 
 
@@ -1015,3 +1173,554 @@ def ensure_weather_trades_schema(db_path: Path) -> None:
         for column in ("placed_at_utc", "last_checked_at_utc", "filled_at_utc"):
             if column not in columns:
                 conn.execute(f"ALTER TABLE weather_trades ADD COLUMN {column} TEXT;")
+
+
+# ---------------------------------------------------------------------------
+# NBM probabilistic forecast functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_nbm_probabilistic_forecast(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    snapshot_time_utc: str,
+    model_run_utc: str,
+    lead_hours: int,
+    metric: str = "tmax",
+    p10: Optional[int] = None,
+    p25: Optional[int] = None,
+    p50: Optional[int] = None,
+    p75: Optional[int] = None,
+    p90: Optional[int] = None,
+    exceedance: Optional[Dict[int, float]] = None,
+    raw_source: Optional[str] = None,
+    qc_flags: Optional[Iterable[str]] = None,
+) -> None:
+    """Insert or update an NBM probabilistic forecast."""
+    ensure_schema(db_path)
+    qc = ",".join(sorted(set(qc_flags))) if qc_flags else ""
+    exceedance_json = (
+        json.dumps({str(k): v for k, v in exceedance.items()}, separators=(",", ":"))
+        if exceedance
+        else None
+    )
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO nbm_probabilistic_forecasts
+              (city_key, target_date_local, snapshot_time_utc, model_run_utc, lead_hours,
+               metric, p10, p25, p50, p75, p90, exceedance_json, raw_source, qc_flags)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, target_date_local, model_run_utc, lead_hours, metric) DO UPDATE SET
+              snapshot_time_utc=excluded.snapshot_time_utc,
+              p10=excluded.p10,
+              p25=excluded.p25,
+              p50=excluded.p50,
+              p75=excluded.p75,
+              p90=excluded.p90,
+              exceedance_json=excluded.exceedance_json,
+              raw_source=excluded.raw_source,
+              qc_flags=excluded.qc_flags;
+            """,
+            (
+                city_key,
+                target_date_local,
+                snapshot_time_utc,
+                model_run_utc,
+                int(lead_hours),
+                metric,
+                p10,
+                p25,
+                p50,
+                p75,
+                p90,
+                exceedance_json,
+                raw_source,
+                qc,
+            ),
+        )
+
+
+def fetch_latest_nbm_forecast(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    metric: str = "tmax",
+) -> Optional[Dict[str, Any]]:
+    """Fetch the most recent NBM forecast for a city/date/metric."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, target_date_local, snapshot_time_utc, model_run_utc, lead_hours,
+              metric, p10, p25, p50, p75, p90, exceedance_json, raw_source, qc_flags
+            FROM nbm_probabilistic_forecasts
+            WHERE city_key = ? AND target_date_local = ? AND metric = ?
+            ORDER BY model_run_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local, metric),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    exceedance_raw = json.loads(row[11]) if row[11] else {}
+    exceedance = {int(k): float(v) for k, v in exceedance_raw.items()}
+
+    return {
+        "city_key": row[0],
+        "target_date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "model_run_utc": row[3],
+        "lead_hours": int(row[4]),
+        "metric": row[5],
+        "p10": int(row[6]) if row[6] is not None else None,
+        "p25": int(row[7]) if row[7] is not None else None,
+        "p50": int(row[8]) if row[8] is not None else None,
+        "p75": int(row[9]) if row[9] is not None else None,
+        "p90": int(row[10]) if row[10] is not None else None,
+        "exceedance": exceedance,
+        "raw_source": row[12],
+        "qc_flags": row[13],
+    }
+
+
+def fetch_nbm_forecast_at_time(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    as_of_utc: str,
+    metric: str = "tmax",
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch NBM forecast that was available at a specific time (for backtesting).
+    Returns the most recent forecast where model_run_utc <= as_of_utc.
+    """
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, target_date_local, snapshot_time_utc, model_run_utc, lead_hours,
+              metric, p10, p25, p50, p75, p90, exceedance_json, raw_source, qc_flags
+            FROM nbm_probabilistic_forecasts
+            WHERE city_key = ? AND target_date_local = ? AND metric = ?
+              AND model_run_utc <= ?
+            ORDER BY model_run_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, target_date_local, metric, as_of_utc),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    exceedance_raw = json.loads(row[11]) if row[11] else {}
+    exceedance = {int(k): float(v) for k, v in exceedance_raw.items()}
+
+    return {
+        "city_key": row[0],
+        "target_date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "model_run_utc": row[3],
+        "lead_hours": int(row[4]),
+        "metric": row[5],
+        "p10": int(row[6]) if row[6] is not None else None,
+        "p25": int(row[7]) if row[7] is not None else None,
+        "p50": int(row[8]) if row[8] is not None else None,
+        "p75": int(row[9]) if row[9] is not None else None,
+        "p90": int(row[10]) if row[10] is not None else None,
+        "exceedance": exceedance,
+        "raw_source": row[12],
+        "qc_flags": row[13],
+    }
+
+
+def fetch_nbm_forecast_history(
+    db_path: Path,
+    *,
+    city_key: str,
+    target_date_local: str,
+    metric: str = "tmax",
+) -> list[Dict[str, Any]]:
+    """Fetch all NBM forecasts for a city/date/metric, ordered by model run time."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+              city_key, target_date_local, snapshot_time_utc, model_run_utc, lead_hours,
+              metric, p10, p25, p50, p75, p90, exceedance_json, raw_source, qc_flags
+            FROM nbm_probabilistic_forecasts
+            WHERE city_key = ? AND target_date_local = ? AND metric = ?
+            ORDER BY model_run_utc ASC;
+            """,
+            (city_key, target_date_local, metric),
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        exceedance_raw = json.loads(row[11]) if row[11] else {}
+        exceedance = {int(k): float(v) for k, v in exceedance_raw.items()}
+        results.append({
+            "city_key": row[0],
+            "target_date_local": row[1],
+            "snapshot_time_utc": row[2],
+            "model_run_utc": row[3],
+            "lead_hours": int(row[4]),
+            "metric": row[5],
+            "p10": int(row[6]) if row[6] is not None else None,
+            "p25": int(row[7]) if row[7] is not None else None,
+            "p50": int(row[8]) if row[8] is not None else None,
+            "p75": int(row[9]) if row[9] is not None else None,
+            "p90": int(row[10]) if row[10] is not None else None,
+            "exceedance": exceedance,
+            "raw_source": row[12],
+            "qc_flags": row[13],
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Snow observation functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_snow_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    snapshot_time_utc: str,
+    snow_depth_inches: Optional[float],
+    swe_inches: Optional[float],
+    source: str,
+    lat: float,
+    lon: float,
+    raw: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert or update a snow observation."""
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False) if raw else None
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO snow_observations
+              (city_key, date_local, snapshot_time_utc, snow_depth_inches, swe_inches,
+               source, lat, lon, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local, source) DO UPDATE SET
+              snapshot_time_utc=excluded.snapshot_time_utc,
+              snow_depth_inches=excluded.snow_depth_inches,
+              swe_inches=excluded.swe_inches,
+              lat=excluded.lat,
+              lon=excluded.lon,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                city_key,
+                date_local,
+                snapshot_time_utc,
+                snow_depth_inches,
+                swe_inches,
+                source,
+                lat,
+                lon,
+                raw_json,
+            ),
+        )
+
+
+def fetch_snow_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch snow observation for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, date_local, snapshot_time_utc, snow_depth_inches, swe_inches,
+              source, lat, lon
+            FROM snow_observations
+            WHERE city_key = ? AND date_local = ?
+            ORDER BY snapshot_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, date_local),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "city_key": row[0],
+        "date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "snow_depth_inches": float(row[3]) if row[3] is not None else None,
+        "swe_inches": float(row[4]) if row[4] is not None else None,
+        "source": row[5],
+        "lat": float(row[6]),
+        "lon": float(row[7]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# SST observation functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_sst_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    observation_time_utc: str,
+    sst_f: float,
+    sst_anomaly_f: Optional[float],
+    buoy_id: str,
+    source: str,
+    raw: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert or update an SST observation."""
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False) if raw else None
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO sst_observations
+              (city_key, date_local, observation_time_utc, sst_f, sst_anomaly_f,
+               buoy_id, source, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local, buoy_id) DO UPDATE SET
+              observation_time_utc=excluded.observation_time_utc,
+              sst_f=excluded.sst_f,
+              sst_anomaly_f=excluded.sst_anomaly_f,
+              source=excluded.source,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                city_key,
+                date_local,
+                observation_time_utc,
+                sst_f,
+                sst_anomaly_f,
+                buoy_id,
+                source,
+                raw_json,
+            ),
+        )
+
+
+def fetch_sst_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch SST observation for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, date_local, observation_time_utc, sst_f, sst_anomaly_f,
+              buoy_id, source
+            FROM sst_observations
+            WHERE city_key = ? AND date_local = ?
+            ORDER BY observation_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, date_local),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "city_key": row[0],
+        "date_local": row[1],
+        "observation_time_utc": row[2],
+        "sst_f": float(row[3]),
+        "sst_anomaly_f": float(row[4]) if row[4] is not None else None,
+        "buoy_id": row[5],
+        "source": row[6],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Visibility observation functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_visibility_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    observation_time_utc: str,
+    visibility_miles: float,
+    ceiling_ft: Optional[int],
+    fog_present: bool,
+    station_id: str,
+    source: str,
+    raw: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert or update a visibility observation."""
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False) if raw else None
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO visibility_observations
+              (city_key, date_local, observation_time_utc, visibility_miles, ceiling_ft,
+               fog_present, station_id, source, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local, observation_time_utc, station_id) DO UPDATE SET
+              visibility_miles=excluded.visibility_miles,
+              ceiling_ft=excluded.ceiling_ft,
+              fog_present=excluded.fog_present,
+              source=excluded.source,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                city_key,
+                date_local,
+                observation_time_utc,
+                visibility_miles,
+                ceiling_ft,
+                1 if fog_present else 0,
+                station_id,
+                source,
+                raw_json,
+            ),
+        )
+
+
+def fetch_visibility_summary(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch visibility summary for a city/date (min visibility, fog hours)."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              MIN(visibility_miles) as min_visibility,
+              SUM(fog_present) as fog_hours,
+              COUNT(*) as obs_count
+            FROM visibility_observations
+            WHERE city_key = ? AND date_local = ?;
+            """,
+            (city_key, date_local),
+        ).fetchone()
+
+    if not row or row[2] == 0:
+        return None
+
+    return {
+        "city_key": city_key,
+        "date_local": date_local,
+        "visibility_min_miles": float(row[0]) if row[0] is not None else None,
+        "fog_hours": int(row[1]) if row[1] is not None else 0,
+        "obs_count": int(row[2]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Smoke observation functions
+# ---------------------------------------------------------------------------
+
+
+def upsert_smoke_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    observation_time_utc: str,
+    smoke_present: bool,
+    smoke_density: Optional[str],
+    source: str,
+    lat: float,
+    lon: float,
+    raw: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert or update a smoke observation."""
+    ensure_schema(db_path)
+    raw_json = json.dumps(raw, separators=(",", ":"), ensure_ascii=False) if raw else None
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO smoke_observations
+              (city_key, date_local, observation_time_utc, smoke_present, smoke_density,
+               source, lat, lon, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local, source) DO UPDATE SET
+              observation_time_utc=excluded.observation_time_utc,
+              smoke_present=excluded.smoke_present,
+              smoke_density=excluded.smoke_density,
+              lat=excluded.lat,
+              lon=excluded.lon,
+              raw_json=excluded.raw_json;
+            """,
+            (
+                city_key,
+                date_local,
+                observation_time_utc,
+                1 if smoke_present else 0,
+                smoke_density,
+                source,
+                lat,
+                lon,
+                raw_json,
+            ),
+        )
+
+
+def fetch_smoke_observation(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch smoke observation for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT
+              city_key, date_local, observation_time_utc, smoke_present, smoke_density,
+              source, lat, lon
+            FROM smoke_observations
+            WHERE city_key = ? AND date_local = ?
+            ORDER BY observation_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, date_local),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "city_key": row[0],
+        "date_local": row[1],
+        "observation_time_utc": row[2],
+        "smoke_present": bool(row[3]),
+        "smoke_density": row[4],
+        "source": row[5],
+        "lat": float(row[6]),
+        "lon": float(row[7]),
+    }
