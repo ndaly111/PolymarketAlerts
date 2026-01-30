@@ -2,12 +2,12 @@
   "total_trades": 4,
   "filled_trades": 4,
   "total_cost_cents": 175,
-  "settled_cost_cents": 46,
-  "pending_cost_cents": 129,
+  "settled_cost_cents": 175,
+  "pending_cost_cents": 0,
   "avg_edge": 0.13550087139903577,
   "wins": 0,
-  "losses": 1,
-  "pending": 3,
+  "losses": 4,
+  "pending": 0,
   "total_payout_cents": 0,
   "roi": -100.0,
   "trades": [
@@ -26,10 +26,10 @@
       "order_id": "4576a482-892e-43dd-b99e-74c0d9cdd773",
       "status": "filled",
       "fill_price_cents": 48,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0,
+      "settled_at": "2026-01-29T22:11:48.988019-05:00"
     },
     {
       "trade_date": "2026-01-28",
@@ -66,10 +66,10 @@
       "order_id": "3890c064-a9d9-4eb8-bb8a-d49318711780",
       "status": "filled",
       "fill_price_cents": 45,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0,
+      "settled_at": "2026-01-29T22:11:48.921881-05:00"
     },
     {
       "trade_date": "2026-01-28",
@@ -86,10 +86,10 @@
       "order_id": "5b7d3df7-14a8-429d-abfa-010b39142cd6",
       "status": "filled",
       "fill_price_cents": 36,
-      "settled": 0,
-      "won": null,
-      "payout_cents": null,
-      "settled_at": null
+      "settled": 1,
+      "won": 0,
+      "payout_cents": 0,
+      "settled_at": "2026-01-29T22:11:48.853706-05:00"
     }
   ],
   "daily_stats": [
@@ -110,34 +110,34 @@
       "count": 4,
       "avg_edge": 0.13550087139903577,
       "wins": 0,
-      "losses": 1,
-      "pending": 3
+      "losses": 4,
+      "pending": 0
     }
   },
   "by_ev_bucket": {
     "10-15%": {
       "count": 1,
       "wins": 0,
-      "losses": 0,
-      "pending": 1,
+      "losses": 1,
+      "pending": 0,
       "total_cost_cents": 45,
       "total_payout_cents": 0,
-      "roi": 0
+      "roi": -100.0
     },
     "20%+": {
       "count": 1,
       "wins": 0,
-      "losses": 0,
-      "pending": 1,
+      "losses": 1,
+      "pending": 0,
       "total_cost_cents": 36,
       "total_payout_cents": 0,
-      "roi": 0
+      "roi": -100.0
     },
     "5-10%": {
       "count": 2,
       "wins": 0,
-      "losses": 1,
-      "pending": 1,
+      "losses": 2,
+      "pending": 0,
       "total_cost_cents": 94,
       "total_payout_cents": 0,
       "roi": -100.0
