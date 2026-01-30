@@ -1,0 +1,172 @@
+name: Weather Historical Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date for backfill (YYYY-MM-DD)"
+        required: true
+        default: "2024-01-01"
+      end_date:
+        description: "End date for backfill (YYYY-MM-DD, leave empty for today)"
+        required: false
+        default: ""
+      backfill_snow:
+        description: "Backfill SNODAS snow data"
+        type: boolean
+        default: true
+      backfill_sst:
+        description: "Backfill NDBC SST data"
+        type: boolean
+        default: true
+      backfill_smoke:
+        description: "Backfill HMS smoke data"
+        type: boolean
+        default: true
+      backfill_visibility:
+        description: "Backfill METAR visibility data"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyyaml requests numpy
+
+      - name: Pull latest database
+        run: |
+          git pull --rebase origin main || true
+          if [ -f "weather/data/weather_forecast_accuracy.db" ]; then
+            echo "Database found: $(ls -lh weather/data/weather_forecast_accuracy.db)"
+          else
+            echo "No existing database"
+          fi
+
+      - name: Backfill SNODAS snow data
+        if: ${{ inputs.backfill_snow }}
+        run: |
+          echo "=== Backfilling SNODAS snow data ==="
+          END_FLAG=""
+          if [ -n "${{ inputs.end_date }}" ]; then
+            END_FLAG="--end ${{ inputs.end_date }}"
+          fi
+          python weather/scripts/backfill_snow_snodas.py \
+            --start ${{ inputs.start_date }} \
+            $END_FLAG \
+            --winter-only
+        continue-on-error: true
+
+      - name: Backfill NDBC SST data
+        if: ${{ inputs.backfill_sst }}
+        run: |
+          echo "=== Backfilling NDBC SST data ==="
+          # SST backfill uses year-based arguments
+          START_YEAR=$(echo "${{ inputs.start_date }}" | cut -d- -f1)
+          END_YEAR=$(date +%Y)
+          if [ -n "${{ inputs.end_date }}" ]; then
+            END_YEAR=$(echo "${{ inputs.end_date }}" | cut -d- -f1)
+          fi
+          python weather/scripts/backfill_sst.py \
+            --start $START_YEAR \
+            --end $END_YEAR
+        continue-on-error: true
+
+      - name: Backfill HMS smoke data
+        if: ${{ inputs.backfill_smoke }}
+        run: |
+          echo "=== Backfilling HMS smoke data ==="
+          END_FLAG=""
+          if [ -n "${{ inputs.end_date }}" ]; then
+            END_FLAG="--end ${{ inputs.end_date }}"
+          fi
+          # Only backfill fire season months (Jul-Nov)
+          python weather/scripts/collect_smoke.py \
+            --start ${{ inputs.start_date }} \
+            $END_FLAG \
+            --force
+        continue-on-error: true
+
+      - name: Backfill METAR visibility data
+        if: ${{ inputs.backfill_visibility }}
+        run: |
+          echo "=== Backfilling METAR visibility data ==="
+          END_FLAG=""
+          if [ -n "${{ inputs.end_date }}" ]; then
+            END_FLAG="--end ${{ inputs.end_date }}"
+          fi
+          python weather/scripts/collect_visibility.py \
+            --start ${{ inputs.start_date }} \
+            $END_FLAG
+        continue-on-error: true
+
+      - name: Show database stats
+        run: |
+          echo "=== Database Stats ==="
+          if [ -f "weather/data/weather_forecast_accuracy.db" ]; then
+            echo "Size: $(ls -lh weather/data/weather_forecast_accuracy.db | awk '{print $5}')"
+            echo ""
+            echo "Snow observations:"
+            sqlite3 weather/data/weather_forecast_accuracy.db "SELECT COUNT(*) FROM snow_observations;" 2>/dev/null || echo "Table not found"
+            echo ""
+            echo "SST observations:"
+            sqlite3 weather/data/weather_forecast_accuracy.db "SELECT COUNT(*) FROM sst_observations;" 2>/dev/null || echo "Table not found"
+            echo ""
+            echo "Smoke observations:"
+            sqlite3 weather/data/weather_forecast_accuracy.db "SELECT COUNT(*) FROM smoke_observations;" 2>/dev/null || echo "Table not found"
+            echo ""
+            echo "Visibility observations:"
+            sqlite3 weather/data/weather_forecast_accuracy.db "SELECT COUNT(*) FROM visibility_observations;" 2>/dev/null || echo "Table not found"
+          fi
+
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-db-backfill-${{ github.run_number }}
+          path: weather/data/weather_forecast_accuracy.db
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Commit database changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add weather/data/weather_forecast_accuracy.db || true
+          if git diff --staged --quiet; then
+            echo "No database changes to commit"
+          else
+            git commit -m "weather: backfill historical data (${{ inputs.start_date }} to ${END_DATE:-today})"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 5
+            done
+          fi
+        env:
+          END_DATE: ${{ inputs.end_date }}
