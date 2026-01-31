@@ -1,0 +1,19 @@
+[Unit]
+Description=BTC 15-Min Data Collector
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/PolymarketAlerts
+EnvironmentFile=/home/ubuntu/btc15m.env
+ExecStart=/home/ubuntu/PolymarketAlerts/venv/bin/python3 /home/ubuntu/PolymarketAlerts/btc15m/scripts/collect_realtime.py --interval 5
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
