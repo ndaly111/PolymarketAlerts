@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-01-31T10:51:52.448302+00:00",
+  "all_time": {
+    "total_trades": 1,
+    "wins": 0,
+    "losses": 0,
+    "pending": 1,
+    "win_rate": null,
+    "total_pnl": 0.0,
+    "avg_edge": 0.3612028571745418,
+    "avg_win": 0,
+    "avg_loss": 0,
+    "max_win_streak": 0,
+    "max_loss_streak": 0
+  },
+  "today": {
+    "date": "2026-01-31",
+    "trades": 1,
+    "wins": 0,
+    "losses": 0,
+    "pending": 1,
+    "pnl": 0.0,
+    "win_rate": null,
+    "avg_confidence": 0.6012028571745418
+  },
+  "current_streak": {
+    "type": null,
+    "count": 0
+  },
+  "pending_trades": 1,
+  "recent_trades": [
+    {
+      "id": 1,
+      "timestamp": "2026-01-31T10:51:51.926204+00:00",
+      "market": "KXBTC-26JAN3106-B83125",
+      "side": "UP",
+      "entry_price": 0.24,
+      "model_prob": 0.6012028571745418,
+      "edge": 0.3612028571745418,
+      "outcome": null,
+      "pnl": null
+    }
+  ]
+}
