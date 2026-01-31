@@ -691,14 +691,19 @@ def execute_trade(
             "status": "SKIPPED_MAX_ASK",
         }
 
-    # Recalculate EV with fresh price
+    # Recalculate EV with fresh price using accurate 7% fee on profits
+    # Kalshi charges 7% on winning profits only (not on losses)
+    KALSHI_FEE_RATE = 0.07
     kalshi_prob = kalshi_ask / 100.0
+    profit_if_win = 1.0 - kalshi_prob  # Gross profit on win
+    net_profit_if_win = profit_if_win * (1 - KALSHI_FEE_RATE)  # After 7% fee
+
     if side == "YES":
-        # EV = q * (1 - price) - (1-q) * price - fee
-        ev = fair_q * (1.0 - kalshi_prob) - (1 - fair_q) * kalshi_prob - 0.02  # 2¢ fee
+        # EV = P(win) * net_profit - P(lose) * stake
+        ev = fair_q * net_profit_if_win - (1 - fair_q) * kalshi_prob
     else:
-        # EV for NO = (1-q) * (1 - price) - q * price - fee
-        ev = (1 - fair_q) * (1.0 - kalshi_prob) - fair_q * kalshi_prob - 0.02
+        # EV for NO side
+        ev = (1 - fair_q) * net_profit_if_win - fair_q * kalshi_prob
 
     print(f"  Fair q: {fair_q:.1%}, Fresh price: {kalshi_prob:.1%}, EV: {ev:.1%}")
 
