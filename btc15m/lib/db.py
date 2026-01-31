@@ -80,6 +80,8 @@ def ensure_schema(db_path: Path = DEFAULT_DB_PATH) -> None:
                 model_prob REAL,
                 market_prob REAL,
                 edge REAL,
+                expiry_time TEXT,
+                strike_price REAL,
                 outcome TEXT,  -- 'WIN', 'LOSS', or NULL if pending
                 pnl REAL,
                 settled_at TEXT
@@ -211,6 +213,8 @@ def insert_paper_trade(
     model_prob: Optional[float] = None,
     market_prob: Optional[float] = None,
     edge: Optional[float] = None,
+    expiry_time: Optional[str] = None,
+    strike_price: Optional[float] = None,
     timestamp: Optional[str] = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> int:
@@ -222,10 +226,10 @@ def insert_paper_trade(
         cursor = conn.execute(
             """INSERT INTO paper_trades
                (timestamp, market_ticker, side, entry_price, stake,
-                model_prob, market_prob, edge)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                model_prob, market_prob, edge, expiry_time, strike_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (timestamp, market_ticker, side, entry_price, stake,
-             model_prob, market_prob, edge),
+             model_prob, market_prob, edge, expiry_time, strike_price),
         )
         conn.commit()
         return cursor.lastrowid
@@ -294,3 +298,67 @@ def get_recent_snapshots(
         ).fetchall()
 
         return [dict(row) for row in rows]
+
+
+def get_pending_trades(db_path: Path = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """Get all pending (unsettled) trades."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, timestamp, market_ticker, side, entry_price,
+                      stake, model_prob, market_prob, edge,
+                      expiry_time, strike_price
+               FROM paper_trades
+               WHERE outcome IS NULL
+               ORDER BY timestamp DESC"""
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+
+def get_all_trades(db_path: Path = DEFAULT_DB_PATH) -> List[Dict[str, Any]]:
+    """Get all trades with full details."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """SELECT id, timestamp, market_ticker, side, entry_price,
+                      stake, model_prob, market_prob, edge,
+                      expiry_time, strike_price, outcome, pnl, settled_at
+               FROM paper_trades
+               ORDER BY timestamp DESC"""
+        ).fetchall()
+
+        return [dict(row) for row in rows]
+
+
+def get_daily_stats(db_path: Path = DEFAULT_DB_PATH) -> Dict[str, Any]:
+    """Get trading stats for the current day."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """SELECT
+                 COUNT(*) as trades_today,
+                 SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+                 SUM(CASE WHEN outcome = 'LOSS' THEN 1 ELSE 0 END) as losses,
+                 SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) as pending,
+                 SUM(pnl) as pnl_today,
+                 AVG(edge) as avg_edge,
+                 AVG(model_prob) as avg_confidence
+               FROM paper_trades
+               WHERE date(timestamp) = ?""",
+            (today,),
+        ).fetchone()
+
+        win_count = row["wins"] or 0
+        loss_count = row["losses"] or 0
+
+        return {
+            "date": today,
+            "trades_today": row["trades_today"] or 0,
+            "wins": win_count,
+            "losses": loss_count,
+            "pending": row["pending"] or 0,
+            "pnl_today": row["pnl_today"] or 0.0,
+            "avg_edge": row["avg_edge"],
+            "avg_confidence": row["avg_confidence"],
+            "win_rate": win_count / (win_count + loss_count) if (win_count + loss_count) > 0 else None,
+        }

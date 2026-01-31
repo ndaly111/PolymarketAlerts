@@ -1,0 +1,115 @@
+name: BTC 15-Min Paper Trading
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      send_summary:
+        description: 'Send Discord summary'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install requests numpy scikit-learn lightgbm
+
+      - name: Download previous state
+        uses: actions/download-artifact@v4
+        with:
+          name: btc15m-state
+          path: btc15m/
+        continue-on-error: true
+
+      - name: Initialize model if needed
+        run: |
+          mkdir -p btc15m/models btc15m/data btc15m/data/stats
+
+          if [ ! -f btc15m/models/btc15m_model.pkl ]; then
+            echo "Training new model..."
+            cd btc15m
+            python scripts/backfill_historical.py --days 60
+            python scripts/train_model.py
+          fi
+
+      - name: Run trade cycle
+        env:
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+          BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
+        run: |
+          cd btc15m
+          python scripts/trade_once.py --min-prob 0.52 --stake 1
+
+      - name: Upload state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc15m-state
+          path: |
+            btc15m/models/
+            btc15m/data/
+          retention-days: 90
+          overwrite: true
+
+      - name: Deploy dashboard to Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: btc15m/data/stats
+          destination_dir: btc15m-dashboard
+
+  # Daily summary job - runs once per day
+  daily-summary:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0 * * *' || github.event.inputs.send_summary == 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests numpy scikit-learn
+
+      - name: Download state
+        uses: actions/download-artifact@v4
+        with:
+          name: btc15m-state
+          path: btc15m/
+        continue-on-error: true
+
+      - name: Send daily summary
+        env:
+          BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
+        run: |
+          cd btc15m
+          python -c "
+          from lib.stats import update_all_stats
+          from pathlib import Path
+          update_all_stats(Path('data/btc15m.db'), send_discord=True)
+          print('Daily summary sent!')
+          "
