@@ -4,3 +4,17 @@ __pycache__/
 *.pyc
 reports/
 data/sportsbook_odds.json
+
+# macOS
+.DS_Store
+
+# Weather data (synced via GitHub Actions)
+weather/data/weather_forecast_accuracy.db
+weather/data/forecast_archive/
+weather/data/snodas_cache/
+
+# Weather outputs (regenerated)
+weather/outputs/logs/
+weather/outputs/edges/
+weather/outputs/fair_prices/
+weather/outputs/ml_edges/
