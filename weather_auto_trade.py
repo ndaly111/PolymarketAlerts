@@ -48,10 +48,12 @@ TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", "weather_trades.db"))
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEATHER_TRADES_WEBHOOK", os.getenv("DISCORD_WEATHER_ALERTS", os.getenv("DISCORD_WEBHOOK_URL", "")))
 
 ENV_DRY_RUN = os.getenv("WEATHER_DRY_RUN", "0") == "1"
-ENV_AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "1") == "1"
-# Force dry-run only mode to prevent live orders.
-DRY_RUN = True
-AUTOTRADE_ENABLED = False
+ENV_AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
+# Use environment variables to control trading mode
+# Set WEATHER_DRY_RUN=1 for paper trading (logs but no real orders)
+# Set WEATHER_AUTOTRADE_ENABLED=1 to enable live trading
+DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED  # Dry run if explicitly set OR if autotrade disabled
+AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
