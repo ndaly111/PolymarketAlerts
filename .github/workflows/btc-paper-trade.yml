@@ -57,6 +57,7 @@ jobs:
           KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
           BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/btc15m
         run: |
           python btc15m/scripts/trade_once.py --min-prob 0.52 --contracts 1
 
