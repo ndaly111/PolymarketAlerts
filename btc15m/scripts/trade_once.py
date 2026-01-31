@@ -44,7 +44,7 @@ from lib.db import (
     DEFAULT_DB_PATH,
 )
 from lib.ml_predictor import MLPredictor, compute_all_features
-from lib.discord import send_trade_alert, send_settlement_alert, send_pending_status_alert
+from lib.discord import send_trade_alert, send_settlement_alert, send_pending_status_alert, send_edge_analysis_alert
 from lib.stats import update_all_stats
 
 try:
@@ -227,6 +227,10 @@ def main():
         print(f"[trade] Error fetching markets: {e}")
         markets = []
 
+    # Get cumulative stats for all Discord messages
+    summary = get_paper_trade_summary(db_path)
+    total_record = f"{summary['wins']}W / {summary['losses']}L"
+
     if not markets:
         print("[trade] No active markets found")
         # Still show prediction even without market
@@ -234,6 +238,20 @@ def main():
         print(f"Direction: {prediction.direction}")
         print(f"Confidence: {prediction.probability*100:.1f}%")
         print(f"Would trade: {'YES' if prediction.probability >= args.min_prob else 'NO'}")
+
+        # Send Discord update
+        send_edge_analysis_alert(
+            prediction_direction=prediction.direction,
+            prediction_confidence=prediction.probability,
+            market_ask_price=0.5,  # No market available
+            edge=0,
+            threshold=args.min_prob,
+            btc_price=binance_price,
+            trade_executed=False,
+            no_trade_reason="No active markets found",
+            cumulative_pnl=summary['total_pnl'],
+            total_record=total_record,
+        )
         sys.exit(0)
 
     market = markets[0]
@@ -263,12 +281,51 @@ def main():
 
     if already_traded:
         print(f"[trade] Already have position in {market.ticker}")
+
+        # Send Discord update
+        send_edge_analysis_alert(
+            prediction_direction=prediction.direction,
+            prediction_confidence=prediction.probability,
+            market_ask_price=entry_price_for_edge,
+            edge=edge_for_analysis,
+            threshold=args.min_prob,
+            btc_price=binance_price,
+            trade_executed=False,
+            no_trade_reason="Already have position in this market",
+            market_ticker=market.ticker,
+            strike_price=market.strike_price,
+            cumulative_pnl=summary['total_pnl'],
+            total_record=total_record,
+        )
         sys.exit(0)
+
+    # Compute entry price for edge analysis (even if we might not trade)
+    if prediction.direction == "UP":
+        entry_price_for_edge = probs["up_ask"]
+    else:
+        entry_price_for_edge = probs["down_ask"]
+    edge_for_analysis = prediction.probability - entry_price_for_edge
 
     # Check confidence threshold
     if prediction.probability < args.min_prob:
         print(f"[trade] Confidence {prediction.probability*100:.1f}% < threshold {args.min_prob*100:.0f}%")
         print("[trade] No trade")
+
+        # Send Discord update with edge analysis
+        send_edge_analysis_alert(
+            prediction_direction=prediction.direction,
+            prediction_confidence=prediction.probability,
+            market_ask_price=entry_price_for_edge,
+            edge=edge_for_analysis,
+            threshold=args.min_prob,
+            btc_price=binance_price,
+            trade_executed=False,
+            no_trade_reason=f"Confidence below {args.min_prob*100:.0f}% threshold",
+            market_ticker=market.ticker,
+            strike_price=market.strike_price,
+            cumulative_pnl=summary['total_pnl'],
+            total_record=total_record,
+        )
         sys.exit(0)
 
     # Execute trade at actual ASK price (what we'd pay)
@@ -283,6 +340,22 @@ def main():
     # Skip if edge is negative after spread
     if edge < 0:
         print(f"[trade] Negative edge after spread ({edge*100:.1f}%), skipping")
+
+        # Send Discord update with edge analysis
+        send_edge_analysis_alert(
+            prediction_direction=prediction.direction,
+            prediction_confidence=prediction.probability,
+            market_ask_price=entry_price,
+            edge=edge,
+            threshold=args.min_prob,
+            btc_price=binance_price,
+            trade_executed=False,
+            no_trade_reason="Negative edge after spread",
+            market_ticker=market.ticker,
+            strike_price=market.strike_price,
+            cumulative_pnl=summary['total_pnl'],
+            total_record=total_record,
+        )
         sys.exit(0)
 
     # Convert probability to cents for limit price
@@ -321,8 +394,9 @@ def main():
         db_path=db_path,
     )
 
-    # Get current cumulative stats
+    # Refresh cumulative stats after inserting trade
     summary = get_paper_trade_summary(db_path)
+    total_record = f"{summary['wins']}W / {summary['losses']}L"
 
     trade_type = "PAPER" if args.paper else "REAL"
     print(f"\n[{trade_type} TRADE] {prediction.direction} on {market.ticker}")
@@ -334,8 +408,24 @@ def main():
         print(f"  Order ID:      {order_id}")
     print(f"  DB Trade ID:   {trade_id}")
     print(f"  Cumulative P&L: ${summary['total_pnl']:+.2f}")
+    print(f"  Record: {total_record}")
 
-    # Send Discord alert
+    # Send edge analysis alert (shows the decision breakdown)
+    send_edge_analysis_alert(
+        prediction_direction=prediction.direction,
+        prediction_confidence=prediction.probability,
+        market_ask_price=entry_price,
+        edge=edge,
+        threshold=args.min_prob,
+        btc_price=binance_price,
+        trade_executed=True,
+        market_ticker=market.ticker,
+        strike_price=market.strike_price,
+        cumulative_pnl=summary['total_pnl'],
+        total_record=total_record,
+    )
+
+    # Send trade alert with full details
     send_trade_alert(
         side=prediction.direction,
         market_ticker=market.ticker,

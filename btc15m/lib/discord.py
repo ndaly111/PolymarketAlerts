@@ -187,6 +187,84 @@ def send_summary_alert(
     )
 
 
+def send_edge_analysis_alert(
+    prediction_direction: str,
+    prediction_confidence: float,
+    market_ask_price: float,
+    edge: float,
+    threshold: float,
+    btc_price: float,
+    trade_executed: bool,
+    no_trade_reason: Optional[str] = None,
+    market_ticker: Optional[str] = None,
+    strike_price: Optional[float] = None,
+    cumulative_pnl: Optional[float] = None,
+    total_record: Optional[str] = None,
+    webhook_url: Optional[str] = None,
+) -> bool:
+    """Send edge analysis update every run.
+
+    Shows whether edge was found and the numbers behind the decision.
+    """
+    # Determine if edge was found
+    edge_found = edge > 0 and prediction_confidence >= threshold
+
+    if trade_executed:
+        title = "📈 EDGE FOUND - Trade Executed"
+        color = 0x00FF00  # Green
+        status = "✅ Trade placed"
+    elif edge_found and no_trade_reason:
+        title = "⚠️ EDGE FOUND - No Trade"
+        color = 0xFFA500  # Orange
+        status = f"⚠️ {no_trade_reason}"
+    elif edge > 0:
+        title = "📊 Edge Analysis - Marginal Edge"
+        color = 0xFFFF00  # Yellow
+        status = f"❌ Below threshold ({prediction_confidence*100:.1f}% < {threshold*100:.0f}%)"
+    else:
+        title = "📊 Edge Analysis - No Edge"
+        color = 0x808080  # Gray
+        status = f"❌ {no_trade_reason or 'Negative edge'}"
+
+    description = f"BTC: ${btc_price:,.2f}"
+    if market_ticker:
+        description += f"\nMarket: {market_ticker}"
+    if strike_price:
+        description += f"\nStrike: ${strike_price:,.0f}"
+
+    fields = [
+        {"name": "Prediction", "value": f"{prediction_direction}", "inline": True},
+        {"name": "ML Confidence", "value": f"{prediction_confidence*100:.1f}%", "inline": True},
+        {"name": "Threshold", "value": f"{threshold*100:.0f}%", "inline": True},
+        {"name": "Market Ask", "value": f"{market_ask_price*100:.1f}%", "inline": True},
+        {"name": "Edge", "value": f"{edge*100:+.2f}%", "inline": True},
+        {"name": "Decision", "value": status, "inline": True},
+    ]
+
+    # Edge breakdown
+    edge_calc = f"**Edge Calculation:**\nML Confidence - Market Ask = Edge\n{prediction_confidence*100:.1f}% - {market_ask_price*100:.1f}% = **{edge*100:+.2f}%**"
+    if edge > 0:
+        edge_calc += f"\n\n✅ Positive edge (we think it's worth more)"
+    else:
+        edge_calc += f"\n\n❌ Negative edge (market is right or we'd overpay)"
+
+    fields.append({"name": "📐 Analysis", "value": edge_calc, "inline": False})
+
+    # Add cumulative stats
+    if cumulative_pnl is not None:
+        fields.append({"name": "Cumulative P&L", "value": f"${cumulative_pnl:+.2f}", "inline": True})
+    if total_record:
+        fields.append({"name": "Record", "value": total_record, "inline": True})
+
+    return send_discord_alert(
+        title=title,
+        description=description,
+        color=color,
+        fields=fields,
+        webhook_url=webhook_url,
+    )
+
+
 def send_pending_status_alert(
     pending_trades: list,
     current_price: float,
