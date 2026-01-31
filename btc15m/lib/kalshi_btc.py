@@ -51,13 +51,13 @@ def get_kalshi_client() -> Optional[KalshiAuthClient]:
 
 def fetch_btc_markets(
     client: Optional[KalshiAuthClient] = None,
-    series_ticker: str = "KXBTC",
+    series_tickers: Optional[List[str]] = None,
 ) -> List[BTCMarket]:
     """Fetch active BTC price markets from Kalshi.
 
     Args:
         client: Kalshi auth client (created from env if None)
-        series_ticker: Market series ticker (KXBTC for BTC price)
+        series_tickers: List of market series tickers to search
 
     Returns:
         List of BTCMarket objects for active markets
@@ -68,52 +68,77 @@ def fetch_btc_markets(
     if client is None:
         return []
 
-    try:
-        # Fetch markets in the BTC series
-        response = {"markets": client.list_markets(series_ticker=series_ticker, status="open")}
+    # Try multiple series tickers for BTC markets
+    if series_tickers is None:
+        series_tickers = [
+            "KXBTC",      # Standard BTC price
+            "KXBTCD",     # Daily BTC
+            "KXBTC15",    # 15-minute BTC
+            "BTC15",      # Alt 15-min ticker
+            "BTCUSD",     # BTC/USD
+        ]
 
-        if not response or "markets" not in response:
-            return []
+    all_markets = []
+    for series_ticker in series_tickers:
+        try:
+            result = client.list_markets(series_ticker=series_ticker, status="open")
+            if result:
+                print(f"[kalshi] Found {len(result)} markets for {series_ticker}")
+                all_markets.extend(result)
+        except Exception:
+            pass
 
-        markets = []
-        for m in response["markets"]:
-            try:
-                # Parse expiry time
-                expiry_str = m.get("close_time") or m.get("expiration_time")
-                if expiry_str:
-                    expiry_time = datetime.fromisoformat(
-                        expiry_str.replace("Z", "+00:00")
-                    )
-                else:
-                    continue
+    # Also try searching by ticker prefix if no results
+    if not all_markets:
+        try:
+            all_open = client.list_markets(status="open")
+            if all_open:
+                btc_markets = [m for m in all_open if "BTC" in m.get("ticker", "").upper() or "BTC" in m.get("title", "").upper()]
+                print(f"[kalshi] Found {len(btc_markets)} BTC markets from full scan")
+                all_markets.extend(btc_markets)
+        except Exception as e:
+            print(f"[kalshi] Full scan failed: {e}")
 
-                # Extract strike price from title or subtitle
-                strike_price = _extract_strike_price(m)
-                if strike_price is None:
-                    continue
+    if not all_markets:
+        print("[kalshi] No BTC markets found")
+        return []
 
-                markets.append(BTCMarket(
-                    ticker=m["ticker"],
-                    title=m.get("title", ""),
-                    strike_price=strike_price,
-                    expiry_time=expiry_time,
-                    yes_bid=_safe_float(m.get("yes_bid")),
-                    yes_ask=_safe_float(m.get("yes_ask")),
-                    no_bid=_safe_float(m.get("no_bid")),
-                    no_ask=_safe_float(m.get("no_ask")),
-                    last_price=_safe_float(m.get("last_price")),
-                    volume=int(m.get("volume", 0)),
-                    open_interest=int(m.get("open_interest", 0)),
-                    status=m.get("status", "unknown"),
-                ))
-            except Exception as e:
+    markets = []
+    for m in all_markets:
+        try:
+            # Parse expiry time
+            expiry_str = m.get("close_time") or m.get("expiration_time")
+            if expiry_str:
+                expiry_time = datetime.fromisoformat(
+                    expiry_str.replace("Z", "+00:00")
+                )
+            else:
                 continue
 
-        return markets
+            # Extract strike price from title or subtitle
+            strike_price = _extract_strike_price(m)
+            if strike_price is None:
+                continue
 
-    except Exception as e:
-        print(f"[kalshi] Error fetching markets: {e}")
-        return []
+            markets.append(BTCMarket(
+                ticker=m["ticker"],
+                title=m.get("title", ""),
+                strike_price=strike_price,
+                expiry_time=expiry_time,
+                yes_bid=_safe_float(m.get("yes_bid")),
+                yes_ask=_safe_float(m.get("yes_ask")),
+                no_bid=_safe_float(m.get("no_bid")),
+                no_ask=_safe_float(m.get("no_ask")),
+                last_price=_safe_float(m.get("last_price")),
+                volume=int(m.get("volume", 0)),
+                open_interest=int(m.get("open_interest", 0)),
+                status=m.get("status", "unknown"),
+            ))
+        except Exception:
+            continue
+
+    print(f"[kalshi] Parsed {len(markets)} valid BTC markets")
+    return markets
 
 
 def fetch_btc_15min_markets(
