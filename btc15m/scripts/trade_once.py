@@ -17,12 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Get absolute paths for imports
+# BTC15M_DIR must come BEFORE REPO_DIR to find btc15m/lib not root lib/
 SCRIPT_DIR = Path(__file__).resolve().parent
 BTC15M_DIR = SCRIPT_DIR.parent
 REPO_DIR = BTC15M_DIR.parent
 
-sys.path.insert(0, str(BTC15M_DIR))
-sys.path.insert(0, str(REPO_DIR))
+# Insert in reverse order so btc15m is first
+sys.path.insert(0, str(REPO_DIR))  # For kalshi_auth_client
+sys.path.insert(0, str(BTC15M_DIR))  # For lib.* - must be first!
 
 from lib.binance import fetch_klines, fetch_current_price
 from lib.chainlink import get_chainlink_btc_price
