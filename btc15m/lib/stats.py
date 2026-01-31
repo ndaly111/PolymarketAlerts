@@ -299,9 +299,16 @@ def save_dashboard(stats: dict) -> Path:
     """Save dashboard HTML file."""
     STATS_DIR.mkdir(parents=True, exist_ok=True)
     html = generate_dashboard_html(stats)
+
+    # Save as both dashboard.html and index.html
     filepath = STATS_DIR / "dashboard.html"
     with open(filepath, 'w') as f:
         f.write(html)
+
+    index_path = STATS_DIR / "index.html"
+    with open(index_path, 'w') as f:
+        f.write(html)
+
     return filepath
 
 
