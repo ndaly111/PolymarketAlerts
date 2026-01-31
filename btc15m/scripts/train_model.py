@@ -150,6 +150,24 @@ FEATURE_COLUMNS = [
     "comp_breakout_direction",
     "comp_has_divergence",
     "comp_divergence_strength",
+    # ===== NEW: FUNDING RATE FEATURES =====
+    "funding_rate",
+    "funding_annualized",
+    "funding_extreme",
+    "funding_bullish",
+    "funding_bearish",
+    "long_short_ratio",
+    "ls_ratio_extreme",
+    # ===== NEW: CROSS-ASSET FEATURES =====
+    "eth_change_15m",
+    "eth_change_1h",
+    "eth_momentum",
+    "eth_btc_divergence",
+    "eth_leading",
+    "eth_lagging",
+    "btc_eth_ratio",
+    "cross_asset_bullish",
+    "cross_asset_bearish",
 ]
 
 
@@ -205,6 +223,14 @@ def load_training_data(db_path: Path) -> tuple:
         "comp_mtf_aligned": 0, "comp_mtf_direction": 0, "comp_mtf_acceleration": 0,
         "comp_breakout_score": 0, "comp_breakout_direction": 0,
         "comp_has_divergence": 0, "comp_divergence_strength": 0,
+        # New: Funding
+        "funding_rate": 0, "funding_annualized": 0, "funding_extreme": 0,
+        "funding_bullish": 0, "funding_bearish": 0, "long_short_ratio": 1.0,
+        "ls_ratio_extreme": 0,
+        # New: Cross-asset
+        "eth_change_15m": 0, "eth_change_1h": 0, "eth_momentum": 0,
+        "eth_btc_divergence": 0, "eth_leading": 0, "eth_lagging": 0,
+        "btc_eth_ratio": 25, "cross_asset_bullish": 0, "cross_asset_bearish": 0,
     }
 
     for row in rows:

@@ -93,6 +93,14 @@ class MLPredictor:
             "comp_mtf_aligned": 0, "comp_mtf_direction": 0, "comp_mtf_acceleration": 0,
             "comp_breakout_score": 0, "comp_breakout_direction": 0,
             "comp_has_divergence": 0, "comp_divergence_strength": 0,
+            # New: Funding
+            "funding_rate": 0, "funding_annualized": 0, "funding_extreme": 0,
+            "funding_bullish": 0, "funding_bearish": 0, "long_short_ratio": 1.0,
+            "ls_ratio_extreme": 0,
+            # New: Cross-asset
+            "eth_change_15m": 0, "eth_change_1h": 0, "eth_momentum": 0,
+            "eth_btc_divergence": 0, "eth_leading": 0, "eth_lagging": 0,
+            "btc_eth_ratio": 25, "cross_asset_bullish": 0, "cross_asset_bearish": 0,
         }
 
         for col in FEATURE_COLUMNS:
@@ -367,5 +375,29 @@ def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
         "comp_has_divergence": composites.get("comp_has_divergence", 0),
         "comp_divergence_strength": composites.get("comp_divergence_strength", 0),
     })
+
+    # Add new external data features (funding, cross-asset)
+    try:
+        from lib.funding import get_funding_data, compute_funding_features
+        from lib.cross_asset import get_cross_asset_data, compute_cross_asset_features
+
+        funding_data = get_funding_data()
+        funding_feats = compute_funding_features(funding_data)
+        features.update(funding_feats)
+
+        cross_asset_data = get_cross_asset_data()
+        cross_asset_feats = compute_cross_asset_features(cross_asset_data)
+        features.update(cross_asset_feats)
+    except Exception as e:
+        print(f"[ml] Warning: Could not fetch external features: {e}")
+        # Add defaults if fetch fails
+        features.update({
+            "funding_rate": 0, "funding_annualized": 0, "funding_extreme": 0,
+            "funding_bullish": 0, "funding_bearish": 0, "long_short_ratio": 1.0,
+            "ls_ratio_extreme": 0, "eth_change_15m": 0, "eth_change_1h": 0,
+            "eth_momentum": 0, "eth_btc_divergence": 0, "eth_leading": 0,
+            "eth_lagging": 0, "btc_eth_ratio": 25, "cross_asset_bullish": 0,
+            "cross_asset_bearish": 0,
+        })
 
     return features

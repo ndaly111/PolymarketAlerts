@@ -492,6 +492,24 @@ def store_historical_samples(samples: List[dict], db_path: Path) -> int:
                 comp_breakout_direction REAL,
                 comp_has_divergence INTEGER,
                 comp_divergence_strength REAL,
+                -- NEW: Funding rate features
+                funding_rate REAL DEFAULT 0,
+                funding_annualized REAL DEFAULT 0,
+                funding_extreme INTEGER DEFAULT 0,
+                funding_bullish INTEGER DEFAULT 0,
+                funding_bearish INTEGER DEFAULT 0,
+                long_short_ratio REAL DEFAULT 1.0,
+                ls_ratio_extreme INTEGER DEFAULT 0,
+                -- NEW: Cross-asset features
+                eth_change_15m REAL DEFAULT 0,
+                eth_change_1h REAL DEFAULT 0,
+                eth_momentum INTEGER DEFAULT 0,
+                eth_btc_divergence REAL DEFAULT 0,
+                eth_leading INTEGER DEFAULT 0,
+                eth_lagging INTEGER DEFAULT 0,
+                btc_eth_ratio REAL DEFAULT 25,
+                cross_asset_bullish INTEGER DEFAULT 0,
+                cross_asset_bearish INTEGER DEFAULT 0,
                 -- Outcome
                 outcome TEXT NOT NULL,
                 UNIQUE(window_start)
