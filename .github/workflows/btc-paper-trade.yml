@@ -58,8 +58,7 @@ jobs:
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
           BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
         run: |
-          cd btc15m
-          python scripts/trade_once.py --min-prob 0.52 --contracts 1
+          python btc15m/scripts/trade_once.py --min-prob 0.52 --contracts 1
 
       - name: Upload state artifact
         uses: actions/upload-artifact@v4
