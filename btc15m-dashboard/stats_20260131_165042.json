@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-01-31T16:50:42.312840+00:00",
+  "all_time": {
+    "total_trades": 1,
+    "wins": 0,
+    "losses": 0,
+    "pending": 1,
+    "win_rate": null,
+    "total_pnl": 0.0,
+    "avg_edge": 0.014549823779969828,
+    "avg_win": 0,
+    "avg_loss": 0,
+    "max_win_streak": 0,
+    "max_loss_streak": 0
+  },
+  "today": {
+    "date": "2026-01-31",
+    "trades": 1,
+    "wins": 0,
+    "losses": 0,
+    "pending": 1,
+    "pnl": 0.0,
+    "win_rate": null,
+    "avg_confidence": 0.7297006541161306
+  },
+  "current_streak": {
+    "type": null,
+    "count": 0
+  },
+  "pending_trades": 1,
+  "recent_trades": [
+    {
+      "id": 1,
+      "timestamp": "2026-01-31T16:50:41.704368+00:00",
+      "market": "KXBTCD-26JAN3112-T80499.99",
+      "side": "DOWN",
+      "entry_price": 0.7151508303361608,
+      "model_prob": 0.7297006541161306,
+      "edge": 0.014549823779969828,
+      "outcome": null,
+      "pnl": null
+    }
+  ]
+}
