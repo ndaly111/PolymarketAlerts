@@ -22,6 +22,8 @@ from lib.chainlink import get_chainlink_btc_price
 from lib.kalshi_btc import (
     fetch_btc_15min_markets,
     calculate_market_implied_prob,
+    get_execution_price,
+    get_orderbook_best_prices,
 )
 from lib.db import (
     ensure_schema,
@@ -151,10 +153,22 @@ def main():
     probs = calculate_market_implied_prob(market)
     tte = (market.expiry_time - datetime.now(timezone.utc)).total_seconds()
 
+    # Try to get more accurate prices from orderbook
+    orderbook_prices = get_orderbook_best_prices(market.ticker)
+    if orderbook_prices:
+        print(f"[trade] Got orderbook prices")
+        probs.update({
+            "up_ask": orderbook_prices["yes_ask"] or probs["up_ask"],
+            "up_bid": orderbook_prices["yes_bid"] or probs["up_bid"],
+            "down_ask": orderbook_prices["no_ask"] or probs["down_ask"],
+            "down_bid": orderbook_prices["no_bid"] or probs["down_bid"],
+        })
+
     print(f"[trade] Market: {market.ticker}")
     print(f"[trade] Strike: ${market.strike_price:,.0f}")
     print(f"[trade] Expires in: {int(tte//60)}m {int(tte%60)}s")
-    print(f"[trade] Market UP prob: {probs['up_prob']*100:.1f}%")
+    print(f"[trade] UP: bid={probs['up_bid']*100:.1f}% / ask={probs['up_ask']*100:.1f}%")
+    print(f"[trade] DOWN: bid={probs['down_bid']*100:.1f}% / ask={probs['down_ask']*100:.1f}%")
 
     # Check if we already traded this market
     pending = get_pending_trades(db_path)
@@ -170,13 +184,19 @@ def main():
         print("[trade] No trade")
         sys.exit(0)
 
-    # Execute trade
+    # Execute trade at actual ASK price (what we'd pay)
     if prediction.direction == "UP":
-        entry_price = probs["up_prob"]
+        entry_price = probs["up_ask"]  # Pay the ask to buy YES on UP
     else:
-        entry_price = probs["down_prob"]
+        entry_price = probs["down_ask"]  # Pay the ask to buy YES on DOWN
 
+    # Calculate edge vs entry price (not mid)
     edge = prediction.probability - entry_price
+
+    # Skip if edge is negative after spread
+    if edge < 0:
+        print(f"[trade] Negative edge after spread ({edge*100:.1f}%), skipping")
+        sys.exit(0)
 
     trade_id = insert_paper_trade(
         market_ticker=market.ticker,
