@@ -70,10 +70,7 @@ def fetch_btc_markets(
 
     try:
         # Fetch markets in the BTC series
-        response = client.get(f"/markets", params={
-            "series_ticker": series_ticker,
-            "status": "open",
-        })
+        response = {"markets": client.list_markets(series_ticker=series_ticker, status="open")}
 
         if not response or "markets" not in response:
             return []
@@ -164,8 +161,7 @@ def fetch_orderbook(
         return None
 
     try:
-        response = client.get(f"/markets/{ticker}/orderbook")
-        return response
+        return client.get_orderbook(ticker)
     except Exception as e:
         print(f"[kalshi] Error fetching orderbook: {e}")
         return None
