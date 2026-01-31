@@ -221,9 +221,9 @@ def main():
 
     print(f"[trade] Prediction: {prediction.direction} ({prediction.probability*100:.1f}%)")
 
-    # Fetch Kalshi markets
+    # Fetch Kalshi markets near current BTC price
     try:
-        markets = fetch_btc_15min_markets()
+        markets = fetch_btc_15min_markets(current_btc_price=binance_price)
     except Exception as e:
         print(f"[trade] Error fetching markets: {e}")
         markets = []
@@ -355,67 +355,86 @@ def main():
     limit_price_cents = int(entry_price * 100)
 
     # Place real order or paper trade
+    # Retry up to 5 times, waiting 1 minute each time
     order_id = None
     order_filled = False
-    ORDER_TIMEOUT_SECONDS = 30
+    MAX_RETRIES = 5
+    ORDER_TIMEOUT_SECONDS = 60  # 1 minute per attempt
 
     if not args.paper and kalshi_client:
-        try:
-            order = place_real_order(
-                client=kalshi_client,
-                ticker=market.ticker,
-                direction=prediction.direction,
-                limit_price_cents=limit_price_cents,
-                contracts=args.contracts,
-            )
-            order_id = order.get("order_id")
-            order_status = order.get("status", "unknown")
-            print(f"[ORDER] Order placed! ID: {order_id}, Status: {order_status}")
+        for attempt in range(1, MAX_RETRIES + 1):
+            print(f"\n[ORDER] Attempt {attempt}/{MAX_RETRIES}")
 
-            # Check if immediately filled
-            if order_status.lower() in ("filled", "executed"):
-                order_filled = True
-                print(f"[ORDER] Immediately filled!")
-            elif order_id:
-                # Wait and poll for fill
-                print(f"[ORDER] Waiting up to {ORDER_TIMEOUT_SECONDS}s for fill...")
-                start_time = time.time()
+            try:
+                order = place_real_order(
+                    client=kalshi_client,
+                    ticker=market.ticker,
+                    direction=prediction.direction,
+                    limit_price_cents=limit_price_cents,
+                    contracts=args.contracts,
+                )
+                order_id = order.get("order_id")
+                order_status = order.get("status", "unknown")
+                print(f"[ORDER] Order placed! ID: {order_id}, Status: {order_status}")
 
-                while time.time() - start_time < ORDER_TIMEOUT_SECONDS:
-                    time.sleep(5)  # Check every 5 seconds
-                    try:
-                        order_status_resp = kalshi_client.get_order(order_id)
-                        current_status = order_status_resp.get("status", "").lower()
-                        print(f"[ORDER] Status: {current_status}")
+                # Check if immediately filled
+                if order_status.lower() in ("filled", "executed"):
+                    order_filled = True
+                    print(f"[ORDER] Immediately filled!")
+                    break
+                elif order_id:
+                    # Wait and poll for fill
+                    print(f"[ORDER] Waiting up to {ORDER_TIMEOUT_SECONDS}s for fill...")
+                    start_time = time.time()
 
-                        if current_status in ("filled", "executed"):
-                            order_filled = True
-                            print(f"[ORDER] Order filled!")
-                            break
-                        elif current_status in ("cancelled", "canceled", "expired"):
-                            print(f"[ORDER] Order {current_status}")
-                            break
-                    except Exception as e:
-                        print(f"[ORDER] Status check error: {e}")
+                    while time.time() - start_time < ORDER_TIMEOUT_SECONDS:
+                        time.sleep(10)  # Check every 10 seconds
+                        try:
+                            order_status_resp = kalshi_client.get_order(order_id)
+                            current_status = order_status_resp.get("status", "").lower()
+                            elapsed = int(time.time() - start_time)
+                            print(f"[ORDER] Status: {current_status} ({elapsed}s)")
 
-                # Cancel if not filled after timeout
-                if not order_filled:
+                            if current_status in ("filled", "executed"):
+                                order_filled = True
+                                print(f"[ORDER] Order filled!")
+                                break
+                            elif current_status in ("cancelled", "canceled", "expired"):
+                                print(f"[ORDER] Order {current_status}")
+                                break
+                        except Exception as e:
+                            print(f"[ORDER] Status check error: {e}")
+
+                    if order_filled:
+                        break
+
+                    # Cancel if not filled after timeout
                     try:
                         print(f"[ORDER] Timeout - cancelling order {order_id}")
                         kalshi_client.cancel_order(order_id)
                         print(f"[ORDER] Order cancelled")
-                        order_id = None  # Clear order_id since we cancelled
+                        order_id = None
                     except Exception as e:
                         print(f"[ORDER] Cancel error: {e}")
 
-        except Exception as e:
-            print(f"[ORDER] ERROR placing order: {e}")
-            print("[ORDER] Falling back to paper trade")
-            args.paper = True
+                    # Check if market is about to expire
+                    remaining_tte = (market.expiry_time - datetime.now(timezone.utc)).total_seconds()
+                    if remaining_tte < 120:  # Less than 2 min left
+                        print(f"[ORDER] Only {int(remaining_tte)}s until expiry, stopping retries")
+                        break
+
+            except Exception as e:
+                print(f"[ORDER] ERROR placing order: {e}")
+                if attempt == MAX_RETRIES:
+                    print("[ORDER] All retries failed, falling back to paper trade")
+                    args.paper = True
+
+        if order_filled:
+            print(f"[ORDER] Successfully filled on attempt {attempt}")
 
     # Only record trade if order was filled (or paper trade)
     if not order_filled and not args.paper:
-        print("[trade] Order not filled, skipping DB record")
+        print("[trade] Order not filled after all retries, skipping DB record")
         send_edge_analysis_alert(
             prediction_direction=prediction.direction,
             prediction_confidence=prediction.probability,
@@ -424,7 +443,7 @@ def main():
             threshold=args.min_prob,
             btc_price=binance_price,
             trade_executed=False,
-            no_trade_reason="Order not filled (cancelled after timeout)",
+            no_trade_reason=f"Order not filled after {MAX_RETRIES} attempts",
             market_ticker=market.ticker,
             strike_price=market.strike_price,
             cumulative_pnl=summary['total_pnl'],

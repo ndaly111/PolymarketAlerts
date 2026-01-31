@@ -143,10 +143,17 @@ def fetch_btc_markets(
 
 def fetch_btc_15min_markets(
     client: Optional[KalshiAuthClient] = None,
+    current_btc_price: Optional[float] = None,
 ) -> List[BTCMarket]:
-    """Fetch specifically 15-minute BTC markets.
+    """Fetch specifically 15-minute BTC markets near current price.
 
-    Filters for markets expiring within the next 20 minutes.
+    Filters for:
+    - Markets expiring within the next 20 minutes
+    - Strike prices within 2% of current BTC price (where there's uncertainty)
+
+    Args:
+        client: Kalshi auth client
+        current_btc_price: Current BTC price to filter relevant strikes
     """
     markets = fetch_btc_markets(client)
 
@@ -157,11 +164,28 @@ def fetch_btc_15min_markets(
         time_to_expiry = (m.expiry_time - now).total_seconds()
 
         # Keep markets expiring in 1-20 minutes
-        if 60 <= time_to_expiry <= 1200:
-            filtered.append(m)
+        if not (60 <= time_to_expiry <= 1200):
+            continue
 
-    # Sort by expiry time
-    filtered.sort(key=lambda x: x.expiry_time)
+        # If we have current price, filter for strikes within 2% of current price
+        # This ensures we're trading markets with actual uncertainty
+        if current_btc_price is not None:
+            price_diff_pct = abs(m.strike_price - current_btc_price) / current_btc_price
+            if price_diff_pct > 0.02:  # Skip if strike is more than 2% away
+                continue
+
+        filtered.append(m)
+
+    # Sort by how close strike is to current price (most relevant first)
+    if current_btc_price is not None:
+        filtered.sort(key=lambda x: abs(x.strike_price - current_btc_price))
+    else:
+        filtered.sort(key=lambda x: x.expiry_time)
+
+    if filtered:
+        print(f"[kalshi] Found {len(filtered)} markets near current price")
+        for m in filtered[:3]:
+            print(f"  - {m.ticker}: strike ${m.strike_price:,.0f}, expires in {int((m.expiry_time - now).total_seconds() / 60)}m")
 
     return filtered
 
