@@ -328,3 +328,91 @@ def send_pending_status_alert(
         fields=fields,
         webhook_url=webhook_url,
     )
+
+
+def send_ml_training_alert(
+    total_samples: int,
+    live_samples: int,
+    historical_samples: int,
+    model_name: str,
+    accuracy: float,
+    profit_weighted: bool,
+    weight_range: Optional[tuple] = None,
+    cumulative_pnl: Optional[float] = None,
+    total_record: Optional[str] = None,
+    live_accuracy: Optional[float] = None,
+    webhook_url: Optional[str] = None,
+) -> bool:
+    """Send ML model training/retraining update.
+
+    Args:
+        total_samples: Total training samples used
+        live_samples: Number of live trading samples
+        historical_samples: Number of historical samples
+        model_name: Name of the best model (e.g. "LightGBM")
+        accuracy: Test accuracy
+        profit_weighted: Whether profit-weighted training was used
+        weight_range: (min, max) weight range if profit_weighted
+        cumulative_pnl: Total P&L so far
+        total_record: Win/loss record string
+        live_accuracy: Accuracy on live trades only
+    """
+    title = "🤖 ML Model Retrained"
+    color = 0x9B59B6  # Purple
+
+    description = f"**{model_name}** model updated"
+    if profit_weighted:
+        description += "\n💰 Profit-weighted training enabled"
+
+    fields = [
+        {"name": "Total Samples", "value": f"{total_samples:,}", "inline": True},
+        {"name": "Historical", "value": f"{historical_samples:,}", "inline": True},
+        {"name": "Live", "value": f"{live_samples:,}", "inline": True},
+        {"name": "Test Accuracy", "value": f"{accuracy*100:.1f}%", "inline": True},
+    ]
+
+    if profit_weighted and weight_range:
+        fields.append({
+            "name": "Weight Range",
+            "value": f"{weight_range[0]:.1f}x - {weight_range[1]:.1f}x",
+            "inline": True
+        })
+
+    if live_accuracy is not None:
+        fields.append({
+            "name": "Live Accuracy",
+            "value": f"{live_accuracy*100:.1f}%",
+            "inline": True
+        })
+
+    # Performance stats
+    if cumulative_pnl is not None:
+        emoji = "📈" if cumulative_pnl >= 0 else "📉"
+        fields.append({
+            "name": f"{emoji} Cumulative P&L",
+            "value": f"${cumulative_pnl:+.2f}",
+            "inline": True
+        })
+
+    if total_record:
+        fields.append({
+            "name": "Record",
+            "value": total_record,
+            "inline": True
+        })
+
+    # Training mode explanation
+    if profit_weighted:
+        fields.append({
+            "name": "📊 Training Mode",
+            "value": "Samples weighted by |P&L| - big wins/losses have more influence on model",
+            "inline": False
+        })
+
+    return send_discord_alert(
+        title=title,
+        description=description,
+        color=color,
+        fields=fields,
+        webhook_url=webhook_url,
+    )

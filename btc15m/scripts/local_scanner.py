@@ -51,11 +51,15 @@ from lib.db import (
 )
 from lib.ml_predictor import MLPredictor, compute_all_features
 from lib.discord import send_trade_alert, send_settlement_alert, send_edge_analysis_alert
+from scripts.online_learn import save_live_sample
 
 try:
     from kalshi_auth_client import KalshiAuthClient
 except ImportError:
     KalshiAuthClient = None
+
+# Store features for each trade to use when settling (for online learning)
+TRADE_FEATURES: Dict[str, Dict[str, Any]] = {}
 
 
 KALSHI_FEE_RATE = 0.07
@@ -150,6 +154,25 @@ def check_settlements(db_path: Path, current_price: float):
                 outcome = "LOSS"
 
             settle_paper_trade(trade['id'], outcome, pnl, db_path)
+
+            # Save to live_samples for profit-weighted online learning
+            ticker = trade['market_ticker']
+            if ticker in TRADE_FEATURES:
+                try:
+                    save_live_sample(
+                        db_path=db_path,
+                        features=TRADE_FEATURES[ticker],
+                        outcome=actual,  # Actual market outcome (UP/DOWN)
+                        prediction=trade['side'],  # What we predicted
+                        model_prob=trade['model_prob'],
+                        pnl=pnl,  # For profit-weighted training
+                        entry_price=trade['entry_price'],
+                        edge=trade['edge'],
+                    )
+                    print(f"[LEARN] Saved sample: pred={trade['side']}, actual={actual}, pnl=${pnl:+.2f}")
+                    del TRADE_FEATURES[ticker]  # Clean up
+                except Exception as e:
+                    print(f"[LEARN] Error saving sample: {e}")
 
             summary = get_paper_trade_summary(db_path)
             print(f"\n[SETTLE] {trade['market_ticker']}: {outcome} (${pnl:+.2f})")
@@ -246,19 +269,23 @@ def run_scan_cycle(
         else:
             current_ask = probs["down_ask"]
 
-        # Max +EV price
+        # Check if positive EV at market ask price (accounting for 7% fee on wins)
+        # max_ev_price = highest price where we still have +EV
         prob = prediction.probability
         max_ev_price = (prob * (1 - KALSHI_FEE_RATE)) / (1 - prob * KALSHI_FEE_RATE)
-        entry_price = min(max_ev_price, current_ask)
+
+        # Use market ask - this will actually fill
+        entry_price = current_ask
         edge = prob - entry_price
 
         print(f"[SCAN] Market: {market.ticker}")
         print(f"[SCAN] Strike: ${market.strike_price:,.0f}, Expires: {int(tte/60)}m")
-        print(f"[SCAN] ML: {prob*100:.1f}%, Max: {max_ev_price*100:.1f}¢, Ask: {current_ask*100:.1f}¢")
+        print(f"[SCAN] ML: {prob*100:.1f}%, Max +EV: {max_ev_price*100:.1f}¢, Ask: {current_ask*100:.1f}¢")
         print(f"[SCAN] Edge: {edge*100:+.1f}%")
 
-        if edge <= 0:
-            print("[SCAN] No positive edge, skipping")
+        # Only trade if ask price is below our max +EV price (positive expected value)
+        if current_ask > max_ev_price:
+            print(f"[SCAN] Ask {current_ask*100:.1f}¢ > Max +EV {max_ev_price*100:.1f}¢, skipping")
             continue
 
         # Place order
@@ -273,6 +300,9 @@ def run_scan_cycle(
 
         if filled:
             traded_tickers.add(market.ticker)
+
+            # Store features for online learning (will be used at settlement)
+            TRADE_FEATURES[market.ticker] = features.copy()
 
             # Record trade
             trade_id = insert_paper_trade(
@@ -290,6 +320,7 @@ def run_scan_cycle(
 
             summary = get_paper_trade_summary(db_path)
             print(f"\n[TRADE] {prediction.direction} filled on {market.ticker}")
+            print(f"[TRADE] Features saved for online learning")
             print(f"[TRADE] Cumulative P&L: ${summary['total_pnl']:+.2f}")
 
             send_trade_alert(

@@ -17,65 +17,21 @@ class FundingData:
     long_short_ratio: Optional[float] = None
 
 
-def fetch_binance_funding() -> Optional[Dict[str, float]]:
-    """Fetch funding rates from Binance Futures (international endpoint)."""
-    # Use international endpoint - US users can't access fapi.binance.com
-    endpoints = [
-        "https://fapi.binance.com/fapi/v1/fundingRate",  # International
-        "https://dapi.binance.com/dapi/v1/fundingRate",  # Coin-margined
-    ]
-
-    for endpoint in endpoints:
-        try:
-            # BTC perpetual funding
-            btc_resp = requests.get(
-                endpoint,
-                params={"symbol": "BTCUSDT", "limit": 1},
-                timeout=10
-            )
-            if btc_resp.status_code == 451:  # US blocked
-                continue
-            btc_data = btc_resp.json()
-            if isinstance(btc_data, dict) and "code" in btc_data:
-                continue  # Error response
-
-            btc_rate = float(btc_data[0]["fundingRate"]) if btc_data else 0
-
-            # ETH perpetual funding
-            eth_resp = requests.get(
-                endpoint,
-                params={"symbol": "ETHUSDT", "limit": 1},
-                timeout=10
-            )
-            eth_data = eth_resp.json()
-            eth_rate = float(eth_data[0]["fundingRate"]) if isinstance(eth_data, list) and eth_data else 0
-
-            return {
-                "btc_funding": btc_rate,
-                "eth_funding": eth_rate,
-            }
-        except Exception as e:
-            continue
-
-    print(f"[funding] Binance endpoints unavailable")
-    return None
-
-
-def fetch_bybit_funding() -> Optional[Dict[str, float]]:
-    """Fetch funding rates from Bybit as backup."""
+def fetch_okx_funding() -> Optional[Dict[str, float]]:
+    """Fetch funding rates from OKX (US-accessible)."""
     try:
-        # BTC funding
+        # BTC perpetual funding
         btc_resp = requests.get(
-            "https://api.bybit.com/v5/market/tickers",
-            params={"category": "linear", "symbol": "BTCUSDT"},
+            "https://www.okx.com/api/v5/public/funding-rate",
+            params={"instId": "BTC-USDT-SWAP"},
             timeout=10
         )
         btc_data = btc_resp.json()
 
-        # ETH funding
+        # ETH perpetual funding
         eth_resp = requests.get(
-            "https://api.bybit.com/v5/market/tickers",
-            params={"category": "linear", "symbol": "ETHUSDT"},
+            "https://www.okx.com/api/v5/public/funding-rate",
+            params={"instId": "ETH-USDT-SWAP"},
             timeout=10
         )
         eth_data = eth_resp.json()
@@ -83,42 +39,62 @@ def fetch_bybit_funding() -> Optional[Dict[str, float]]:
         btc_rate = 0
         eth_rate = 0
 
-        if btc_data.get("result", {}).get("list"):
-            btc_rate = float(btc_data["result"]["list"][0].get("fundingRate", 0))
-        if eth_data.get("result", {}).get("list"):
-            eth_rate = float(eth_data["result"]["list"][0].get("fundingRate", 0))
+        if btc_data.get("code") == "0" and btc_data.get("data"):
+            btc_rate = float(btc_data["data"][0].get("fundingRate", 0))
+        if eth_data.get("code") == "0" and eth_data.get("data"):
+            eth_rate = float(eth_data["data"][0].get("fundingRate", 0))
 
-        if btc_rate != 0 or eth_rate != 0:
-            return {"btc_funding": btc_rate, "eth_funding": eth_rate}
-        return None
+        return {"btc_funding": btc_rate, "eth_funding": eth_rate}
     except Exception as e:
-        print(f"[funding] Bybit error: {e}")
+        print(f"[funding] OKX error: {e}")
         return None
 
 
-def fetch_long_short_ratio() -> Optional[float]:
-    """Fetch BTC long/short ratio from Binance."""
+def fetch_kraken_price() -> Optional[Dict[str, float]]:
+    """Fetch BTC/ETH prices from Kraken as backup data source."""
     try:
         resp = requests.get(
-            "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
-            params={"symbol": "BTCUSDT", "period": "5m", "limit": 1},
+            "https://api.kraken.com/0/public/Ticker",
+            params={"pair": "XXBTZUSD,XETHZUSD"},
             timeout=10
         )
         data = resp.json()
-        if data:
-            return float(data[0]["longShortRatio"])
+
+        if data.get("error"):
+            return None
+
+        result = data.get("result", {})
+        btc_price = float(result.get("XXBTZUSD", {}).get("c", [0])[0])
+        eth_price = float(result.get("XETHZUSD", {}).get("c", [0])[0])
+
+        return {"btc_price": btc_price, "eth_price": eth_price}
+    except Exception as e:
+        print(f"[funding] Kraken error: {e}")
+        return None
+
+
+def fetch_okx_long_short_ratio() -> Optional[float]:
+    """Fetch BTC long/short ratio from OKX."""
+    try:
+        resp = requests.get(
+            "https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio",
+            params={"instId": "BTC", "period": "5m"},
+            timeout=10
+        )
+        data = resp.json()
+        if data.get("code") == "0" and data.get("data"):
+            # OKX returns timestamp, longShortRatio pairs
+            return float(data["data"][0][1])
         return None
     except Exception as e:
-        print(f"[funding] Long/short ratio error: {e}")
+        # This endpoint may require auth, fallback to default
         return None
 
 
 def get_funding_data() -> Optional[FundingData]:
     """Get comprehensive funding data."""
-    # Try Binance first, then Bybit
-    funding = fetch_binance_funding()
-    if not funding:
-        funding = fetch_bybit_funding()
+    # Use OKX (US-accessible)
+    funding = fetch_okx_funding()
 
     if not funding:
         return None
@@ -140,7 +116,7 @@ def get_funding_data() -> Optional[FundingData]:
         sentiment = "neutral"
 
     # Get long/short ratio
-    ls_ratio = fetch_long_short_ratio()
+    ls_ratio = fetch_okx_long_short_ratio()
 
     return FundingData(
         btc_funding_rate=btc_rate,

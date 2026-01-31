@@ -274,19 +274,32 @@ def load_training_data(db_path: Path) -> tuple:
     return np.array(X), np.array(y)
 
 
-def train_model(X: np.ndarray, y: np.ndarray) -> tuple:
-    """Train and evaluate the model."""
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, shuffle=False  # Don't shuffle time series
-    )
+def train_model(X: np.ndarray, y: np.ndarray, sample_weights: np.ndarray = None) -> tuple:
+    """Train and evaluate the model.
+
+    Args:
+        X: Feature matrix
+        y: Target labels
+        sample_weights: Optional profit-based weights (higher weight = more influence)
+    """
+    # Split data (and weights if provided)
+    if sample_weights is not None:
+        X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
+            X, y, sample_weights, test_size=0.2, random_state=42, shuffle=False
+        )
+        print(f"[train] Using profit-weighted training (weight range: {w_train.min():.2f}-{w_train.max():.2f})")
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, shuffle=False  # Don't shuffle time series
+        )
+        w_train = None
 
     # Scale features
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Train Random Forest
+    # Train Random Forest with sample weights
     print("[train] Training Random Forest...")
     rf_model = RandomForestClassifier(
         n_estimators=100,
@@ -295,9 +308,9 @@ def train_model(X: np.ndarray, y: np.ndarray) -> tuple:
         random_state=42,
         n_jobs=-1,
     )
-    rf_model.fit(X_train_scaled, y_train)
+    rf_model.fit(X_train_scaled, y_train, sample_weight=w_train)
 
-    # Train Gradient Boosting
+    # Train Gradient Boosting with sample weights
     print("[train] Training Gradient Boosting...")
     gb_model = GradientBoostingClassifier(
         n_estimators=100,
@@ -305,7 +318,7 @@ def train_model(X: np.ndarray, y: np.ndarray) -> tuple:
         learning_rate=0.1,
         random_state=42,
     )
-    gb_model.fit(X_train_scaled, y_train)
+    gb_model.fit(X_train_scaled, y_train, sample_weight=w_train)
 
     # Evaluate both
     print("\n" + "=" * 50)
@@ -363,7 +376,7 @@ def train_model(X: np.ndarray, y: np.ndarray) -> tuple:
             random_state=42,
             verbose=-1,
         )
-        lgb_model.fit(X_train_scaled, y_train)
+        lgb_model.fit(X_train_scaled, y_train, sample_weight=w_train)
         lgb_pred = lgb_model.predict(X_test_scaled)
         lgb_acc = accuracy_score(y_test, lgb_pred)
         print(f"Accuracy: {lgb_acc:.3f}")
