@@ -38,6 +38,24 @@ from lib.indicators import (
     compute_higher_timeframe_trend,
     compute_time_features,
     compute_candle_patterns,
+    # New batch 2 indicators
+    compute_adx,
+    compute_mfi,
+    compute_roc,
+    compute_trix,
+    compute_keltner_channels,
+    compute_donchian_channels,
+    compute_ichimoku,
+    compute_vwma,
+    compute_cmf,
+    compute_chop,
+    compute_squeeze,
+    compute_volume_features,
+    compute_price_action_features,
+    compute_pivot_points,
+    compute_linear_regression,
+    # Composite indicators
+    compute_all_composites,
 )
 from lib.db import ensure_schema, DEFAULT_DB_PATH
 
@@ -146,7 +164,7 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
         momentum = compute_price_momentum(closes, period=10)
         sma_20 = compute_sma(closes, period=20)
 
-        # New indicators
+        # New indicators - batch 1
         bb = compute_bollinger_bands(closes, period=20, std_dev=2.0)
         atr = compute_atr(candle_dicts, period=14)
         stoch = compute_stochastic(candle_dicts, k_period=14, d_period=3)
@@ -155,12 +173,58 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
         obv_trend = compute_obv_trend(candle_dicts, period=10)
         htf_trend = compute_higher_timeframe_trend(closes)
 
+        # New indicators - batch 2
+        adx = compute_adx(candle_dicts, period=14)
+        mfi = compute_mfi(candle_dicts, period=14)
+        roc = compute_roc(closes, period=10)
+        trix = compute_trix(closes, period=15)
+        kc = compute_keltner_channels(candle_dicts, ema_period=20, atr_period=10)
+        dc = compute_donchian_channels(candle_dicts, period=20)
+        ichi = compute_ichimoku(candle_dicts)
+        vwma = compute_vwma(candle_dicts, period=20)
+        cmf = compute_cmf(candle_dicts, period=20)
+        chop = compute_chop(candle_dicts, period=14)
+        squeeze = compute_squeeze(candle_dicts)
+        vol_feats = compute_volume_features(candle_dicts, period=20)
+        pa_feats = compute_price_action_features(candle_dicts, period=20)
+        pivot = compute_pivot_points(candle_dicts)
+        lr = compute_linear_regression(closes, period=20)
+
         # Time features
         dt = datetime.fromtimestamp(window_start, tz=timezone.utc)
         time_feats = compute_time_features(dt.hour)
 
         # Candle patterns
         patterns = compute_candle_patterns(candle_dicts)
+
+        # Composite indicators - combine multiple signals
+        composite_inputs = {
+            "adx": adx["adx"] if adx else None,
+            "rsi": rsi,
+            "macd_histogram": macd_result.histogram if macd_result else None,
+            "momentum": momentum,
+            "stoch_k": stoch["k"] if stoch else None,
+            "williams_r": williams_r,
+            "mfi": mfi,
+            "cci": cci,
+            "atr": atr,
+            "bb_bandwidth": bb["bandwidth"] if bb else None,
+            "kc_width": kc["kc_width"] if kc else None,
+            "chop": chop,
+            "vol_ratio": vol_feats["vol_ratio"] if vol_feats else None,
+            "obv_trend": obv_trend,
+            "cmf": cmf,
+            "price_change": 0,  # Will be calculated
+            "trend_15m": htf_trend.get("trend_15m"),
+            "trend_1h": htf_trend.get("trend_1h"),
+            "change_15m": htf_trend.get("change_15m"),
+            "change_1h": htf_trend.get("change_1h"),
+            "squeeze_on": squeeze["squeeze_on"] if squeeze else None,
+            "range_compression": pa_feats["range_compression"] if pa_feats else None,
+            "bb_percent_b": bb["percent_b"] if bb else None,
+            "dc_position": dc["dc_position"] if dc else None,
+        }
+        composites = compute_all_composites(closes, candle_dicts, composite_inputs)
 
         price_at_start = window_candles[0].open if window_candles else closes[-1]
         price_at_end = window_candles[-1].close if window_candles else closes[-1]
@@ -223,6 +287,77 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
             "shooting_star": patterns.get("shooting_star", 0),
             "bullish_engulfing": patterns.get("bullish_engulfing", 0),
             "bearish_engulfing": patterns.get("bearish_engulfing", 0),
+            # ===== NEW BATCH 2 INDICATORS =====
+            # ADX
+            "adx": adx["adx"] if adx else None,
+            "plus_di": adx["plus_di"] if adx else None,
+            "minus_di": adx["minus_di"] if adx else None,
+            # MFI
+            "mfi": mfi,
+            # ROC
+            "roc": roc,
+            # TRIX
+            "trix": trix,
+            # Keltner Channels
+            "kc_position": kc["kc_position"] if kc else None,
+            "kc_width": kc["kc_width"] if kc else None,
+            # Donchian Channels
+            "dc_position": dc["dc_position"] if dc else None,
+            "dc_width": dc["dc_width"] if dc else None,
+            # Ichimoku
+            "ichi_tk_cross": ichi["ichi_tk_cross"] if ichi else None,
+            "ichi_above_cloud": ichi["ichi_above_cloud"] if ichi else None,
+            "ichi_below_cloud": ichi["ichi_below_cloud"] if ichi else None,
+            "ichi_cloud_thickness": ichi["ichi_cloud_thickness"] if ichi else None,
+            # VWMA
+            "price_vs_vwma": ((price_at_start - vwma) / vwma * 100) if vwma else None,
+            # CMF
+            "cmf": cmf,
+            # Choppiness
+            "chop": chop,
+            # Squeeze
+            "squeeze_on": squeeze["squeeze_on"] if squeeze else None,
+            "squeeze_momentum": squeeze["squeeze_momentum"] if squeeze else None,
+            # Volume features
+            "vol_ratio": vol_feats["vol_ratio"] if vol_feats else None,
+            "vol_trend": vol_feats["vol_trend"] if vol_feats else None,
+            "vol_up_ratio": vol_feats["vol_up_ratio"] if vol_feats else None,
+            "vol_spike": vol_feats["vol_spike"] if vol_feats else None,
+            # Price action
+            "dist_to_high_pct": pa_feats["dist_to_high_pct"] if pa_feats else None,
+            "dist_to_low_pct": pa_feats["dist_to_low_pct"] if pa_feats else None,
+            "range_compression": pa_feats["range_compression"] if pa_feats else None,
+            "higher_highs": pa_feats["higher_highs"] if pa_feats else None,
+            "lower_lows": pa_feats["lower_lows"] if pa_feats else None,
+            "up_streak": pa_feats["up_streak"] if pa_feats else None,
+            "down_streak": pa_feats["down_streak"] if pa_feats else None,
+            # Pivot points
+            "above_pivot": pivot["above_pivot"] if pivot else None,
+            "dist_to_nearest_pivot": pivot["dist_to_nearest"] if pivot else None,
+            # Linear regression
+            "lr_slope": lr["lr_slope"] if lr else None,
+            "lr_deviation": lr["lr_deviation"] if lr else None,
+            "lr_r_squared": lr["lr_r_squared"] if lr else None,
+            # ===== COMPOSITE INDICATORS =====
+            "comp_trend_composite": composites.get("comp_trend_composite"),
+            "comp_weighted_trend": composites.get("comp_weighted_trend"),
+            "comp_ob_os_signal": composites.get("comp_ob_os_signal"),
+            "comp_overbought_consensus": composites.get("comp_overbought_consensus"),
+            "comp_oversold_consensus": composites.get("comp_oversold_consensus"),
+            "comp_volatility_composite": composites.get("comp_volatility_composite"),
+            "comp_is_ranging": composites.get("comp_is_ranging"),
+            "comp_is_trending": composites.get("comp_is_trending"),
+            "comp_breakout_potential": composites.get("comp_breakout_potential"),
+            "comp_vol_price_confirmation": composites.get("comp_vol_price_confirmation"),
+            "comp_vol_price_divergence": composites.get("comp_vol_price_divergence"),
+            "comp_strong_move": composites.get("comp_strong_move"),
+            "comp_mtf_aligned": composites.get("comp_mtf_aligned"),
+            "comp_mtf_direction": composites.get("comp_mtf_direction"),
+            "comp_mtf_acceleration": composites.get("comp_mtf_acceleration"),
+            "comp_breakout_score": composites.get("comp_breakout_score"),
+            "comp_breakout_direction": composites.get("comp_breakout_direction"),
+            "comp_has_divergence": composites.get("comp_has_divergence"),
+            "comp_divergence_strength": composites.get("comp_divergence_strength"),
             # Outcome
             "outcome": outcome,
         })
@@ -287,45 +422,103 @@ def store_historical_samples(samples: List[dict], db_path: Path) -> int:
                 shooting_star INTEGER,
                 bullish_engulfing INTEGER,
                 bearish_engulfing INTEGER,
+                -- NEW: ADX
+                adx REAL,
+                plus_di REAL,
+                minus_di REAL,
+                -- NEW: MFI
+                mfi REAL,
+                -- NEW: ROC
+                roc REAL,
+                -- NEW: TRIX
+                trix REAL,
+                -- NEW: Keltner Channels
+                kc_position REAL,
+                kc_width REAL,
+                -- NEW: Donchian Channels
+                dc_position REAL,
+                dc_width REAL,
+                -- NEW: Ichimoku
+                ichi_tk_cross REAL,
+                ichi_above_cloud INTEGER,
+                ichi_below_cloud INTEGER,
+                ichi_cloud_thickness REAL,
+                -- NEW: VWMA
+                price_vs_vwma REAL,
+                -- NEW: CMF
+                cmf REAL,
+                -- NEW: Choppiness
+                chop REAL,
+                -- NEW: Squeeze
+                squeeze_on INTEGER,
+                squeeze_momentum REAL,
+                -- NEW: Volume
+                vol_ratio REAL,
+                vol_trend REAL,
+                vol_up_ratio REAL,
+                vol_spike INTEGER,
+                -- NEW: Price action
+                dist_to_high_pct REAL,
+                dist_to_low_pct REAL,
+                range_compression REAL,
+                higher_highs INTEGER,
+                lower_lows INTEGER,
+                up_streak INTEGER,
+                down_streak INTEGER,
+                -- NEW: Pivot
+                above_pivot INTEGER,
+                dist_to_nearest_pivot REAL,
+                -- NEW: Linear regression
+                lr_slope REAL,
+                lr_deviation REAL,
+                lr_r_squared REAL,
+                -- COMPOSITE INDICATORS
+                comp_trend_composite REAL,
+                comp_weighted_trend REAL,
+                comp_ob_os_signal REAL,
+                comp_overbought_consensus REAL,
+                comp_oversold_consensus REAL,
+                comp_volatility_composite REAL,
+                comp_is_ranging INTEGER,
+                comp_is_trending INTEGER,
+                comp_breakout_potential REAL,
+                comp_vol_price_confirmation REAL,
+                comp_vol_price_divergence INTEGER,
+                comp_strong_move INTEGER,
+                comp_mtf_aligned INTEGER,
+                comp_mtf_direction REAL,
+                comp_mtf_acceleration REAL,
+                comp_breakout_score REAL,
+                comp_breakout_direction REAL,
+                comp_has_divergence INTEGER,
+                comp_divergence_strength REAL,
                 -- Outcome
                 outcome TEXT NOT NULL,
                 UNIQUE(window_start)
             )
         """)
 
+        # Build column list dynamically from sample keys
+        # Exclude 'outcome' from features, add it at the end
+        sample_keys = list(samples[0].keys()) if samples else []
+        feature_keys = [k for k in sample_keys if k != "outcome"]
+        all_cols = feature_keys + ["outcome"]
+
+        # Build INSERT statement dynamically
+        col_names = ", ".join(all_cols)
+        placeholders = ", ".join(["?" for _ in all_cols])
+
         inserted = 0
         for s in samples:
             try:
-                conn.execute("""
-                    INSERT OR IGNORE INTO historical_samples
-                    (timestamp, window_start, price_at_start, price_at_end,
-                     price_change, price_change_pct, rsi, macd, macd_signal,
-                     macd_histogram, vwap, volatility, momentum, sma_20,
-                     price_vs_vwap, bb_percent_b, bb_bandwidth, atr, stoch_k,
-                     williams_r, cci, obv_trend, trend_15m, trend_1h,
-                     change_15m, change_1h, hour, hour_sin, hour_cos,
-                     asia_session, europe_session, us_session, high_vol_hour,
-                     doji, hammer, shooting_star, bullish_engulfing,
-                     bearish_engulfing, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?)
-                """, (
-                    s["timestamp"], s["window_start"], s["price_at_start"],
-                    s["price_at_end"], s["price_change"], s["price_change_pct"],
-                    s["rsi"], s["macd"], s["macd_signal"], s["macd_histogram"],
-                    s["vwap"], s["volatility"], s["momentum"], s["sma_20"],
-                    s["price_vs_vwap"], s["bb_percent_b"], s["bb_bandwidth"],
-                    s["atr"], s["stoch_k"], s["williams_r"], s["cci"],
-                    s["obv_trend"], s["trend_15m"], s["trend_1h"],
-                    s["change_15m"], s["change_1h"], s["hour"], s["hour_sin"],
-                    s["hour_cos"], s["asia_session"], s["europe_session"],
-                    s["us_session"], s["high_vol_hour"], s["doji"], s["hammer"],
-                    s["shooting_star"], s["bullish_engulfing"],
-                    s["bearish_engulfing"], s["outcome"],
-                ))
+                values = [s.get(k) for k in all_cols]
+                conn.execute(f"""
+                    INSERT OR IGNORE INTO historical_samples ({col_names})
+                    VALUES ({placeholders})
+                """, values)
                 inserted += 1
             except Exception as e:
+                print(f"Insert error: {e}")
                 continue
 
         conn.commit()

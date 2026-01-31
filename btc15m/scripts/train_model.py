@@ -79,6 +79,77 @@ FEATURE_COLUMNS = [
     "shooting_star",
     "bullish_engulfing",
     "bearish_engulfing",
+    # ===== BATCH 2 INDICATORS =====
+    # ADX
+    "adx",
+    "plus_di",
+    "minus_di",
+    # MFI
+    "mfi",
+    # ROC
+    "roc",
+    # TRIX
+    "trix",
+    # Keltner Channels
+    "kc_position",
+    "kc_width",
+    # Donchian Channels
+    "dc_position",
+    "dc_width",
+    # Ichimoku
+    "ichi_tk_cross",
+    "ichi_above_cloud",
+    "ichi_below_cloud",
+    "ichi_cloud_thickness",
+    # VWMA
+    "price_vs_vwma",
+    # CMF
+    "cmf",
+    # Choppiness
+    "chop",
+    # Squeeze
+    "squeeze_on",
+    "squeeze_momentum",
+    # Volume
+    "vol_ratio",
+    "vol_trend",
+    "vol_up_ratio",
+    "vol_spike",
+    # Price action
+    "dist_to_high_pct",
+    "dist_to_low_pct",
+    "range_compression",
+    "higher_highs",
+    "lower_lows",
+    "up_streak",
+    "down_streak",
+    # Pivot
+    "above_pivot",
+    "dist_to_nearest_pivot",
+    # Linear regression
+    "lr_slope",
+    "lr_deviation",
+    "lr_r_squared",
+    # ===== COMPOSITE INDICATORS =====
+    "comp_trend_composite",
+    "comp_weighted_trend",
+    "comp_ob_os_signal",
+    "comp_overbought_consensus",
+    "comp_oversold_consensus",
+    "comp_volatility_composite",
+    "comp_is_ranging",
+    "comp_is_trending",
+    "comp_breakout_potential",
+    "comp_vol_price_confirmation",
+    "comp_vol_price_divergence",
+    "comp_strong_move",
+    "comp_mtf_aligned",
+    "comp_mtf_direction",
+    "comp_mtf_acceleration",
+    "comp_breakout_score",
+    "comp_breakout_direction",
+    "comp_has_divergence",
+    "comp_divergence_strength",
 ]
 
 
@@ -86,17 +157,10 @@ def load_training_data(db_path: Path) -> tuple:
     """Load training data from historical samples table."""
     with sqlite3.connect(str(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT rsi, macd, macd_signal, macd_histogram,
-                   volatility, momentum, price_vs_vwap,
-                   bb_percent_b, bb_bandwidth, atr, stoch_k,
-                   williams_r, cci, obv_trend,
-                   trend_15m, trend_1h, change_15m, change_1h,
-                   hour, hour_sin, hour_cos,
-                   asia_session, europe_session, us_session, high_vol_hour,
-                   doji, hammer, shooting_star,
-                   bullish_engulfing, bearish_engulfing,
-                   outcome
+        # Build dynamic column list from FEATURE_COLUMNS
+        cols = ", ".join(FEATURE_COLUMNS)
+        rows = conn.execute(f"""
+            SELECT {cols}, outcome
             FROM historical_samples
             WHERE rsi IS NOT NULL
               AND macd IS NOT NULL
@@ -109,49 +173,47 @@ def load_training_data(db_path: Path) -> tuple:
     X = []
     y = []
 
+    # Default values for missing data
+    defaults = {
+        "rsi": 50, "macd": 0, "macd_signal": 0, "macd_histogram": 0,
+        "volatility": 0, "momentum": 0, "price_vs_vwap": 0,
+        "bb_percent_b": 0.5, "bb_bandwidth": 0, "atr": 0, "stoch_k": 50,
+        "williams_r": -50, "cci": 0, "obv_trend": 0,
+        "trend_15m": 0, "trend_1h": 0, "change_15m": 0, "change_1h": 0,
+        "hour": 12, "hour_sin": 0, "hour_cos": 1,
+        "asia_session": 0, "europe_session": 0, "us_session": 0, "high_vol_hour": 0,
+        "doji": 0, "hammer": 0, "shooting_star": 0,
+        "bullish_engulfing": 0, "bearish_engulfing": 0,
+        # Batch 2
+        "adx": 25, "plus_di": 25, "minus_di": 25, "mfi": 50,
+        "roc": 0, "trix": 0, "kc_position": 0.5, "kc_width": 0,
+        "dc_position": 0.5, "dc_width": 0, "ichi_tk_cross": 0,
+        "ichi_above_cloud": 0, "ichi_below_cloud": 0, "ichi_cloud_thickness": 0,
+        "price_vs_vwma": 0, "cmf": 0, "chop": 50,
+        "squeeze_on": 0, "squeeze_momentum": 0,
+        "vol_ratio": 1, "vol_trend": 0, "vol_up_ratio": 0.5, "vol_spike": 0,
+        "dist_to_high_pct": 0, "dist_to_low_pct": 0, "range_compression": 1,
+        "higher_highs": 0, "lower_lows": 0, "up_streak": 0, "down_streak": 0,
+        "above_pivot": 0, "dist_to_nearest_pivot": 0,
+        "lr_slope": 0, "lr_deviation": 0, "lr_r_squared": 0,
+        # Composites
+        "comp_trend_composite": 0, "comp_weighted_trend": 0,
+        "comp_ob_os_signal": 0, "comp_overbought_consensus": 0, "comp_oversold_consensus": 0,
+        "comp_volatility_composite": 0, "comp_is_ranging": 0, "comp_is_trending": 0,
+        "comp_breakout_potential": 0, "comp_vol_price_confirmation": 0,
+        "comp_vol_price_divergence": 0, "comp_strong_move": 0,
+        "comp_mtf_aligned": 0, "comp_mtf_direction": 0, "comp_mtf_acceleration": 0,
+        "comp_breakout_score": 0, "comp_breakout_direction": 0,
+        "comp_has_divergence": 0, "comp_divergence_strength": 0,
+    }
+
     for row in rows:
-        features = [
-            # Original indicators
-            row["rsi"] or 50,
-            row["macd"] or 0,
-            row["macd_signal"] or 0,
-            row["macd_histogram"] or 0,
-            row["volatility"] or 0,
-            row["momentum"] or 0,
-            row["price_vs_vwap"] or 0,
-            # Bollinger Bands
-            row["bb_percent_b"] or 0.5,
-            row["bb_bandwidth"] or 0,
-            # ATR
-            row["atr"] or 0,
-            # Stochastic
-            row["stoch_k"] or 50,
-            # Williams %R
-            row["williams_r"] or -50,
-            # CCI
-            row["cci"] or 0,
-            # OBV trend
-            row["obv_trend"] or 0,
-            # Higher timeframe
-            row["trend_15m"] or 0,
-            row["trend_1h"] or 0,
-            row["change_15m"] or 0,
-            row["change_1h"] or 0,
-            # Time features
-            row["hour"] or 0,
-            row["hour_sin"] or 0,
-            row["hour_cos"] or 1,
-            row["asia_session"] or 0,
-            row["europe_session"] or 0,
-            row["us_session"] or 0,
-            row["high_vol_hour"] or 0,
-            # Candle patterns
-            row["doji"] or 0,
-            row["hammer"] or 0,
-            row["shooting_star"] or 0,
-            row["bullish_engulfing"] or 0,
-            row["bearish_engulfing"] or 0,
-        ]
+        features = []
+        for col in FEATURE_COLUMNS:
+            val = row[col] if col in row.keys() else None
+            if val is None:
+                val = defaults.get(col, 0)
+            features.append(val)
         X.append(features)
         y.append(1 if row["outcome"] == "UP" else 0)
 
