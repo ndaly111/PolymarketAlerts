@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -328,41 +329,36 @@ def main():
         )
         sys.exit(0)
 
-    # Execute trade at actual ASK price (what we'd pay)
-    if prediction.direction == "UP":
-        entry_price = probs["up_ask"]  # Pay the ask to buy YES on UP
-    else:
-        entry_price = probs["down_ask"]  # Pay the ask to buy YES on DOWN
+    # Calculate our max price where we still have +EV (after 7% fee)
+    # EV = prob * (1-price) * 0.93 - (1-prob) * price > 0
+    # Solving: price < prob * 0.93 / (prob * 0.93 + (1-prob))
+    # Simplified: max_price ≈ prob * 0.93 / (1 - prob * 0.07)
+    KALSHI_FEE_RATE = 0.07
+    prob = prediction.probability
+    max_ev_price = (prob * (1 - KALSHI_FEE_RATE)) / (1 - prob * KALSHI_FEE_RATE)
 
-    # Calculate edge vs entry price (not mid)
+    # Get current market ask
+    if prediction.direction == "UP":
+        current_ask = probs["up_ask"]
+    else:
+        current_ask = probs["down_ask"]
+
+    # Use whichever is lower - our max price or current ask
+    # This way we might get filled at a better price
+    entry_price = min(max_ev_price, current_ask)
     edge = prediction.probability - entry_price
 
-    # Skip if edge is negative after spread
-    if edge < 0:
-        print(f"[trade] Negative edge after spread ({edge*100:.1f}%), skipping")
-
-        # Send Discord update with edge analysis
-        send_edge_analysis_alert(
-            prediction_direction=prediction.direction,
-            prediction_confidence=prediction.probability,
-            market_ask_price=entry_price,
-            edge=edge,
-            threshold=args.min_prob,
-            btc_price=binance_price,
-            trade_executed=False,
-            no_trade_reason="Negative edge after spread",
-            market_ticker=market.ticker,
-            strike_price=market.strike_price,
-            cumulative_pnl=summary['total_pnl'],
-            total_record=total_record,
-        )
-        sys.exit(0)
+    print(f"[trade] ML prob: {prob*100:.1f}%, Max +EV price: {max_ev_price*100:.1f}¢, Market ask: {current_ask*100:.1f}¢")
+    print(f"[trade] Using limit: {entry_price*100:.1f}¢, Edge: {edge*100:+.1f}%")
 
     # Convert probability to cents for limit price
     limit_price_cents = int(entry_price * 100)
 
     # Place real order or paper trade
     order_id = None
+    order_filled = False
+    ORDER_TIMEOUT_SECONDS = 30
+
     if not args.paper and kalshi_client:
         try:
             order = place_real_order(
@@ -375,10 +371,66 @@ def main():
             order_id = order.get("order_id")
             order_status = order.get("status", "unknown")
             print(f"[ORDER] Order placed! ID: {order_id}, Status: {order_status}")
+
+            # Check if immediately filled
+            if order_status.lower() in ("filled", "executed"):
+                order_filled = True
+                print(f"[ORDER] Immediately filled!")
+            elif order_id:
+                # Wait and poll for fill
+                print(f"[ORDER] Waiting up to {ORDER_TIMEOUT_SECONDS}s for fill...")
+                start_time = time.time()
+
+                while time.time() - start_time < ORDER_TIMEOUT_SECONDS:
+                    time.sleep(5)  # Check every 5 seconds
+                    try:
+                        order_status_resp = kalshi_client.get_order(order_id)
+                        current_status = order_status_resp.get("status", "").lower()
+                        print(f"[ORDER] Status: {current_status}")
+
+                        if current_status in ("filled", "executed"):
+                            order_filled = True
+                            print(f"[ORDER] Order filled!")
+                            break
+                        elif current_status in ("cancelled", "canceled", "expired"):
+                            print(f"[ORDER] Order {current_status}")
+                            break
+                    except Exception as e:
+                        print(f"[ORDER] Status check error: {e}")
+
+                # Cancel if not filled after timeout
+                if not order_filled:
+                    try:
+                        print(f"[ORDER] Timeout - cancelling order {order_id}")
+                        kalshi_client.cancel_order(order_id)
+                        print(f"[ORDER] Order cancelled")
+                        order_id = None  # Clear order_id since we cancelled
+                    except Exception as e:
+                        print(f"[ORDER] Cancel error: {e}")
+
         except Exception as e:
             print(f"[ORDER] ERROR placing order: {e}")
             print("[ORDER] Falling back to paper trade")
             args.paper = True
+
+    # Only record trade if order was filled (or paper trade)
+    if not order_filled and not args.paper:
+        print("[trade] Order not filled, skipping DB record")
+        send_edge_analysis_alert(
+            prediction_direction=prediction.direction,
+            prediction_confidence=prediction.probability,
+            market_ask_price=entry_price,
+            edge=edge,
+            threshold=args.min_prob,
+            btc_price=binance_price,
+            trade_executed=False,
+            no_trade_reason="Order not filled (cancelled after timeout)",
+            market_ticker=market.ticker,
+            strike_price=market.strike_price,
+            cumulative_pnl=summary['total_pnl'],
+            total_record=total_record,
+        )
+        sys.exit(0)
 
     # Record in database (for tracking both real and paper)
     trade_id = insert_paper_trade(
