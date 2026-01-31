@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-31T17:58:28.552771+00:00",
+  "timestamp": "2026-01-31T18:42:51.449771+00:00",
   "all_time": {
     "total_trades": 1,
     "wins": 0,
@@ -7,7 +7,7 @@
     "pending": 1,
     "win_rate": null,
     "total_pnl": 0.0,
-    "avg_edge": 0.01774864876139337,
+    "avg_edge": 0.014288715395028961,
     "avg_win": 0,
     "avg_loss": 0,
     "max_win_streak": 0,
@@ -21,7 +21,7 @@
     "pending": 1,
     "pnl": 0.0,
     "win_rate": null,
-    "avg_confidence": 0.5823654997090942
+    "avg_confidence": 0.7375155666216199
   },
   "current_streak": {
     "type": null,
@@ -31,12 +31,12 @@
   "recent_trades": [
     {
       "id": 1,
-      "timestamp": "2026-01-31T17:58:27.825588+00:00",
-      "market": "KXBTC-26JAN3113-B78875",
-      "side": "UP",
-      "entry_price": 0.5646168509477009,
-      "model_prob": 0.5823654997090942,
-      "edge": 0.01774864876139337,
+      "timestamp": "2026-01-31T18:42:51.011207+00:00",
+      "market": "KXBTC-26JAN3114-B77625",
+      "side": "DOWN",
+      "entry_price": 0.7232268512265909,
+      "model_prob": 0.7375155666216199,
+      "edge": 0.014288715395028961,
       "outcome": null,
       "pnl": null
     }
