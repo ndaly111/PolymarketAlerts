@@ -34,13 +34,14 @@ from lib.db import (
     DEFAULT_DB_PATH,
 )
 from lib.ml_predictor import MLPredictor, compute_all_features
-from lib.discord import send_trade_alert, send_settlement_alert
+from lib.discord import send_trade_alert, send_settlement_alert, send_pending_status_alert
 from lib.stats import update_all_stats
 
 
-def check_settlements(db_path: Path, current_price: float) -> None:
-    """Check and settle any expired trades."""
+def check_settlements(db_path: Path, current_price: float) -> int:
+    """Check and settle any expired trades. Returns number settled."""
     pending = get_pending_trades(db_path)
+    settled_count = 0
 
     for trade in pending:
         # Parse expiry time
@@ -63,8 +64,14 @@ def check_settlements(db_path: Path, current_price: float) -> None:
                 pnl = -trade['entry_price'] * trade['stake']
 
             settle_paper_trade(trade['id'], outcome, pnl, db_path)
+            settled_count += 1
+
+            # Get updated cumulative stats
+            summary = get_paper_trade_summary(db_path)
+            total_record = f"{summary['wins']}W / {summary['losses']}L"
 
             print(f"[SETTLED] {trade['market_ticker']}: {outcome} (${pnl:+.2f})")
+            print(f"[CUMULATIVE] Total P&L: ${summary['total_pnl']:+.2f} | Record: {total_record}")
 
             send_settlement_alert(
                 market_ticker=trade['market_ticker'],
@@ -73,7 +80,11 @@ def check_settlements(db_path: Path, current_price: float) -> None:
                 pnl=pnl,
                 strike_price=strike,
                 settlement_price=current_price,
+                cumulative_pnl=summary['total_pnl'],
+                total_record=total_record,
             )
+
+    return settled_count
 
 
 def main():
@@ -110,7 +121,16 @@ def main():
         sys.exit(1)
 
     # Check for settlements
-    check_settlements(db_path, chainlink_price or binance_price)
+    settlement_price = chainlink_price or binance_price
+    settled_count = check_settlements(db_path, settlement_price)
+    if settled_count > 0:
+        print(f"[trade] Settled {settled_count} trade(s)")
+
+    # Send pending status if there are still pending trades
+    still_pending = get_pending_trades(db_path)
+    if still_pending:
+        print(f"[trade] {len(still_pending)} trade(s) still pending")
+        send_pending_status_alert(still_pending, settlement_price)
 
     # Fetch candles and compute features
     try:
@@ -211,11 +231,15 @@ def main():
         db_path=db_path,
     )
 
+    # Get current cumulative stats
+    summary = get_paper_trade_summary(db_path)
+
     print(f"\n[TRADE] {prediction.direction} on {market.ticker}")
     print(f"  ML Confidence: {prediction.probability*100:.1f}%")
     print(f"  Market Price:  {entry_price*100:.1f}%")
     print(f"  Edge:          {edge*100:+.1f}%")
     print(f"  Trade ID:      {trade_id}")
+    print(f"  Cumulative P&L: ${summary['total_pnl']:+.2f}")
 
     # Send Discord alert
     send_trade_alert(
@@ -227,6 +251,9 @@ def main():
         edge=edge,
         btc_price=binance_price,
         time_to_expiry_sec=int(tte),
+        cumulative_pnl=summary['total_pnl'],
+        total_trades=summary['total_trades'],
+        win_rate=summary['win_rate'],
     )
 
     # Update and save all stats (JSON, dashboard, Discord)

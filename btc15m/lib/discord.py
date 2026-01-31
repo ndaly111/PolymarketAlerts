@@ -77,6 +77,9 @@ def send_trade_alert(
     edge: float,
     btc_price: float,
     time_to_expiry_sec: int,
+    cumulative_pnl: Optional[float] = None,
+    total_trades: Optional[int] = None,
+    win_rate: Optional[float] = None,
     webhook_url: Optional[str] = None,
 ) -> bool:
     """Send a trade signal alert."""
@@ -94,6 +97,12 @@ def send_trade_alert(
         {"name": "Expires In", "value": f"{time_to_expiry_sec//60}m {time_to_expiry_sec%60}s"},
     ]
 
+    # Add cumulative stats if provided
+    if cumulative_pnl is not None:
+        fields.append({"name": "Cumulative P&L", "value": f"${cumulative_pnl:+.2f}", "inline": False})
+    if total_trades is not None and win_rate is not None:
+        fields.append({"name": "Record", "value": f"{total_trades} trades | {win_rate*100:.1f}% win rate", "inline": False})
+
     return send_discord_alert(
         title=title,
         description=description,
@@ -110,6 +119,8 @@ def send_settlement_alert(
     pnl: float,
     strike_price: float,
     settlement_price: float,
+    cumulative_pnl: Optional[float] = None,
+    total_record: Optional[str] = None,
     webhook_url: Optional[str] = None,
 ) -> bool:
     """Send a trade settlement alert."""
@@ -129,6 +140,12 @@ def send_settlement_alert(
         {"name": "Settlement", "value": f"${settlement_price:,.2f}"},
         {"name": "P&L", "value": f"${pnl:+.2f}"},
     ]
+
+    # Add cumulative stats if provided
+    if cumulative_pnl is not None:
+        fields.append({"name": "Cumulative P&L", "value": f"${cumulative_pnl:+.2f}", "inline": False})
+    if total_record:
+        fields.append({"name": "Record", "value": total_record, "inline": False})
 
     return send_discord_alert(
         title=title,
@@ -160,6 +177,71 @@ def send_summary_alert(
         {"name": "Win Rate", "value": f"{win_rate*100:.1f}%" if win_rate else "N/A"},
         {"name": "Total P&L", "value": f"${total_pnl:+.2f}", "inline": False},
     ]
+
+    return send_discord_alert(
+        title=title,
+        description=description,
+        color=color,
+        fields=fields,
+        webhook_url=webhook_url,
+    )
+
+
+def send_pending_status_alert(
+    pending_trades: list,
+    current_price: float,
+    webhook_url: Optional[str] = None,
+) -> bool:
+    """Send status update for pending trades showing preliminary win/loss."""
+    if not pending_trades:
+        return False
+
+    title = "⏳ Pending Trades Status"
+    description = f"Current BTC: ${current_price:,.2f}"
+
+    fields = []
+    total_preliminary_pnl = 0
+
+    for trade in pending_trades[:5]:  # Limit to 5 most recent
+        strike = trade.get('strike_price', 0)
+        side = trade.get('side', 'UP')
+        entry_price = trade.get('entry_price', 0.5)
+        stake = trade.get('stake', 1)
+
+        # Determine if currently winning
+        if side == "UP":
+            currently_winning = current_price > strike
+        else:
+            currently_winning = current_price < strike
+
+        # Calculate preliminary P&L
+        if currently_winning:
+            prelim_pnl = (1.0 - entry_price) * stake
+            status = "🟢 WINNING"
+        else:
+            prelim_pnl = -entry_price * stake
+            status = "🔴 LOSING"
+
+        total_preliminary_pnl += prelim_pnl
+
+        # Distance from strike
+        diff = current_price - strike
+        diff_pct = (diff / strike) * 100
+
+        fields.append({
+            "name": f"{side} @ ${strike:,.0f}",
+            "value": f"{status}\nPrice diff: ${diff:+,.0f} ({diff_pct:+.2f}%)\nPrelim P&L: ${prelim_pnl:+.2f}",
+            "inline": True,
+        })
+
+    # Add total
+    fields.append({
+        "name": "📊 Total Preliminary",
+        "value": f"${total_preliminary_pnl:+.2f}",
+        "inline": False,
+    })
+
+    color = 0x00FF00 if total_preliminary_pnl >= 0 else 0xFF0000
 
     return send_discord_alert(
         title=title,
