@@ -1,0 +1,101 @@
+name: Weather MOS Collection
+
+on:
+  schedule:
+    # Run at 13:15 UTC (after 12z MOS run completes, ~8:15am ET)
+    - cron: "15 13 * * *"
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Target date YYYY-MM-DD (default: today)"
+        required: false
+        default: ""
+      cycle:
+        description: "MOS cycle hour UTC"
+        required: false
+        default: "12"
+        type: choice
+        options:
+          - "12"
+          - "18"
+          - "0"
+          - "6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-mos-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests pyyaml
+
+      - name: Pull latest database
+        run: |
+          git pull --rebase origin main || true
+
+      - name: Collect MOS forecast
+        run: |
+          CYCLE="${{ inputs.cycle || '12' }}"
+          TARGET=""
+          if [ -n "${{ inputs.target_date }}" ]; then
+            TARGET="--target-date ${{ inputs.target_date }}"
+          fi
+          echo "=== Collecting ${CYCLE}z GFS MOS forecasts ==="
+          python weather/scripts/collect_mos_forecast.py \
+            --cycle "$CYCLE" \
+            $TARGET
+
+      - name: Show database stats
+        run: |
+          if [ -f "$WEATHER_DB_PATH" ]; then
+            echo "=== MOS Forecast Snapshots ==="
+            echo "Total rows:"
+            sqlite3 "$WEATHER_DB_PATH" "SELECT COUNT(*) FROM forecast_snapshots WHERE source LIKE 'mos_gfs_%';"
+            echo ""
+            echo "By source:"
+            sqlite3 "$WEATHER_DB_PATH" "SELECT source, COUNT(*) FROM forecast_snapshots WHERE source LIKE 'mos_gfs_%' GROUP BY source;"
+            echo ""
+            echo "Recent entries:"
+            sqlite3 "$WEATHER_DB_PATH" "SELECT city_key, target_date_local, forecast_high_f, source FROM forecast_snapshots WHERE source LIKE 'mos_gfs_%' ORDER BY target_date_local DESC, city_key LIMIT 24;"
+          fi
+
+      - name: Commit database changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$WEATHER_DB_PATH" || true
+          if git diff --staged --quiet; then
+            echo "No database changes to commit"
+          else
+            git commit -m "weather: collect $(date +%Y-%m-%d) MOS forecasts"
+            for i in 1 2 3; do
+              git pull --rebase && git push && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 5
+            done
+          fi
