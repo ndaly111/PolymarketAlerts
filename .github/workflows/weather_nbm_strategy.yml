@@ -1,0 +1,105 @@
+name: Weather NBM Strategy
+
+on:
+  schedule:
+    # Run at 5am ET (10:00 UTC)
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "Specific city (e.g., LAXHIGH) or leave empty for all"
+        required: false
+        default: ""
+        type: string
+      date:
+        description: "Target date (YYYY-MM-DD) or leave empty for today"
+        required: false
+        default: ""
+        type: string
+      live:
+        description: "Fetch live Kalshi prices"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-nbm-strategy
+  cancel-in-progress: false
+
+jobs:
+  run-strategy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: America/New_York
+      PYTHONPATH: ${{ github.workspace }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
+      WEATHER_TRADES_DB_PATH: weather_trades.db
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests cryptography pyyaml
+
+      - name: Ensure directories exist
+        run: |
+          mkdir -p weather/data
+
+      - name: Run NBM strategy
+        run: |
+          echo "Running NBM simple strategy..."
+          ARGS="--live"
+          if [ -n "${{ github.event.inputs.city }}" ]; then
+            ARGS="$ARGS --city ${{ github.event.inputs.city }}"
+          fi
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          fi
+          echo "Arguments: $ARGS"
+          python weather/scripts/nbm_simple_strategy.py $ARGS
+
+      - name: Upload trades DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: nbm-trades-db-${{ github.run_id }}
+          path: ${{ env.WEATHER_TRADES_DB_PATH }}
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Commit DB changes
+        if: success()
+        run: |
+          if [ -f "$WEATHER_TRADES_DB_PATH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$WEATHER_TRADES_DB_PATH" || true
+            if git diff --staged --quiet; then
+              echo "No DB changes to commit"
+            else
+              git commit -m "weather: update NBM strategy trades"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+              done
+            fi
+          fi
