@@ -168,6 +168,26 @@ FEATURE_COLUMNS = [
     "btc_eth_ratio",
     "cross_asset_bullish",
     "cross_asset_bearish",
+    # ===== NEW: FEAR & GREED INDEX =====
+    "fg_value",
+    "fg_normalized",
+    "fg_extreme_fear",
+    "fg_fear",
+    "fg_neutral",
+    "fg_greed",
+    "fg_extreme_greed",
+    "fg_contrarian_buy",
+    "fg_contrarian_sell",
+    # ===== NEW: DERIBIT OPTIONS =====
+    "deribit_iv",
+    "deribit_iv_high",
+    "deribit_iv_low",
+    "deribit_pc_ratio",
+    "deribit_pc_bullish",
+    "deribit_pc_bearish",
+    "deribit_call_oi",
+    "deribit_put_oi",
+    "deribit_oi_imbalance",
 ]
 
 
@@ -231,6 +251,14 @@ def load_training_data(db_path: Path) -> tuple:
         "eth_change_15m": 0, "eth_change_1h": 0, "eth_momentum": 0,
         "eth_btc_divergence": 0, "eth_leading": 0, "eth_lagging": 0,
         "btc_eth_ratio": 25, "cross_asset_bullish": 0, "cross_asset_bearish": 0,
+        # New: Fear & Greed
+        "fg_value": 50, "fg_normalized": 0, "fg_extreme_fear": 0,
+        "fg_fear": 0, "fg_neutral": 1, "fg_greed": 0, "fg_extreme_greed": 0,
+        "fg_contrarian_buy": 0, "fg_contrarian_sell": 0,
+        # New: Deribit
+        "deribit_iv": 50, "deribit_iv_high": 0, "deribit_iv_low": 0,
+        "deribit_pc_ratio": 1.0, "deribit_pc_bullish": 0, "deribit_pc_bearish": 0,
+        "deribit_call_oi": 0, "deribit_put_oi": 0, "deribit_oi_imbalance": 0,
     }
 
     for row in rows:

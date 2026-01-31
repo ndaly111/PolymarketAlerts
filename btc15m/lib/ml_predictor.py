@@ -101,6 +101,14 @@ class MLPredictor:
             "eth_change_15m": 0, "eth_change_1h": 0, "eth_momentum": 0,
             "eth_btc_divergence": 0, "eth_leading": 0, "eth_lagging": 0,
             "btc_eth_ratio": 25, "cross_asset_bullish": 0, "cross_asset_bearish": 0,
+            # New: Fear & Greed
+            "fg_value": 50, "fg_normalized": 0, "fg_extreme_fear": 0,
+            "fg_fear": 0, "fg_neutral": 1, "fg_greed": 0, "fg_extreme_greed": 0,
+            "fg_contrarian_buy": 0, "fg_contrarian_sell": 0,
+            # New: Deribit
+            "deribit_iv": 50, "deribit_iv_high": 0, "deribit_iv_low": 0,
+            "deribit_pc_ratio": 1.0, "deribit_pc_bullish": 0, "deribit_pc_bearish": 0,
+            "deribit_call_oi": 0, "deribit_put_oi": 0, "deribit_oi_imbalance": 0,
         }
 
         for col in FEATURE_COLUMNS:
@@ -376,10 +384,12 @@ def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
         "comp_divergence_strength": composites.get("comp_divergence_strength", 0),
     })
 
-    # Add new external data features (funding, cross-asset)
+    # Add new external data features (funding, cross-asset, sentiment, options)
     try:
         from lib.funding import get_funding_data, compute_funding_features
         from lib.cross_asset import get_cross_asset_data, compute_cross_asset_features
+        from lib.fear_greed import fetch_fear_greed, compute_fear_greed_features
+        from lib.deribit import get_deribit_options_data, compute_deribit_features
 
         funding_data = get_funding_data()
         funding_feats = compute_funding_features(funding_data)
@@ -388,6 +398,15 @@ def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
         cross_asset_data = get_cross_asset_data()
         cross_asset_feats = compute_cross_asset_features(cross_asset_data)
         features.update(cross_asset_feats)
+
+        fear_greed_data = fetch_fear_greed()
+        fg_feats = compute_fear_greed_features(fear_greed_data)
+        features.update(fg_feats)
+
+        deribit_data = get_deribit_options_data()
+        deribit_feats = compute_deribit_features(deribit_data)
+        features.update(deribit_feats)
+
     except Exception as e:
         print(f"[ml] Warning: Could not fetch external features: {e}")
         # Add defaults if fetch fails
@@ -398,6 +417,14 @@ def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
             "eth_momentum": 0, "eth_btc_divergence": 0, "eth_leading": 0,
             "eth_lagging": 0, "btc_eth_ratio": 25, "cross_asset_bullish": 0,
             "cross_asset_bearish": 0,
+            # Fear & Greed defaults
+            "fg_value": 50, "fg_normalized": 0, "fg_extreme_fear": 0,
+            "fg_fear": 0, "fg_neutral": 1, "fg_greed": 0, "fg_extreme_greed": 0,
+            "fg_contrarian_buy": 0, "fg_contrarian_sell": 0,
+            # Deribit defaults
+            "deribit_iv": 50, "deribit_iv_high": 0, "deribit_iv_low": 0,
+            "deribit_pc_ratio": 1.0, "deribit_pc_bullish": 0, "deribit_pc_bearish": 0,
+            "deribit_call_oi": 0, "deribit_put_oi": 0, "deribit_oi_imbalance": 0,
         })
 
     return features
