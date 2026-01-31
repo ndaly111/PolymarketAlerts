@@ -29,6 +29,15 @@ from lib.indicators import (
     compute_volatility,
     compute_price_momentum,
     compute_sma,
+    compute_bollinger_bands,
+    compute_atr,
+    compute_stochastic,
+    compute_williams_r,
+    compute_cci,
+    compute_obv_trend,
+    compute_higher_timeframe_trend,
+    compute_time_features,
+    compute_candle_patterns,
 )
 from lib.db import ensure_schema, DEFAULT_DB_PATH
 
@@ -125,7 +134,7 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
 
         closes = [c.close for c in history_candles]
         candle_dicts = [
-            {"high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+            {"high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "open": c.open}
             for c in history_candles
         ]
 
@@ -137,6 +146,22 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
         momentum = compute_price_momentum(closes, period=10)
         sma_20 = compute_sma(closes, period=20)
 
+        # New indicators
+        bb = compute_bollinger_bands(closes, period=20, std_dev=2.0)
+        atr = compute_atr(candle_dicts, period=14)
+        stoch = compute_stochastic(candle_dicts, k_period=14, d_period=3)
+        williams_r = compute_williams_r(candle_dicts, period=14)
+        cci = compute_cci(candle_dicts, period=20)
+        obv_trend = compute_obv_trend(candle_dicts, period=10)
+        htf_trend = compute_higher_timeframe_trend(closes)
+
+        # Time features
+        dt = datetime.fromtimestamp(window_start, tz=timezone.utc)
+        time_feats = compute_time_features(dt.hour)
+
+        # Candle patterns
+        patterns = compute_candle_patterns(candle_dicts)
+
         price_at_start = window_candles[0].open if window_candles else closes[-1]
         price_at_end = window_candles[-1].close if window_candles else closes[-1]
 
@@ -147,7 +172,7 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
         # Determine outcome
         outcome = "UP" if price_at_end > price_at_start else "DOWN"
 
-        timestamp = datetime.fromtimestamp(window_start, tz=timezone.utc).isoformat()
+        timestamp = dt.isoformat()
 
         samples.append({
             "timestamp": timestamp,
@@ -156,6 +181,7 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
             "price_at_end": price_at_end,
             "price_change": price_at_end - price_at_start,
             "price_change_pct": (price_at_end - price_at_start) / price_at_start * 100,
+            # Original indicators
             "rsi": rsi,
             "macd": macd_result.macd if macd_result else None,
             "macd_signal": macd_result.signal if macd_result else None,
@@ -165,6 +191,39 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
             "momentum": momentum,
             "sma_20": sma_20,
             "price_vs_vwap": price_vs_vwap,
+            # Bollinger Bands
+            "bb_percent_b": bb["percent_b"] if bb else None,
+            "bb_bandwidth": bb["bandwidth"] if bb else None,
+            # ATR
+            "atr": atr,
+            # Stochastic
+            "stoch_k": stoch["k"] if stoch else None,
+            # Williams %R
+            "williams_r": williams_r,
+            # CCI
+            "cci": cci,
+            # OBV trend
+            "obv_trend": obv_trend,
+            # Higher timeframe trends
+            "trend_15m": htf_trend.get("trend_15m"),
+            "trend_1h": htf_trend.get("trend_1h"),
+            "change_15m": htf_trend.get("change_15m"),
+            "change_1h": htf_trend.get("change_1h"),
+            # Time features
+            "hour": time_feats["hour"],
+            "hour_sin": time_feats["hour_sin"],
+            "hour_cos": time_feats["hour_cos"],
+            "asia_session": time_feats["asia_session"],
+            "europe_session": time_feats["europe_session"],
+            "us_session": time_feats["us_session"],
+            "high_vol_hour": time_feats["high_vol_hour"],
+            # Candle patterns
+            "doji": patterns.get("doji", 0),
+            "hammer": patterns.get("hammer", 0),
+            "shooting_star": patterns.get("shooting_star", 0),
+            "bullish_engulfing": patterns.get("bullish_engulfing", 0),
+            "bearish_engulfing": patterns.get("bearish_engulfing", 0),
+            # Outcome
             "outcome": outcome,
         })
 
@@ -174,6 +233,9 @@ def generate_15min_samples(candles: List[Candle]) -> List[dict]:
 def store_historical_samples(samples: List[dict], db_path: Path) -> int:
     """Store historical samples in a new table for training."""
     with sqlite3.connect(str(db_path)) as conn:
+        # Drop old table to recreate with new schema
+        conn.execute("DROP TABLE IF EXISTS historical_samples")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS historical_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +245,7 @@ def store_historical_samples(samples: List[dict], db_path: Path) -> int:
                 price_at_end REAL,
                 price_change REAL,
                 price_change_pct REAL,
+                -- Original indicators
                 rsi REAL,
                 macd REAL,
                 macd_signal REAL,
@@ -192,6 +255,39 @@ def store_historical_samples(samples: List[dict], db_path: Path) -> int:
                 momentum REAL,
                 sma_20 REAL,
                 price_vs_vwap REAL,
+                -- Bollinger Bands
+                bb_percent_b REAL,
+                bb_bandwidth REAL,
+                -- ATR
+                atr REAL,
+                -- Stochastic
+                stoch_k REAL,
+                -- Williams %R
+                williams_r REAL,
+                -- CCI
+                cci REAL,
+                -- OBV trend
+                obv_trend REAL,
+                -- Higher timeframe
+                trend_15m REAL,
+                trend_1h REAL,
+                change_15m REAL,
+                change_1h REAL,
+                -- Time features
+                hour INTEGER,
+                hour_sin REAL,
+                hour_cos REAL,
+                asia_session INTEGER,
+                europe_session INTEGER,
+                us_session INTEGER,
+                high_vol_hour INTEGER,
+                -- Candle patterns
+                doji INTEGER,
+                hammer INTEGER,
+                shooting_star INTEGER,
+                bullish_engulfing INTEGER,
+                bearish_engulfing INTEGER,
+                -- Outcome
                 outcome TEXT NOT NULL,
                 UNIQUE(window_start)
             )
@@ -205,14 +301,28 @@ def store_historical_samples(samples: List[dict], db_path: Path) -> int:
                     (timestamp, window_start, price_at_start, price_at_end,
                      price_change, price_change_pct, rsi, macd, macd_signal,
                      macd_histogram, vwap, volatility, momentum, sma_20,
-                     price_vs_vwap, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     price_vs_vwap, bb_percent_b, bb_bandwidth, atr, stoch_k,
+                     williams_r, cci, obv_trend, trend_15m, trend_1h,
+                     change_15m, change_1h, hour, hour_sin, hour_cos,
+                     asia_session, europe_session, us_session, high_vol_hour,
+                     doji, hammer, shooting_star, bullish_engulfing,
+                     bearish_engulfing, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?)
                 """, (
                     s["timestamp"], s["window_start"], s["price_at_start"],
                     s["price_at_end"], s["price_change"], s["price_change_pct"],
                     s["rsi"], s["macd"], s["macd_signal"], s["macd_histogram"],
                     s["vwap"], s["volatility"], s["momentum"], s["sma_20"],
-                    s["price_vs_vwap"], s["outcome"],
+                    s["price_vs_vwap"], s["bb_percent_b"], s["bb_bandwidth"],
+                    s["atr"], s["stoch_k"], s["williams_r"], s["cci"],
+                    s["obv_trend"], s["trend_15m"], s["trend_1h"],
+                    s["change_15m"], s["change_1h"], s["hour"], s["hour_sin"],
+                    s["hour_cos"], s["asia_session"], s["europe_session"],
+                    s["us_session"], s["high_vol_hour"], s["doji"], s["hammer"],
+                    s["shooting_star"], s["bullish_engulfing"],
+                    s["bearish_engulfing"], s["outcome"],
                 ))
                 inserted += 1
             except Exception as e:

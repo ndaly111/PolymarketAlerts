@@ -31,8 +31,15 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
+try:
+    import lightgbm as lgb
+    HAS_LIGHTGBM = True
+except ImportError:
+    HAS_LIGHTGBM = False
+
 
 FEATURE_COLUMNS = [
+    # Original indicators
     "rsi",
     "macd",
     "macd_signal",
@@ -40,6 +47,38 @@ FEATURE_COLUMNS = [
     "volatility",
     "momentum",
     "price_vs_vwap",
+    # Bollinger Bands
+    "bb_percent_b",
+    "bb_bandwidth",
+    # ATR
+    "atr",
+    # Stochastic
+    "stoch_k",
+    # Williams %R
+    "williams_r",
+    # CCI
+    "cci",
+    # OBV trend
+    "obv_trend",
+    # Higher timeframe
+    "trend_15m",
+    "trend_1h",
+    "change_15m",
+    "change_1h",
+    # Time features
+    "hour",
+    "hour_sin",
+    "hour_cos",
+    "asia_session",
+    "europe_session",
+    "us_session",
+    "high_vol_hour",
+    # Candle patterns
+    "doji",
+    "hammer",
+    "shooting_star",
+    "bullish_engulfing",
+    "bearish_engulfing",
 ]
 
 
@@ -49,7 +88,15 @@ def load_training_data(db_path: Path) -> tuple:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT rsi, macd, macd_signal, macd_histogram,
-                   volatility, momentum, price_vs_vwap, outcome
+                   volatility, momentum, price_vs_vwap,
+                   bb_percent_b, bb_bandwidth, atr, stoch_k,
+                   williams_r, cci, obv_trend,
+                   trend_15m, trend_1h, change_15m, change_1h,
+                   hour, hour_sin, hour_cos,
+                   asia_session, europe_session, us_session, high_vol_hour,
+                   doji, hammer, shooting_star,
+                   bullish_engulfing, bearish_engulfing,
+                   outcome
             FROM historical_samples
             WHERE rsi IS NOT NULL
               AND macd IS NOT NULL
@@ -64,6 +111,7 @@ def load_training_data(db_path: Path) -> tuple:
 
     for row in rows:
         features = [
+            # Original indicators
             row["rsi"] or 50,
             row["macd"] or 0,
             row["macd_signal"] or 0,
@@ -71,6 +119,38 @@ def load_training_data(db_path: Path) -> tuple:
             row["volatility"] or 0,
             row["momentum"] or 0,
             row["price_vs_vwap"] or 0,
+            # Bollinger Bands
+            row["bb_percent_b"] or 0.5,
+            row["bb_bandwidth"] or 0,
+            # ATR
+            row["atr"] or 0,
+            # Stochastic
+            row["stoch_k"] or 50,
+            # Williams %R
+            row["williams_r"] or -50,
+            # CCI
+            row["cci"] or 0,
+            # OBV trend
+            row["obv_trend"] or 0,
+            # Higher timeframe
+            row["trend_15m"] or 0,
+            row["trend_1h"] or 0,
+            row["change_15m"] or 0,
+            row["change_1h"] or 0,
+            # Time features
+            row["hour"] or 0,
+            row["hour_sin"] or 0,
+            row["hour_cos"] or 1,
+            row["asia_session"] or 0,
+            row["europe_session"] or 0,
+            row["us_session"] or 0,
+            row["high_vol_hour"] or 0,
+            # Candle patterns
+            row["doji"] or 0,
+            row["hammer"] or 0,
+            row["shooting_star"] or 0,
+            row["bullish_engulfing"] or 0,
+            row["bearish_engulfing"] or 0,
         ]
         X.append(features)
         y.append(1 if row["outcome"] == "UP" else 0)
@@ -149,10 +229,45 @@ def train_model(X: np.ndarray, y: np.ndarray) -> tuple:
     print(f"RF CV Scores: {cv_scores}")
     print(f"RF CV Mean: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
 
+    # Try LightGBM if available
+    lgb_model = None
+    lgb_acc = 0
+    if HAS_LIGHTGBM:
+        print("\n" + "=" * 50)
+        print("LIGHTGBM RESULTS")
+        print("=" * 50)
+        lgb_model = lgb.LGBMClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            num_leaves=31,
+            min_child_samples=20,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=42,
+            verbose=-1,
+        )
+        lgb_model.fit(X_train_scaled, y_train)
+        lgb_pred = lgb_model.predict(X_test_scaled)
+        lgb_acc = accuracy_score(y_test, lgb_pred)
+        print(f"Accuracy: {lgb_acc:.3f}")
+        print("\nClassification Report:")
+        print(classification_report(y_test, lgb_pred, target_names=["DOWN", "UP"]))
+
+        print("\nFeature Importance (LightGBM):")
+        for name, importance in sorted(
+            zip(FEATURE_COLUMNS, lgb_model.feature_importances_),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:15]:
+            print(f"  {name:20s}: {importance}")
+
     # Choose best model
-    best_model = rf_model if rf_acc >= gb_acc else gb_model
-    best_name = "RandomForest" if rf_acc >= gb_acc else "GradientBoosting"
-    best_acc = max(rf_acc, gb_acc)
+    accuracies = [("RandomForest", rf_acc, rf_model), ("GradientBoosting", gb_acc, gb_model)]
+    if lgb_model is not None:
+        accuracies.append(("LightGBM", lgb_acc, lgb_model))
+
+    best_name, best_acc, best_model = max(accuracies, key=lambda x: x[1])
 
     return best_model, scaler, best_name, best_acc
 

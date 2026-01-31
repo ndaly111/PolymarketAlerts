@@ -121,3 +121,109 @@ def fetch_ticker_24h(symbol: str = SYMBOL) -> dict:
         "volume_24h": float(data["volume"]),
         "quote_volume_24h": float(data["quoteVolume"]),
     }
+
+
+def fetch_order_book(symbol: str = SYMBOL, limit: int = 20) -> Optional[dict]:
+    """Fetch order book and compute imbalance.
+
+    Returns dict with bid/ask pressure and imbalance metrics.
+    """
+    url = f"{get_endpoint()}/api/v3/depth"
+    params = {"symbol": symbol, "limit": limit}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+
+        # Sum up volumes at each level
+        bid_volume = sum(float(b[1]) for b in bids)
+        ask_volume = sum(float(a[1]) for a in asks)
+
+        total_volume = bid_volume + ask_volume
+
+        # Imbalance: positive = more buyers, negative = more sellers
+        if total_volume > 0:
+            imbalance = (bid_volume - ask_volume) / total_volume
+        else:
+            imbalance = 0
+
+        # Best bid/ask
+        best_bid = float(bids[0][0]) if bids else None
+        best_ask = float(asks[0][0]) if asks else None
+
+        spread = None
+        spread_pct = None
+        if best_bid and best_ask:
+            spread = best_ask - best_bid
+            spread_pct = spread / best_bid * 100
+
+        return {
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume,
+            "imbalance": imbalance,  # -1 to 1
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread": spread,
+            "spread_pct": spread_pct,
+        }
+
+    except Exception as e:
+        return None
+
+
+def fetch_funding_rate() -> Optional[dict]:
+    """Fetch BTC perpetual funding rate from Binance Futures.
+
+    Positive funding = longs pay shorts (bullish sentiment)
+    Negative funding = shorts pay longs (bearish sentiment)
+    """
+    # Binance Futures API (different endpoint)
+    url = "https://fapi.binance.com/fapi/v1/fundingRate"
+    params = {"symbol": "BTCUSDT", "limit": 1}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data:
+            funding_rate = float(data[0]["fundingRate"])
+            funding_time = int(data[0]["fundingTime"])
+
+            return {
+                "funding_rate": funding_rate,
+                "funding_rate_pct": funding_rate * 100,
+                "funding_time": funding_time,
+                # Sentiment interpretation
+                "sentiment": "bullish" if funding_rate > 0.0001 else (
+                    "bearish" if funding_rate < -0.0001 else "neutral"
+                ),
+            }
+    except Exception:
+        pass
+
+    return None
+
+
+def fetch_open_interest() -> Optional[dict]:
+    """Fetch BTC perpetual open interest from Binance Futures."""
+    url = "https://fapi.binance.com/fapi/v1/openInterest"
+    params = {"symbol": "BTCUSDT"}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        return {
+            "open_interest": float(data["openInterest"]),
+            "symbol": data["symbol"],
+        }
+    except Exception:
+        pass
+
+    return None
