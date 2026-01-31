@@ -1,0 +1,48 @@
+[realtime] Starting real-time data collection
+[realtime] Interval: 5s | DB: /private/tmp/PolymarketAlerts/btc15m/data/btc15m.db
+[realtime] WebSocket: enabled
+[realtime] Press Ctrl+C to stop
+
+[realtime] WebSocket stream started
+[binance_ws] Connection closed: None None
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:27] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 1
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:33] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 2
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:38] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 3
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:43] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 4
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:48] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 5
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:54] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 6
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:42:59] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 7
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:04] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 8
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:10] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 9
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:15] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 10
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:20] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 11
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:26] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 12
+[binance_ws] Connection closed: None None
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:31] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 13
+[kalshi] Failed to create client: Missing KALSHI_API_KEY_ID and/or KALSHI_PRIVATE_KEY env vars
+[04:43:36] N/A | RSI:-- | → B/S:1.00 (0 trades) | Total: 14
+
+[realtime] Shutdown requested...
+
+[realtime] Final stats:
+  Snapshots: 14
+  Trades received: 0
+  Errors: 0

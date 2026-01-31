@@ -79,6 +79,9 @@ def place_real_order(
     return order
 
 
+KALSHI_FEE_RATE = 0.07  # 7% fee on profits
+
+
 def check_settlements(db_path: Path, current_price: float) -> int:
     """Check and settle any expired trades. Returns number settled."""
     pending = get_pending_trades(db_path)
@@ -99,7 +102,10 @@ def check_settlements(db_path: Path, current_price: float) -> int:
 
             if trade['side'] == actual:
                 outcome = "WIN"
-                pnl = (1.0 - trade['entry_price']) * trade['stake']
+                gross_pnl = (1.0 - trade['entry_price']) * trade['stake']
+                fee = gross_pnl * KALSHI_FEE_RATE
+                pnl = gross_pnl - fee
+                print(f"[SETTLE] Gross: ${gross_pnl:.2f}, Fee: ${fee:.2f}, Net: ${pnl:.2f}")
             else:
                 outcome = "LOSS"
                 pnl = -trade['entry_price'] * trade['stake']
