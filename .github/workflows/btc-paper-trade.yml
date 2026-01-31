@@ -32,7 +32,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests numpy scikit-learn lightgbm
+          pip install requests numpy scikit-learn lightgbm cryptography
 
       - name: Download previous state
         uses: actions/download-artifact@v4
@@ -58,7 +58,6 @@ jobs:
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
           BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
         run: |
-          pip install cryptography
           cd btc15m
           python scripts/trade_once.py --min-prob 0.52 --contracts 1
 
