@@ -11,12 +11,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Get absolute paths for imports
+SCRIPT_DIR = Path(__file__).resolve().parent
+BTC15M_DIR = SCRIPT_DIR.parent
+REPO_DIR = BTC15M_DIR.parent
+
+sys.path.insert(0, str(BTC15M_DIR))
+sys.path.insert(0, str(REPO_DIR))
 
 from lib.binance import fetch_klines, fetch_current_price
 from lib.chainlink import get_chainlink_btc_price
