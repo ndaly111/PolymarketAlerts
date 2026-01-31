@@ -108,6 +108,16 @@ def ensure_schema(db_path: Path = DEFAULT_DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_market_ts ON market_snapshots(timestamp);
             CREATE INDEX IF NOT EXISTS idx_trades_market ON paper_trades(market_ticker);
         """)
+
+        # Migrate: add columns to paper_trades if they don't exist
+        cursor = conn.execute("PRAGMA table_info(paper_trades)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+
+        if "expiry_time" not in existing_cols:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN expiry_time TEXT")
+        if "strike_price" not in existing_cols:
+            conn.execute("ALTER TABLE paper_trades ADD COLUMN strike_price REAL")
+
         conn.commit()
 
 
