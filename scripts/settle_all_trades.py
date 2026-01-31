@@ -214,6 +214,102 @@ def settle_weather_trades(client: KalshiAuthClient) -> SettlementResult:
 
 
 # =============================================================================
+# NBM Strategy Trades (paper trades for comparison)
+# =============================================================================
+
+def get_unsettled_nbm_trades(db_path: Path) -> List[Dict[str, Any]]:
+    """Get unsettled NBM strategy trades."""
+    if not db_path.exists():
+        return []
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    # Check if table exists
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='nbm_strategy_trades'"
+    ).fetchone()
+
+    if not table_exists:
+        conn.close()
+        return []
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, trade_date, city_key, market_ticker, strike, side,
+               ask_cents, forecast_high, ev_estimate, status
+        FROM nbm_strategy_trades
+        WHERE (settled = 0 OR settled IS NULL)
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def mark_nbm_settled(db_path: Path, trade_id: int, won: bool, payout_cents: int) -> None:
+    """Mark an NBM strategy trade as settled."""
+    now = datetime.now(UTC).isoformat()
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE nbm_strategy_trades
+        SET settled = 1, won = ?, payout_cents = ?, settled_at = ?
+        WHERE id = ?
+    """, (1 if won else 0, payout_cents, now, trade_id))
+    conn.commit()
+    conn.close()
+
+
+def settle_nbm_trades(client: KalshiAuthClient) -> SettlementResult:
+    """Settle NBM strategy trades."""
+    print("\n" + "=" * 50)
+    print("NBM STRATEGY TRADES")
+    print("=" * 50)
+
+    trades = get_unsettled_nbm_trades(WEATHER_DB)
+    print(f"Found {len(trades)} unsettled trades")
+
+    result = SettlementResult("nbm_strategy", 0, 0, 0, 0, 0, [])
+
+    for trade in trades:
+        ticker = trade["market_ticker"]
+        side = trade["side"].upper()
+        cost = trade["ask_cents"] or 0
+
+        print(f"  Checking {ticker} ({side})...", end=" ")
+        settlement = check_market_settlement(client, ticker)
+
+        if settlement is None or not settlement["settled"]:
+            print(f"not settled ({settlement['status'] if settlement else 'error'})")
+            continue
+
+        market_result = settlement["result"]
+        won = (side == "YES" and market_result == "yes") or \
+              (side == "NO" and market_result == "no")
+        payout = 100 if won else 0
+
+        mark_nbm_settled(WEATHER_DB, trade["id"], won, payout)
+        print(f"{'WON' if won else 'LOST'} | P/L: {payout - cost:+d}¢")
+
+        result.settled_count += 1
+        if won:
+            result.wins += 1
+        else:
+            result.losses += 1
+        result.total_cost_cents += cost
+        result.total_payout_cents += payout
+        result.trades.append({
+            "display": f"{trade['city_key']} {trade['strike']}°F+",
+            "side": side,
+            "cost": cost,
+            "won": won,
+            "ev": trade.get("ev_estimate", 0),
+        })
+
+    return result
+
+
+# =============================================================================
 # Props Trades
 # =============================================================================
 
@@ -451,14 +547,15 @@ def main() -> int:
 
     # Settle all categories
     weather_result = settle_weather_trades(client)
+    nbm_result = settle_nbm_trades(client)
     props_result = settle_props_trades(client)
     sports_result = settle_sports_trades(client)
 
     # Summary
-    total_settled = weather_result.settled_count + props_result.settled_count + sports_result.settled_count
-    total_wins = weather_result.wins + props_result.wins + sports_result.wins
-    total_losses = weather_result.losses + props_result.losses + sports_result.losses
-    total_pnl = weather_result.pnl_cents + props_result.pnl_cents + sports_result.pnl_cents
+    total_settled = weather_result.settled_count + nbm_result.settled_count + props_result.settled_count + sports_result.settled_count
+    total_wins = weather_result.wins + nbm_result.wins + props_result.wins + sports_result.wins
+    total_losses = weather_result.losses + nbm_result.losses + props_result.losses + sports_result.losses
+    total_pnl = weather_result.pnl_cents + nbm_result.pnl_cents + props_result.pnl_cents + sports_result.pnl_cents
 
     print("\n" + "=" * 60)
     print("SUMMARY")
