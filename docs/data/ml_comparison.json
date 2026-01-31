@@ -1,0 +1,349 @@
+{
+  "generated_at": "2026-01-31T03:29:07.230001Z",
+  "ml": {
+    "total_trades": 77,
+    "wins": 9,
+    "losses": 30,
+    "pending": 38,
+    "win_rate": 23.1,
+    "settled_cost_cents": 1557,
+    "pending_cost_cents": 0,
+    "total_payout_cents": 900,
+    "pnl_cents": -657,
+    "roi": -42.2,
+    "avg_ev": 16.1,
+    "by_date": [
+      {
+        "date": "2026-01-27",
+        "daily_pnl_cents": -284,
+        "cumulative_pnl_cents": -284,
+        "cumulative_wins": 8,
+        "cumulative_losses": 21
+      },
+      {
+        "date": "2026-01-28",
+        "daily_pnl_cents": -373,
+        "cumulative_pnl_cents": -657,
+        "cumulative_wins": 9,
+        "cumulative_losses": 30
+      }
+    ],
+    "by_city": {
+      "DCHIGH": {
+        "count": 9,
+        "wins": 1,
+        "losses": 4,
+        "win_rate": 20.0,
+        "pnl_cents": -122,
+        "roi": -55.0
+      },
+      "LVHIGH": {
+        "count": 7,
+        "wins": 1,
+        "losses": 4,
+        "win_rate": 20.0,
+        "pnl_cents": -91,
+        "roi": -47.6
+      },
+      "NHIGH": {
+        "count": 7,
+        "wins": 1,
+        "losses": 3,
+        "win_rate": 25.0,
+        "pnl_cents": -32,
+        "roi": -24.2
+      },
+      "LAXHIGH": {
+        "count": 8,
+        "wins": 1,
+        "losses": 3,
+        "win_rate": 25.0,
+        "pnl_cents": -104,
+        "roi": -51.0
+      },
+      "NOLHIGH": {
+        "count": 6,
+        "wins": 1,
+        "losses": 3,
+        "win_rate": 25.0,
+        "pnl_cents": -35,
+        "roi": -25.9
+      },
+      "SFOHIGH": {
+        "count": 6,
+        "wins": 1,
+        "losses": 1,
+        "win_rate": 50.0,
+        "pnl_cents": -14,
+        "roi": -12.3
+      },
+      "SEAHIGH": {
+        "count": 7,
+        "wins": 1,
+        "losses": 1,
+        "win_rate": 50.0,
+        "pnl_cents": -15,
+        "roi": -13.0
+      },
+      "PHLHIGH": {
+        "count": 8,
+        "wins": 0,
+        "losses": 4,
+        "win_rate": 0.0,
+        "pnl_cents": -93,
+        "roi": -100.0
+      },
+      "MIAHIGH": {
+        "count": 5,
+        "wins": 0,
+        "losses": 2,
+        "win_rate": 0.0,
+        "pnl_cents": -112,
+        "roi": -100.0
+      },
+      "DENHIGH": {
+        "count": 6,
+        "wins": 0,
+        "losses": 3,
+        "win_rate": 0.0,
+        "pnl_cents": -95,
+        "roi": -100.0
+      },
+      "CHIHIGH": {
+        "count": 4,
+        "wins": 1,
+        "losses": 2,
+        "win_rate": 33.3,
+        "pnl_cents": 23,
+        "roi": 29.9
+      },
+      "AUSHIGH": {
+        "count": 4,
+        "wins": 1,
+        "losses": 0,
+        "win_rate": 100.0,
+        "pnl_cents": 33,
+        "roi": 49.3
+      }
+    },
+    "recent_trades": [
+      {
+        "date": "2026-01-28",
+        "city": "DCHIGH",
+        "event": "21 \u2264 TMAX \u2264 22",
+        "side": "YES",
+        "price": 1,
+        "ev": 17.4,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "LVHIGH",
+        "event": "61 \u2264 TMAX \u2264 62",
+        "side": "NO",
+        "price": 64,
+        "ev": 17.5,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "NHIGH",
+        "event": "23 \u2264 TMAX \u2264 24",
+        "side": "NO",
+        "price": 58,
+        "ev": 17.5,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "LAXHIGH",
+        "event": "69 \u2264 TMAX \u2264 70",
+        "side": "NO",
+        "price": 69,
+        "ev": 18.3,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "DCHIGH",
+        "event": "25 \u2264 TMAX \u2264 26",
+        "side": "NO",
+        "price": 61,
+        "ev": 19.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "NOLHIGH",
+        "event": "52 \u2264 TMAX \u2264 53",
+        "side": "NO",
+        "price": 59,
+        "ev": 19.1,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "SFOHIGH",
+        "event": "60 \u2264 TMAX \u2264 61",
+        "side": "NO",
+        "price": 52,
+        "ev": 20.6,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "SEAHIGH",
+        "event": "49 \u2264 TMAX \u2264 50",
+        "side": "NO",
+        "price": 57,
+        "ev": 20.6,
+        "settled": 1,
+        "won": 1
+      },
+      {
+        "date": "2026-01-28",
+        "city": "PHLHIGH",
+        "event": "18 \u2264 TMAX \u2264 19",
+        "side": "YES",
+        "price": 1,
+        "ev": 22.4,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-28",
+        "city": "MIAHIGH",
+        "event": "66 \u2264 TMAX \u2264 67",
+        "side": "NO",
+        "price": 51,
+        "ev": 22.5,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "NHIGH",
+        "event": "B16.5",
+        "side": "YES",
+        "price": 3,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "PHLHIGH",
+        "event": "B19.5",
+        "side": "YES",
+        "price": 5,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "LVHIGH",
+        "event": "B65.5",
+        "side": "YES",
+        "price": 4,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "NHIGH",
+        "event": "B20.5",
+        "side": "NO",
+        "price": 55,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 1
+      },
+      {
+        "date": "2026-01-27",
+        "city": "NHIGH",
+        "event": "B18.5",
+        "side": "YES",
+        "price": 16,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "LAXHIGH",
+        "event": "B68.5",
+        "side": "YES",
+        "price": 4,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "DENHIGH",
+        "event": "B44.5",
+        "side": "YES",
+        "price": 6,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "NOLHIGH",
+        "event": "B51.5",
+        "side": "YES",
+        "price": 6,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "NOLHIGH",
+        "event": "B53.5",
+        "side": "YES",
+        "price": 3,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      },
+      {
+        "date": "2026-01-27",
+        "city": "DCHIGH",
+        "event": "B31.5",
+        "side": "NO",
+        "price": 82,
+        "ev": 10.0,
+        "settled": 1,
+        "won": 0
+      }
+    ]
+  },
+  "nbm": {
+    "total_trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "pending": 0,
+    "win_rate": 0,
+    "settled_cost_cents": 0,
+    "pending_cost_cents": 0,
+    "total_payout_cents": 0,
+    "pnl_cents": 0,
+    "roi": 0,
+    "avg_ev": 0,
+    "by_date": [],
+    "by_city": {},
+    "recent_trades": []
+  },
+  "overlapping_trades": []
+}

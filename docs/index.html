@@ -208,6 +208,7 @@
         <div class="tabs">
             <div class="tab active" data-tab="summary">Summary</div>
             <div class="tab" data-tab="weather">Weather</div>
+            <div class="tab" data-tab="mlcompare">ML vs NBM</div>
             <div class="tab" data-tab="props">Props</div>
             <div class="tab" data-tab="sports">Sports</div>
             <div class="tab" data-tab="models">Forecast Models</div>
@@ -526,6 +527,137 @@
                             </tr>
                         </thead>
                         <tbody id="weather-trades-table"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ML vs NBM Comparison Tab -->
+        <div id="mlcompare-tab" class="tab-content">
+            <div class="grid">
+                <div class="card">
+                    <h2>ML Model Performance</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-value" id="ml-record">-</div>
+                            <div class="stat-label">Record</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="ml-roi">-</div>
+                            <div class="stat-label">ROI</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="ml-pnl">-</div>
+                            <div class="stat-label">P/L</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="ml-avg-ev">-</div>
+                            <div class="stat-label">Avg EV</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>NBM Simple Strategy</h2>
+                    <div class="stat-grid">
+                        <div class="stat">
+                            <div class="stat-value" id="nbm-record">-</div>
+                            <div class="stat-label">Record</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="nbm-roi">-</div>
+                            <div class="stat-label">ROI</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="nbm-pnl">-</div>
+                            <div class="stat-label">P/L</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value" id="nbm-avg-ev">-</div>
+                            <div class="stat-label">Avg EV</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom: 20px;">
+                <h2>Strategy Comparison</h2>
+                <p style="color: #71767b; font-size: 0.9rem; margin-bottom: 15px;">
+                    ML Model uses quantile regression on historical forecast errors. NBM Simple uses ±2°F window around NBM forecast.
+                </p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <th>ML Model</th>
+                            <th>NBM Simple</th>
+                            <th>Difference</th>
+                        </tr>
+                    </thead>
+                    <tbody id="mlcompare-summary-table"></tbody>
+                </table>
+            </div>
+
+            <div class="grid-wide">
+                <div class="card">
+                    <h2>Cumulative P/L Comparison</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="mlcompare-pnl-chart"></canvas>
+                    </div>
+                    <div class="chart-legend">
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #1d9bf0;"></div>
+                            <span>ML Model</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="legend-dot" style="background: #ffd400;"></div>
+                            <span>NBM Simple</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h2>Win Rate by City</h2>
+                    <div class="chart-container-tall">
+                        <canvas id="mlcompare-city-chart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>ML Model Recent Trades</h2>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>City</th>
+                                <th>Event</th>
+                                <th>Side</th>
+                                <th>Price</th>
+                                <th>EV</th>
+                                <th>Result</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ml-trades-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>NBM Strategy Recent Trades</h2>
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>City</th>
+                                <th>Strike</th>
+                                <th>Side</th>
+                                <th>Price</th>
+                                <th>EV</th>
+                                <th>Result</th>
+                            </tr>
+                        </thead>
+                        <tbody id="nbm-trades-table"></tbody>
                     </table>
                 </div>
             </div>
@@ -890,12 +1022,13 @@
         // Load and render data
         async function loadData() {
             try {
-                const [summaryRes, weatherRes, propsRes, sportsRes, modelsRes] = await Promise.all([
+                const [summaryRes, weatherRes, propsRes, sportsRes, modelsRes, mlCompareRes] = await Promise.all([
                     fetch('data/summary.json'),
                     fetch('data/weather.json'),
                     fetch('data/props.json'),
                     fetch('data/sports.json'),
                     fetch('data/model_accuracy.json'),
+                    fetch('data/ml_comparison.json').catch(() => ({ json: () => ({ ml: {}, nbm: {} }) })),
                 ]);
 
                 const summary = await summaryRes.json();
@@ -903,9 +1036,11 @@
                 const props = await propsRes.json();
                 const sports = await sportsRes.json();
                 const models = await modelsRes.json();
+                const mlCompare = await mlCompareRes.json();
 
                 renderSummary(weather, props, sports);
                 renderWeather(weather);
+                renderMLCompare(mlCompare);
                 renderProps(props);
                 renderSports(sports);
                 renderModels(models);
@@ -1353,6 +1488,221 @@
                 </tr>`;
             }).join('');
             document.getElementById('weather-trades-table').innerHTML = tradesHtml || '<tr><td colspan="7">No trades</td></tr>';
+        }
+
+        function renderMLCompare(data) {
+            const ml = data.ml || {};
+            const nbm = data.nbm || {};
+
+            // ML stats
+            document.getElementById('ml-record').textContent = `${ml.wins || 0}W-${ml.losses || 0}L`;
+            document.getElementById('ml-roi').textContent = `${(ml.roi || 0) >= 0 ? '+' : ''}${ml.roi || 0}%`;
+            document.getElementById('ml-roi').className = `stat-value ${(ml.roi || 0) >= 0 ? 'positive' : 'negative'}`;
+            document.getElementById('ml-pnl').textContent = `${(ml.pnl_cents || 0) >= 0 ? '+' : ''}$${((ml.pnl_cents || 0) / 100).toFixed(2)}`;
+            document.getElementById('ml-pnl').className = `stat-value ${(ml.pnl_cents || 0) >= 0 ? 'positive' : 'negative'}`;
+            document.getElementById('ml-avg-ev').textContent = `${ml.avg_ev || 0}%`;
+
+            // NBM stats
+            document.getElementById('nbm-record').textContent = `${nbm.wins || 0}W-${nbm.losses || 0}L`;
+            document.getElementById('nbm-roi').textContent = `${(nbm.roi || 0) >= 0 ? '+' : ''}${nbm.roi || 0}%`;
+            document.getElementById('nbm-roi').className = `stat-value ${(nbm.roi || 0) >= 0 ? 'positive' : 'negative'}`;
+            document.getElementById('nbm-pnl').textContent = `${(nbm.pnl_cents || 0) >= 0 ? '+' : ''}$${((nbm.pnl_cents || 0) / 100).toFixed(2)}`;
+            document.getElementById('nbm-pnl').className = `stat-value ${(nbm.pnl_cents || 0) >= 0 ? 'positive' : 'negative'}`;
+            document.getElementById('nbm-avg-ev').textContent = `${nbm.avg_ev || 0}%`;
+
+            // Summary comparison table
+            const metrics = [
+                { label: 'Total Trades', ml: ml.total_trades || 0, nbm: nbm.total_trades || 0, format: 'num' },
+                { label: 'Record', ml: `${ml.wins || 0}W-${ml.losses || 0}L`, nbm: `${nbm.wins || 0}W-${nbm.losses || 0}L`, format: 'text' },
+                { label: 'Win Rate', ml: ml.win_rate || 0, nbm: nbm.win_rate || 0, format: 'pct' },
+                { label: 'ROI', ml: ml.roi || 0, nbm: nbm.roi || 0, format: 'pct_signed' },
+                { label: 'P/L', ml: (ml.pnl_cents || 0) / 100, nbm: (nbm.pnl_cents || 0) / 100, format: 'money' },
+                { label: 'Avg EV', ml: ml.avg_ev || 0, nbm: nbm.avg_ev || 0, format: 'pct' },
+                { label: 'Pending', ml: ml.pending || 0, nbm: nbm.pending || 0, format: 'num' },
+            ];
+
+            const summaryHtml = metrics.map(m => {
+                let mlVal, nbmVal, diffVal, diffClass = '';
+                if (m.format === 'num') {
+                    mlVal = m.ml;
+                    nbmVal = m.nbm;
+                    diffVal = m.ml - m.nbm;
+                    diffClass = diffVal > 0 ? 'positive' : diffVal < 0 ? 'negative' : '';
+                } else if (m.format === 'pct') {
+                    mlVal = `${m.ml}%`;
+                    nbmVal = `${m.nbm}%`;
+                    const diff = m.ml - m.nbm;
+                    diffVal = `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%`;
+                    diffClass = diff > 0 ? 'positive' : diff < 0 ? 'negative' : '';
+                } else if (m.format === 'pct_signed') {
+                    mlVal = `${m.ml >= 0 ? '+' : ''}${m.ml}%`;
+                    nbmVal = `${m.nbm >= 0 ? '+' : ''}${m.nbm}%`;
+                    const diff = m.ml - m.nbm;
+                    diffVal = `${diff >= 0 ? '+' : ''}${diff.toFixed(1)}%`;
+                    diffClass = diff > 0 ? 'positive' : diff < 0 ? 'negative' : '';
+                } else if (m.format === 'money') {
+                    mlVal = `${m.ml >= 0 ? '+' : ''}$${m.ml.toFixed(2)}`;
+                    nbmVal = `${m.nbm >= 0 ? '+' : ''}$${m.nbm.toFixed(2)}`;
+                    const diff = m.ml - m.nbm;
+                    diffVal = `${diff >= 0 ? '+' : ''}$${diff.toFixed(2)}`;
+                    diffClass = diff > 0 ? 'positive' : diff < 0 ? 'negative' : '';
+                } else {
+                    mlVal = m.ml;
+                    nbmVal = m.nbm;
+                    diffVal = '-';
+                }
+                return `<tr>
+                    <td>${m.label}</td>
+                    <td>${mlVal}</td>
+                    <td>${nbmVal}</td>
+                    <td class="${diffClass}">${diffVal}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('mlcompare-summary-table').innerHTML = summaryHtml;
+
+            // Cumulative P/L Chart
+            const mlByDate = ml.by_date || [];
+            const nbmByDate = nbm.by_date || [];
+
+            // Merge dates from both strategies
+            const allDates = [...new Set([
+                ...mlByDate.map(d => d.date),
+                ...nbmByDate.map(d => d.date)
+            ])].sort();
+
+            if (allDates.length > 0) {
+                const mlPnlMap = {};
+                mlByDate.forEach(d => { mlPnlMap[d.date] = d.cumulative_pnl_cents / 100; });
+                const nbmPnlMap = {};
+                nbmByDate.forEach(d => { nbmPnlMap[d.date] = d.cumulative_pnl_cents / 100; });
+
+                // Forward fill missing values
+                let lastMl = 0, lastNbm = 0;
+                const mlData = allDates.map(d => {
+                    if (mlPnlMap[d] !== undefined) lastMl = mlPnlMap[d];
+                    return lastMl;
+                });
+                const nbmData = allDates.map(d => {
+                    if (nbmPnlMap[d] !== undefined) lastNbm = nbmPnlMap[d];
+                    return lastNbm;
+                });
+
+                new Chart(document.getElementById('mlcompare-pnl-chart'), {
+                    type: 'line',
+                    data: {
+                        labels: allDates,
+                        datasets: [
+                            {
+                                label: 'ML Model',
+                                data: mlData,
+                                borderColor: '#1d9bf0',
+                                backgroundColor: 'transparent',
+                                tension: 0.3,
+                                pointRadius: 2,
+                            },
+                            {
+                                label: 'NBM Simple',
+                                data: nbmData,
+                                borderColor: '#ffd400',
+                                backgroundColor: 'transparent',
+                                tension: 0.3,
+                                pointRadius: 2,
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { y: { title: { display: true, text: 'Cumulative P/L ($)' } } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // Win Rate by City Chart
+            const mlByCity = ml.by_city || {};
+            const nbmByCity = nbm.by_city || {};
+            const allCities = [...new Set([...Object.keys(mlByCity), ...Object.keys(nbmByCity)])].sort();
+
+            if (allCities.length > 0) {
+                const mlWinRates = allCities.map(c => mlByCity[c]?.win_rate || 0);
+                const nbmWinRates = allCities.map(c => nbmByCity[c]?.win_rate || 0);
+
+                new Chart(document.getElementById('mlcompare-city-chart'), {
+                    type: 'bar',
+                    data: {
+                        labels: allCities,
+                        datasets: [
+                            {
+                                label: 'ML Model',
+                                data: mlWinRates,
+                                backgroundColor: '#1d9bf0',
+                                borderRadius: 4,
+                            },
+                            {
+                                label: 'NBM Simple',
+                                data: nbmWinRates,
+                                backgroundColor: '#ffd400',
+                                borderRadius: 4,
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            y: { max: 100, title: { display: true, text: 'Win Rate (%)' } }
+                        },
+                        plugins: { legend: { display: true } }
+                    }
+                });
+            }
+
+            // ML Trades Table
+            const mlTradesHtml = (ml.recent_trades || []).map(t => {
+                let resultBadge = '<span class="badge badge-pending">Pending</span>';
+                if (t.settled) {
+                    resultBadge = t.won
+                        ? '<span class="badge badge-win">Win</span>'
+                        : '<span class="badge badge-loss">Loss</span>';
+                }
+                const sideBadge = t.side === 'YES'
+                    ? '<span class="badge badge-yes">YES</span>'
+                    : '<span class="badge badge-no">NO</span>';
+                return `<tr>
+                    <td>${t.date}</td>
+                    <td>${t.city}</td>
+                    <td>${t.event || '-'}</td>
+                    <td>${sideBadge}</td>
+                    <td>${t.price}¢</td>
+                    <td>${t.ev}%</td>
+                    <td>${resultBadge}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('ml-trades-table').innerHTML = mlTradesHtml || '<tr><td colspan="7">No trades yet</td></tr>';
+
+            // NBM Trades Table
+            const nbmTradesHtml = (nbm.recent_trades || []).map(t => {
+                let resultBadge = '<span class="badge badge-pending">Pending</span>';
+                if (t.settled) {
+                    resultBadge = t.won
+                        ? '<span class="badge badge-win">Win</span>'
+                        : '<span class="badge badge-loss">Loss</span>';
+                }
+                const sideBadge = t.side === 'YES'
+                    ? '<span class="badge badge-yes">YES</span>'
+                    : '<span class="badge badge-no">NO</span>';
+                return `<tr>
+                    <td>${t.date}</td>
+                    <td>${t.city}</td>
+                    <td>${t.strike}°F+ (fcst: ${t.forecast}°F)</td>
+                    <td>${sideBadge}</td>
+                    <td>${t.price}¢</td>
+                    <td>${t.ev}%</td>
+                    <td>${resultBadge}</td>
+                </tr>`;
+            }).join('');
+            document.getElementById('nbm-trades-table').innerHTML = nbmTradesHtml || '<tr><td colspan="7">No trades yet</td></tr>';
         }
 
         function renderProps(data) {

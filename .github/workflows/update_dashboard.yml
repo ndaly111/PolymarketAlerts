@@ -35,7 +35,9 @@ jobs:
           python-version: "3.11"
 
       - name: Generate dashboard data
-        run: python scripts/generate_dashboard_data.py
+        run: |
+          python scripts/generate_dashboard_data.py
+          python scripts/generate_ml_comparison.py
 
       - name: Commit and push
         run: |
