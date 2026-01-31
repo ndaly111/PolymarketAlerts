@@ -6,8 +6,37 @@ from dataclasses import dataclass
 from typing import List, Optional
 import requests
 
-BINANCE_BASE_URL = "https://api.binance.com"
+# Try multiple endpoints (Binance blocked in some regions)
+BINANCE_ENDPOINTS = [
+    "https://api.binance.us",      # Binance US
+    "https://api.binance.com",     # Global (blocked in US)
+    "https://api1.binance.com",    # Backup
+]
 SYMBOL = "BTCUSDT"
+
+
+def _get_working_endpoint() -> str:
+    """Find a working Binance endpoint."""
+    for endpoint in BINANCE_ENDPOINTS:
+        try:
+            resp = requests.get(f"{endpoint}/api/v3/ping", timeout=5)
+            if resp.status_code == 200:
+                return endpoint
+        except Exception:
+            continue
+    return BINANCE_ENDPOINTS[0]  # Default to US
+
+
+# Cache the working endpoint
+_cached_endpoint: Optional[str] = None
+
+
+def get_endpoint() -> str:
+    global _cached_endpoint
+    if _cached_endpoint is None:
+        _cached_endpoint = _get_working_endpoint()
+        print(f"[binance] Using endpoint: {_cached_endpoint}")
+    return _cached_endpoint
 
 
 @dataclass
@@ -37,7 +66,7 @@ def fetch_klines(
     Returns:
         List of Candle objects, oldest first
     """
-    url = f"{BINANCE_BASE_URL}/api/v3/klines"
+    url = f"{get_endpoint()}/api/v3/klines"
     params = {
         "symbol": symbol,
         "interval": interval,
@@ -65,7 +94,7 @@ def fetch_klines(
 
 def fetch_current_price(symbol: str = SYMBOL) -> float:
     """Fetch current BTC price from Binance."""
-    url = f"{BINANCE_BASE_URL}/api/v3/ticker/price"
+    url = f"{get_endpoint()}/api/v3/ticker/price"
     params = {"symbol": symbol}
 
     resp = requests.get(url, params=params, timeout=10)
@@ -77,7 +106,7 @@ def fetch_current_price(symbol: str = SYMBOL) -> float:
 
 def fetch_ticker_24h(symbol: str = SYMBOL) -> dict:
     """Fetch 24-hour ticker statistics."""
-    url = f"{BINANCE_BASE_URL}/api/v3/ticker/24hr"
+    url = f"{get_endpoint()}/api/v3/ticker/24hr"
     params = {"symbol": symbol}
 
     resp = requests.get(url, params=params, timeout=10)
