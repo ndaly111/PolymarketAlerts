@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Paper trading simulator for BTC 15-min markets.
 
-Simulates trading on Kalshi BTC markets using a simple strategy
-or ML model predictions. Tracks P&L without real money.
+Uses ML model to predict direction and trades 1 contract per market
+when confidence exceeds threshold.
 
 Usage:
-    python paper_trade.py [--stake 10] [--min-edge 0.05]
+    python paper_trade.py [--min-prob 0.55] [--stake 1]
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.binance import fetch_klines, fetch_current_price
 from lib.chainlink import get_chainlink_btc_price
-from lib.indicators import compute_rsi, compute_macd, compute_vwap
 from lib.kalshi_btc import (
     fetch_btc_15min_markets,
     calculate_market_implied_prob,
@@ -37,6 +36,8 @@ from lib.db import (
     get_paper_trade_summary,
     DEFAULT_DB_PATH,
 )
+from lib.ml_predictor import MLPredictor, compute_all_features, Prediction
+from lib.discord import send_trade_alert, send_settlement_alert, send_summary_alert
 
 
 # Graceful shutdown
@@ -50,16 +51,6 @@ def signal_handler(signum, frame):
 
 
 @dataclass
-class Signal:
-    """Trading signal from strategy."""
-    side: str  # 'UP' or 'DOWN'
-    model_prob: float
-    market_prob: float
-    edge: float
-    confidence: str  # 'LOW', 'MEDIUM', 'HIGH'
-
-
-@dataclass
 class PendingTrade:
     """A trade waiting for settlement."""
     trade_id: int
@@ -69,98 +60,14 @@ class PendingTrade:
     stake: float
     expiry_time: datetime
     strike_price: float
+    model_prob: float
 
 
 # Track pending trades
 pending_trades: list[PendingTrade] = []
 
 
-def simple_strategy(
-    rsi: Optional[float],
-    macd_histogram: Optional[float],
-    price_vs_vwap: Optional[float],
-    market_up_prob: float,
-) -> Optional[Signal]:
-    """Simple rule-based strategy combining RSI, MACD, and VWAP.
-
-    Returns a Signal if there's a trading opportunity, None otherwise.
-    """
-    if rsi is None or macd_histogram is None:
-        return None
-
-    # Score based on indicators (-1 to +1, positive = bullish)
-    score = 0.0
-    factors = 0
-
-    # RSI signal
-    if rsi < 30:
-        score += 0.3  # Oversold = bullish
-        factors += 1
-    elif rsi > 70:
-        score -= 0.3  # Overbought = bearish
-        factors += 1
-    elif rsi < 45:
-        score += 0.1
-        factors += 1
-    elif rsi > 55:
-        score -= 0.1
-        factors += 1
-
-    # MACD histogram signal
-    if macd_histogram > 0:
-        score += 0.2 if macd_histogram > 50 else 0.1
-        factors += 1
-    elif macd_histogram < 0:
-        score -= 0.2 if macd_histogram < -50 else 0.1
-        factors += 1
-
-    # Price vs VWAP signal
-    if price_vs_vwap is not None:
-        if price_vs_vwap < -0.5:
-            score += 0.2  # Below VWAP = potential bounce
-            factors += 1
-        elif price_vs_vwap > 0.5:
-            score -= 0.2  # Above VWAP = potential pullback
-            factors += 1
-
-    if factors == 0:
-        return None
-
-    # Convert score to probability
-    # Score range: -0.7 to +0.7, map to probability 0.3 to 0.7
-    model_up_prob = 0.5 + (score / 1.4)  # Maps -0.7..0.7 to 0.0..1.0
-    model_up_prob = max(0.35, min(0.65, model_up_prob))  # Clamp to realistic range
-
-    # Determine side and calculate edge
-    if model_up_prob > 0.5:
-        side = "UP"
-        model_prob = model_up_prob
-        market_prob = market_up_prob
-    else:
-        side = "DOWN"
-        model_prob = 1 - model_up_prob
-        market_prob = 1 - market_up_prob
-
-    edge = model_prob - market_prob
-
-    # Determine confidence
-    if abs(edge) >= 0.10:
-        confidence = "HIGH"
-    elif abs(edge) >= 0.05:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
-
-    return Signal(
-        side=side,
-        model_prob=model_prob,
-        market_prob=market_prob,
-        edge=edge,
-        confidence=confidence,
-    )
-
-
-def check_pending_settlements(current_price: float) -> None:
+def check_pending_settlements(current_price: float, send_discord: bool = True) -> None:
     """Check and settle any pending trades that have expired."""
     global pending_trades
 
@@ -170,7 +77,6 @@ def check_pending_settlements(current_price: float) -> None:
     for trade in pending_trades:
         if now >= trade.expiry_time:
             # Market has expired, settle the trade
-            # Determine outcome based on price vs strike
             if current_price > trade.strike_price:
                 actual_outcome = "UP"
             else:
@@ -178,17 +84,30 @@ def check_pending_settlements(current_price: float) -> None:
 
             if trade.side == actual_outcome:
                 outcome = "WIN"
-                # Kalshi pays out at $1 for a win
-                pnl = trade.stake * (1 / trade.entry_price - 1)
+                # Kalshi pays $1 for correct, we paid entry_price
+                pnl = (1.0 - trade.entry_price) * trade.stake
             else:
                 outcome = "LOSS"
-                pnl = -trade.stake
+                pnl = -trade.entry_price * trade.stake
 
             settle_paper_trade(trade.trade_id, outcome, pnl)
 
-            print(f"  [SETTLED] {trade.market_ticker}: {outcome}")
-            print(f"            Side: {trade.side}, Strike: ${trade.strike_price:,.0f}")
-            print(f"            Settlement: ${current_price:,.2f}, P&L: ${pnl:+.2f}")
+            emoji = "✅" if outcome == "WIN" else "❌"
+            print(f"\n  {emoji} SETTLED: {trade.market_ticker}")
+            print(f"     Side: {trade.side} @ {trade.model_prob*100:.1f}% confidence")
+            print(f"     Strike: ${trade.strike_price:,.0f} | Settlement: ${current_price:,.2f}")
+            print(f"     P&L: ${pnl:+.2f}")
+
+            # Send Discord notification
+            if send_discord:
+                send_settlement_alert(
+                    market_ticker=trade.market_ticker,
+                    side=trade.side,
+                    outcome=outcome,
+                    pnl=pnl,
+                    strike_price=trade.strike_price,
+                    settlement_price=current_price,
+                )
         else:
             still_pending.append(trade)
 
@@ -197,83 +116,97 @@ def check_pending_settlements(current_price: float) -> None:
 
 def execute_paper_trade(
     market: BTCMarket,
-    signal: Signal,
-    stake: float,
+    prediction: Prediction,
+    market_probs: dict,
+    stake: float = 1.0,
 ) -> Optional[PendingTrade]:
-    """Execute a paper trade."""
-    entry_price = signal.market_prob  # Buying at market probability
+    """Execute a paper trade based on ML prediction."""
+    # Entry price is what we pay for the contract
+    if prediction.direction == "UP":
+        entry_price = market_probs["up_prob"]  # Buy YES on UP
+    else:
+        entry_price = market_probs["down_prob"]  # Buy YES on DOWN
+
+    # Calculate edge
+    edge = prediction.probability - entry_price
 
     trade_id = insert_paper_trade(
         market_ticker=market.ticker,
-        side=signal.side,
+        side=prediction.direction,
         entry_price=entry_price,
         stake=stake,
-        model_prob=signal.model_prob,
-        market_prob=signal.market_prob,
-        edge=signal.edge,
+        model_prob=prediction.probability,
+        market_prob=entry_price,
+        edge=edge,
     )
 
     return PendingTrade(
         trade_id=trade_id,
         market_ticker=market.ticker,
-        side=signal.side,
+        side=prediction.direction,
         entry_price=entry_price,
         stake=stake,
         expiry_time=market.expiry_time,
         strike_price=market.strike_price,
+        model_prob=prediction.probability,
     )
 
 
 def print_status(
     binance_price: float,
     chainlink_price: Optional[float],
-    rsi: Optional[float],
-    macd_hist: Optional[float],
     market: Optional[BTCMarket],
-    signal: Optional[Signal],
+    prediction: Optional[Prediction],
     summary: dict,
+    min_prob: float,
 ) -> None:
     """Print current status to console."""
-    print("=" * 60)
+    now = datetime.now(timezone.utc)
+
+    print("\n" + "=" * 65)
+    print(f"  {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print("=" * 65)
     print(f"  BTC Price: ${binance_price:,.2f}")
     if chainlink_price:
         diff = binance_price - chainlink_price
         print(f"  Chainlink: ${chainlink_price:,.2f} (diff: ${diff:+.2f})")
 
-    print(f"  RSI(14):   {rsi:.1f}" if rsi else "  RSI(14):   N/A")
-    print(f"  MACD Hist: {macd_hist:+.2f}" if macd_hist else "  MACD Hist: N/A")
-
     if market:
         probs = calculate_market_implied_prob(market)
-        tte = (market.expiry_time - datetime.now(timezone.utc)).total_seconds()
-        print(f"\n  Market:    {market.ticker}")
-        print(f"  Strike:    ${market.strike_price:,.0f}")
-        print(f"  Expires:   {int(tte//60)}m {int(tte%60)}s")
-        print(f"  UP prob:   {probs['up_prob']*100:.1f}%")
+        tte = (market.expiry_time - now).total_seconds()
+        print(f"\n  Market:     {market.ticker}")
+        print(f"  Strike:     ${market.strike_price:,.0f}")
+        print(f"  Expires:    {int(tte//60)}m {int(tte%60)}s")
+        print(f"  Market UP:  {probs['up_prob']*100:.1f}%")
 
-    if signal:
-        edge_pct = signal.edge * 100
-        print(f"\n  Signal:    {signal.side} ({signal.confidence})")
-        print(f"  Model:     {signal.model_prob*100:.1f}%")
-        print(f"  Market:    {signal.market_prob*100:.1f}%")
-        print(f"  Edge:      {edge_pct:+.1f}%")
+    if prediction:
+        meets_threshold = prediction.probability >= min_prob
+        status = "✓ TRADING" if meets_threshold else "✗ SKIP (below threshold)"
+        print(f"\n  ML Prediction:")
+        print(f"    Direction:  {prediction.direction}")
+        print(f"    Confidence: {prediction.probability*100:.1f}% ({prediction.confidence})")
+        print(f"    Threshold:  {min_prob*100:.1f}%")
+        print(f"    Status:     {status}")
+    else:
+        print(f"\n  ML Prediction: N/A (insufficient data)")
 
-    print(f"\n  Paper P&L: ${summary['total_pnl']:+.2f}")
-    print(f"  Trades:    {summary['total_trades']} ({summary['wins']}W/{summary['losses']}L)")
+    print(f"\n  --- Paper Trading Stats ---")
+    print(f"  Total P&L:  ${summary['total_pnl']:+.2f}")
+    print(f"  Trades:     {summary['total_trades']} ({summary['wins']}W / {summary['losses']}L)")
     if summary['win_rate']:
-        print(f"  Win Rate:  {summary['win_rate']*100:.1f}%")
-    print(f"  Pending:   {len(pending_trades)}")
-    print("=" * 60)
+        print(f"  Win Rate:   {summary['win_rate']*100:.1f}%")
+    print(f"  Pending:    {len(pending_trades)}")
+    print("=" * 65)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Paper trade BTC 15-min markets")
-    parser.add_argument("--stake", type=float, default=10.0,
-                        help="Stake per trade in dollars (default: 10)")
-    parser.add_argument("--min-edge", type=float, default=0.05,
-                        help="Minimum edge to trade (default: 0.05 = 5%%)")
-    parser.add_argument("--interval", type=int, default=30,
-                        help="Check interval in seconds (default: 30)")
+    parser = argparse.ArgumentParser(description="Paper trade BTC 15-min markets with ML")
+    parser.add_argument("--min-prob", type=float, default=0.55,
+                        help="Minimum ML probability to trade (default: 0.55 = 55%%)")
+    parser.add_argument("--stake", type=float, default=1.0,
+                        help="Number of contracts per trade (default: 1)")
+    parser.add_argument("--interval", type=int, default=60,
+                        help="Check interval in seconds (default: 60)")
     parser.add_argument("--db", type=str, default=str(DEFAULT_DB_PATH),
                         help="Database path")
     args = parser.parse_args()
@@ -286,10 +219,21 @@ def main():
     db_path = Path(args.db)
     ensure_schema(db_path)
 
-    print(f"[paper] Starting paper trading")
-    print(f"[paper] Stake: ${args.stake:.2f} | Min Edge: {args.min_edge*100:.1f}%")
+    # Load ML model
+    print("[paper] Loading ML model...")
+    try:
+        predictor = MLPredictor()
+        print(f"[paper] Model loaded successfully")
+    except Exception as e:
+        print(f"[paper] Error loading model: {e}")
+        print("[paper] Run train_model.py first to create a model")
+        sys.exit(1)
+
+    print(f"\n[paper] Starting paper trading")
+    print(f"[paper] Contracts per trade: {args.stake}")
+    print(f"[paper] Min probability: {args.min_prob*100:.0f}%")
     print(f"[paper] Database: {db_path}")
-    print(f"[paper] Press Ctrl+C to stop\n")
+    print(f"[paper] Press Ctrl+C to stop")
 
     # Track which markets we've already traded
     traded_markets: set[str] = set()
@@ -303,75 +247,104 @@ def main():
             # Check for settled trades
             check_pending_settlements(chainlink_price or binance_price)
 
-            # Fetch candles and calculate indicators
-            candles = fetch_klines(interval="1m", limit=60)
-            closes = [c.close for c in candles]
-            candle_dicts = [{"high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
-                           for c in candles]
+            # Fetch candles for ML features
+            candles = fetch_klines(interval="1m", limit=100)
+            candle_dicts = [
+                {
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume,
+                }
+                for c in candles
+            ]
 
-            rsi = compute_rsi(closes, period=14)
-            macd_result = compute_macd(closes, fast=12, slow=26, signal=9)
-            macd_hist = macd_result.histogram if macd_result else None
-            vwap = compute_vwap(candle_dicts)
-
-            price_vs_vwap = None
-            if vwap and binance_price:
-                price_vs_vwap = (binance_price - vwap) / vwap * 100
+            # Compute features and get ML prediction
+            current_hour = datetime.now(timezone.utc).hour
+            features = compute_all_features(candle_dicts, current_hour)
+            prediction = predictor.predict(features)
 
             # Fetch markets
             markets = fetch_btc_15min_markets()
             market = markets[0] if markets else None
 
-            signal_result = None
+            # Execute trade if conditions met
             if market and market.ticker not in traded_markets:
                 probs = calculate_market_implied_prob(market)
 
-                # Generate trading signal
-                signal_result = simple_strategy(
-                    rsi=rsi,
-                    macd_histogram=macd_hist,
-                    price_vs_vwap=price_vs_vwap,
-                    market_up_prob=probs["up_prob"],
-                )
-
-                # Execute trade if edge is sufficient
-                if signal_result and signal_result.edge >= args.min_edge:
-                    pending = execute_paper_trade(market, signal_result, args.stake)
+                if prediction and prediction.probability >= args.min_prob:
+                    # Execute trade
+                    pending = execute_paper_trade(
+                        market=market,
+                        prediction=prediction,
+                        market_probs=probs,
+                        stake=args.stake,
+                    )
                     if pending:
                         pending_trades.append(pending)
                         traded_markets.add(market.ticker)
-                        print(f"\n  [TRADE] {signal_result.side} on {market.ticker}")
-                        print(f"          Edge: {signal_result.edge*100:+.1f}%")
+
+                        edge = prediction.probability - pending.entry_price
+                        tte = int((market.expiry_time - datetime.now(timezone.utc)).total_seconds())
+
+                        print(f"\n  🎯 NEW TRADE: {prediction.direction} on {market.ticker}")
+                        print(f"     ML Confidence: {prediction.probability*100:.1f}%")
+                        print(f"     Market Price:  {pending.entry_price*100:.1f}%")
+                        print(f"     Edge:          {edge*100:+.1f}%")
+
+                        # Send Discord notification
+                        send_trade_alert(
+                            side=prediction.direction,
+                            market_ticker=market.ticker,
+                            strike_price=market.strike_price,
+                            model_prob=prediction.probability,
+                            market_prob=pending.entry_price,
+                            edge=edge,
+                            btc_price=binance_price,
+                            time_to_expiry_sec=tte,
+                        )
 
             # Get summary and print status
             summary = get_paper_trade_summary(db_path)
             print_status(
                 binance_price=binance_price,
                 chainlink_price=chainlink_price,
-                rsi=rsi,
-                macd_hist=macd_hist,
                 market=market,
-                signal=signal_result,
+                prediction=prediction,
                 summary=summary,
+                min_prob=args.min_prob,
             )
 
         except Exception as e:
             print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
 
         # Wait for next interval
         time.sleep(args.interval)
 
     # Final summary
     summary = get_paper_trade_summary(db_path)
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 65)
     print("  FINAL SUMMARY")
-    print("=" * 60)
+    print("=" * 65)
     print(f"  Total Trades: {summary['total_trades']}")
     print(f"  Wins:         {summary['wins']}")
     print(f"  Losses:       {summary['losses']}")
     print(f"  Win Rate:     {summary['win_rate']*100:.1f}%" if summary['win_rate'] else "  Win Rate:     N/A")
     print(f"  Total P&L:    ${summary['total_pnl']:+.2f}")
-    print("=" * 60)
+    print("=" * 65)
+
+    # Send Discord summary
+    if summary['total_trades'] > 0:
+        send_summary_alert(
+            total_trades=summary['total_trades'],
+            wins=summary['wins'],
+            losses=summary['losses'],
+            total_pnl=summary['total_pnl'],
+            win_rate=summary['win_rate'],
+        )
 
 
 if __name__ == "__main__":
