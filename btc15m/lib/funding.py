@@ -18,50 +18,78 @@ class FundingData:
 
 
 def fetch_binance_funding() -> Optional[Dict[str, float]]:
-    """Fetch funding rates from Binance Futures."""
-    try:
-        # BTC perpetual funding
-        btc_resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/fundingRate",
-            params={"symbol": "BTCUSDT", "limit": 1},
-            timeout=10
-        )
-        btc_data = btc_resp.json()
-        btc_rate = float(btc_data[0]["fundingRate"]) if btc_data else 0
+    """Fetch funding rates from Binance Futures (international endpoint)."""
+    # Use international endpoint - US users can't access fapi.binance.com
+    endpoints = [
+        "https://fapi.binance.com/fapi/v1/fundingRate",  # International
+        "https://dapi.binance.com/dapi/v1/fundingRate",  # Coin-margined
+    ]
 
-        # ETH perpetual funding
-        eth_resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/fundingRate",
-            params={"symbol": "ETHUSDT", "limit": 1},
-            timeout=10
-        )
-        eth_data = eth_resp.json()
-        eth_rate = float(eth_data[0]["fundingRate"]) if eth_data else 0
+    for endpoint in endpoints:
+        try:
+            # BTC perpetual funding
+            btc_resp = requests.get(
+                endpoint,
+                params={"symbol": "BTCUSDT", "limit": 1},
+                timeout=10
+            )
+            if btc_resp.status_code == 451:  # US blocked
+                continue
+            btc_data = btc_resp.json()
+            if isinstance(btc_data, dict) and "code" in btc_data:
+                continue  # Error response
 
-        return {
-            "btc_funding": btc_rate,
-            "eth_funding": eth_rate,
-        }
-    except Exception as e:
-        print(f"[funding] Binance error: {e}")
-        return None
+            btc_rate = float(btc_data[0]["fundingRate"]) if btc_data else 0
+
+            # ETH perpetual funding
+            eth_resp = requests.get(
+                endpoint,
+                params={"symbol": "ETHUSDT", "limit": 1},
+                timeout=10
+            )
+            eth_data = eth_resp.json()
+            eth_rate = float(eth_data[0]["fundingRate"]) if isinstance(eth_data, list) and eth_data else 0
+
+            return {
+                "btc_funding": btc_rate,
+                "eth_funding": eth_rate,
+            }
+        except Exception as e:
+            continue
+
+    print(f"[funding] Binance endpoints unavailable")
+    return None
 
 
 def fetch_bybit_funding() -> Optional[Dict[str, float]]:
     """Fetch funding rates from Bybit as backup."""
     try:
-        resp = requests.get(
+        # BTC funding
+        btc_resp = requests.get(
             "https://api.bybit.com/v5/market/tickers",
             params={"category": "linear", "symbol": "BTCUSDT"},
             timeout=10
         )
-        data = resp.json()
-        if data.get("result", {}).get("list"):
-            ticker = data["result"]["list"][0]
-            return {
-                "btc_funding": float(ticker.get("fundingRate", 0)),
-                "eth_funding": 0,  # Would need separate call
-            }
+        btc_data = btc_resp.json()
+
+        # ETH funding
+        eth_resp = requests.get(
+            "https://api.bybit.com/v5/market/tickers",
+            params={"category": "linear", "symbol": "ETHUSDT"},
+            timeout=10
+        )
+        eth_data = eth_resp.json()
+
+        btc_rate = 0
+        eth_rate = 0
+
+        if btc_data.get("result", {}).get("list"):
+            btc_rate = float(btc_data["result"]["list"][0].get("fundingRate", 0))
+        if eth_data.get("result", {}).get("list"):
+            eth_rate = float(eth_data["result"]["list"][0].get("fundingRate", 0))
+
+        if btc_rate != 0 or eth_rate != 0:
+            return {"btc_funding": btc_rate, "eth_funding": eth_rate}
         return None
     except Exception as e:
         print(f"[funding] Bybit error: {e}")
