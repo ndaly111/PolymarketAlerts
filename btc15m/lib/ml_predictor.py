@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Optional, List
 from dataclasses import dataclass
 
+import warnings
 import numpy as np
+
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 # Default model path
 DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "models" / "btc15m_model.pkl"
@@ -47,6 +50,10 @@ class MLPredictor:
             data = pickle.load(f)
             self.model = data["model"]
             self.scaler = data["scaler"]
+
+    def reload_model(self) -> None:
+        """Reload model from disk (use after retraining)."""
+        self._load_model()
 
     def predict(self, features: dict) -> Optional[Prediction]:
         """Make a prediction given feature dictionary.
@@ -109,6 +116,13 @@ class MLPredictor:
             "deribit_iv": 50, "deribit_iv_high": 0, "deribit_iv_low": 0,
             "deribit_pc_ratio": 1.0, "deribit_pc_bullish": 0, "deribit_pc_bearish": 0,
             "deribit_call_oi": 0, "deribit_put_oi": 0, "deribit_oi_imbalance": 0,
+            # Market context
+            "time_to_expiry_min": 7.5, "distance_to_strike_pct": 0,
+            "above_strike": 0.5, "time_distance_interaction": 0,
+            # Velocity & momentum
+            "price_velocity_1m": 0, "price_velocity_5m": 0,
+            "price_acceleration": 0, "distance_velocity": 0,
+            "vol_ratio_5m": 1.0, "strikes_crossed": 0,
         }
 
         for col in FEATURE_COLUMNS:
@@ -175,12 +189,19 @@ class MLPredictor:
         return None
 
 
-def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
+def compute_all_features(
+    candles: List[dict],
+    current_hour: int = 12,
+    strike_price: Optional[float] = None,
+    time_to_expiry_sec: Optional[int] = None,
+) -> dict:
     """Compute all features needed for ML prediction from candle data.
 
     Args:
         candles: List of candle dicts with open, high, low, close, volume
         current_hour: Current hour (UTC) for time features
+        strike_price: Strike price of the contract (optional)
+        time_to_expiry_sec: Seconds until contract expires (optional)
 
     Returns:
         Dict with all computed features
@@ -426,5 +447,75 @@ def compute_all_features(candles: List[dict], current_hour: int = 12) -> dict:
             "deribit_pc_ratio": 1.0, "deribit_pc_bullish": 0, "deribit_pc_bearish": 0,
             "deribit_call_oi": 0, "deribit_put_oi": 0, "deribit_oi_imbalance": 0,
         })
+
+    # === MARKET CONTEXT FEATURES ===
+    # These are critical for understanding if a trade can win given time remaining
+    price = closes[-1] if closes else 0
+
+    # Time to expiry (normalized to minutes)
+    time_to_expiry_min = (time_to_expiry_sec / 60.0) if time_to_expiry_sec else 7.5
+
+    # Distance to strike (as percentage of current price)
+    if strike_price and price > 0:
+        distance_to_strike_pct = ((price - strike_price) / price) * 100
+        above_strike = 1.0 if price > strike_price else 0.0
+    else:
+        distance_to_strike_pct = 0.0
+        above_strike = 0.5  # Unknown
+
+    # Interaction: less time + far from strike = harder to win
+    # Normalized so typical values are in reasonable range
+    time_distance_interaction = (time_to_expiry_min / 15.0) * (1.0 / (1.0 + abs(distance_to_strike_pct)))
+
+    # === NEW: VELOCITY & MOMENTUM FEATURES ===
+    # These capture immediate price action which matters for short-term contracts
+
+    # Price velocity (% change in last N candles)
+    price_velocity_1m = 0.0
+    price_velocity_5m = 0.0
+    price_acceleration = 0.0
+    if len(closes) >= 6:
+        price_velocity_1m = ((closes[-1] - closes[-2]) / closes[-2]) * 100 if closes[-2] > 0 else 0
+        price_velocity_5m = ((closes[-1] - closes[-6]) / closes[-6]) * 100 if closes[-6] > 0 else 0
+        # Acceleration: is velocity increasing or decreasing?
+        vel_now = closes[-1] - closes[-2]
+        vel_prev = closes[-2] - closes[-3]
+        price_acceleration = vel_now - vel_prev
+
+    # Distance velocity: is price moving toward or away from strike?
+    # Positive = moving toward strike, Negative = moving away
+    distance_velocity = 0.0
+    if strike_price and len(closes) >= 2 and closes[-2] > 0:
+        old_distance = abs(closes[-2] - strike_price)
+        new_distance = abs(closes[-1] - strike_price)
+        # Positive means getting closer to strike
+        distance_velocity = ((old_distance - new_distance) / closes[-2]) * 100
+
+    # Recent volatility vs historical (is it more volatile now?)
+    vol_ratio_5m = 1.0
+    if len(closes) >= 30:
+        recent_vol = np.std(closes[-5:]) if len(closes) >= 5 else 0
+        hist_vol = np.std(closes[-30:]) if len(closes) >= 30 else 1
+        vol_ratio_5m = recent_vol / hist_vol if hist_vol > 0 else 1.0
+
+    # Strikes crossed: how many $250 levels has price crossed in last 15 candles?
+    # Higher = more volatile, more likely to cross current strike
+    strikes_crossed = 0
+    if len(closes) >= 15:
+        price_range = max(closes[-15:]) - min(closes[-15:])
+        strikes_crossed = int(price_range / 250)  # $250 strike intervals
+
+    features.update({
+        "time_to_expiry_min": time_to_expiry_min,
+        "distance_to_strike_pct": distance_to_strike_pct,
+        "above_strike": above_strike,
+        "time_distance_interaction": time_distance_interaction,
+        "price_velocity_1m": price_velocity_1m,
+        "price_velocity_5m": price_velocity_5m,
+        "price_acceleration": price_acceleration,
+        "distance_velocity": distance_velocity,
+        "vol_ratio_5m": vol_ratio_5m,
+        "strikes_crossed": strikes_crossed,
+    })
 
     return features

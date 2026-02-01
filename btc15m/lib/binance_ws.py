@@ -19,7 +19,8 @@ except ImportError:
     HAS_WEBSOCKET = False
 
 
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+# Use Binance.US websocket (btcusd not btcusdt)
+BINANCE_WS_URL = "wss://stream.binance.us:9443/ws/btcusd@trade"
 
 
 @dataclass
@@ -168,6 +169,9 @@ def start_price_stream(
     if _stream is None:
         _stream = BinanceTradeStream(on_trade=on_trade)
         _stream.start()
+    elif on_trade is not None:
+        # Update callback on existing stream
+        _stream.on_trade = on_trade
     return _stream
 
 

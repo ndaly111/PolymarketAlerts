@@ -5,20 +5,43 @@ import sqlite3
 import json
 import os
 import sys
+import queue
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, Response
+
+# Global log queue for real-time streaming
+LOG_QUEUE = queue.Queue(maxsize=100)
+LOG_HISTORY = []  # Keep last 100 logs
 
 # Add paths
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lib.db import DEFAULT_DB_PATH, get_paper_trade_summary, get_pending_trades
+from lib.db import DEFAULT_DB_PATH, get_paper_trade_summary, get_pending_trades, get_prediction_stats, get_recent_logs
 from lib.binance import fetch_current_price
 
 app = Flask(__name__)
 
 DB_PATH = DEFAULT_DB_PATH
+
+
+def push_log(message: str):
+    """Push a log message to the dashboard."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
+
+    # Add to history
+    LOG_HISTORY.append(log_entry)
+    if len(LOG_HISTORY) > 100:
+        LOG_HISTORY.pop(0)
+
+    # Push to queue (non-blocking)
+    try:
+        LOG_QUEUE.put_nowait(log_entry)
+    except queue.Full:
+        pass
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -164,10 +187,26 @@ HTML_TEMPLATE = """
             </tbody>
         </table>
 
-        <h2>Live Samples (Online Learning)</h2>
+        <h2>ML Learning Progress</h2>
         <div class="stats-grid">
             <div class="stat-card">
-                <div class="stat-label">Live Samples</div>
+                <div class="stat-label">Total Predictions</div>
+                <div class="stat-value neutral" id="total-predictions">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Prediction Accuracy</div>
+                <div class="stat-value neutral" id="prediction-accuracy">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Pending Settlement</div>
+                <div class="stat-value neutral" id="pending-predictions">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Traded vs Non-Traded</div>
+                <div class="stat-value neutral" id="traded-ratio">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Live Samples (Training)</div>
                 <div class="stat-value neutral" id="live-samples">--</div>
             </div>
             <div class="stat-card">
@@ -176,7 +215,12 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <p class="refresh-info">Auto-refreshes every 10 seconds</p>
+        <h2>Live Scanner Logs</h2>
+        <div id="log-container" style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px;">
+            <div id="logs">Connecting to log stream...</div>
+        </div>
+
+        <p class="refresh-info">Stats refresh every 10 seconds | Logs stream in real-time</p>
     </div>
 
     <script>
@@ -196,6 +240,12 @@ HTML_TEMPLATE = """
                 document.getElementById('total-trades').textContent = data.total_trades;
                 document.getElementById('record').textContent = data.wins + 'W / ' + data.losses + 'L';
                 document.getElementById('pending').textContent = data.pending_count;
+
+                // Prediction/learning stats
+                document.getElementById('total-predictions').textContent = data.prediction_stats.total_predictions;
+                document.getElementById('prediction-accuracy').textContent = data.prediction_stats.accuracy ? (data.prediction_stats.accuracy * 100).toFixed(1) + '%' : '--';
+                document.getElementById('pending-predictions').textContent = data.prediction_stats.pending;
+                document.getElementById('traded-ratio').textContent = data.prediction_stats.traded + ' / ' + (data.prediction_stats.total_predictions - data.prediction_stats.traded);
                 document.getElementById('live-samples').textContent = data.live_samples;
                 document.getElementById('live-accuracy').textContent = (data.live_accuracy * 100).toFixed(1) + '%';
 
@@ -225,6 +275,40 @@ HTML_TEMPLATE = """
 
         fetchData();
         setInterval(fetchData, 10000);
+
+        // Real-time log streaming
+        const logsDiv = document.getElementById('logs');
+        const logContainer = document.getElementById('log-container');
+        let logLines = [];
+
+        const evtSource = new EventSource('/stream/logs');
+        evtSource.onmessage = function(event) {
+            if (event.data === '[heartbeat]') return;
+
+            logLines.push(event.data);
+            if (logLines.length > 100) logLines.shift();
+
+            // Color code logs
+            const colored = logLines.map(line => {
+                if (line.includes('ERROR') || line.includes('LOSS')) {
+                    return `<span style="color: #f85149">${line}</span>`;
+                } else if (line.includes('WIN') || line.includes('TRADE') || line.includes('filled')) {
+                    return `<span style="color: #3fb950">${line}</span>`;
+                } else if (line.includes('SCAN')) {
+                    return `<span style="color: #8b949e">${line}</span>`;
+                } else if (line.includes('LEARN') || line.includes('ML')) {
+                    return `<span style="color: #a371f7">${line}</span>`;
+                }
+                return line;
+            });
+
+            logsDiv.innerHTML = colored.join('<br>');
+            logContainer.scrollTop = logContainer.scrollHeight;
+        };
+
+        evtSource.onerror = function() {
+            logsDiv.innerHTML += '<br><span style="color: #f85149">Log stream disconnected. Refresh page.</span>';
+        };
     </script>
 </body>
 </html>
@@ -264,6 +348,12 @@ def api_stats():
     except Exception as e:
         print(f"Error fetching trades: {e}")
 
+    # Get prediction stats (all predictions, not just trades)
+    try:
+        prediction_stats = get_prediction_stats(DB_PATH)
+    except:
+        prediction_stats = {"total_predictions": 0, "pending": 0, "accuracy": None, "traded": 0}
+
     # Get live sample stats
     live_samples = 0
     live_accuracy = 0
@@ -290,6 +380,7 @@ def api_stats():
         "pending_count": len(pending),
         "pending_trades": pending,
         "recent_trades": recent_trades,
+        "prediction_stats": prediction_stats,
         "live_samples": live_samples,
         "live_accuracy": live_accuracy,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -328,7 +419,40 @@ def api_live_samples():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/logs')
+def api_logs():
+    """Return recent logs from database."""
+    logs = get_recent_logs(50, DB_PATH)
+    return jsonify(logs)
+
+
+@app.route('/stream/logs')
+def stream_logs():
+    """Server-sent events stream for real-time logs."""
+    import time
+
+    def generate():
+        last_count = 0
+
+        while True:
+            logs = get_recent_logs(50, DB_PATH)
+            current_count = len(logs)
+
+            # Send new logs
+            if current_count > last_count or last_count == 0:
+                for log in logs[-(current_count - last_count) if last_count > 0 else 50:]:
+                    ts = log['timestamp'][11:19]  # Extract time
+                    level = log['level']
+                    msg = log['message']
+                    yield f"data: [{ts}] {msg}\n\n"
+                last_count = current_count
+
+            time.sleep(2)  # Poll every 2 seconds
+
+    return Response(generate(), mimetype='text/event-stream')
+
+
 if __name__ == "__main__":
     print("Starting BTC Scanner Dashboard...")
     print("Open http://localhost:5050 in your browser")
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    app.run(host="0.0.0.0", port=5050, debug=False, threaded=True)

@@ -188,6 +188,18 @@ FEATURE_COLUMNS = [
     "deribit_call_oi",
     "deribit_put_oi",
     "deribit_oi_imbalance",
+    # ===== MARKET CONTEXT (critical for timing) =====
+    "time_to_expiry_min",      # Minutes until contract expires (1-60)
+    "distance_to_strike_pct",  # % distance from current price to strike
+    "above_strike",            # 1 if price > strike, 0 otherwise
+    "time_distance_interaction",  # time * distance (less time + far = bad)
+    # ===== VELOCITY & MOMENTUM (immediate price action) =====
+    "price_velocity_1m",       # Price change in last 1 minute (%)
+    "price_velocity_5m",       # Price change in last 5 minutes (%)
+    "price_acceleration",      # Is momentum increasing or decreasing?
+    "distance_velocity",       # Is price moving toward or away from strike?
+    "vol_ratio_5m",            # Recent volatility vs historical
+    "strikes_crossed",         # How many strike levels crossed in last 15 min
 ]
 
 

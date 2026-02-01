@@ -145,49 +145,101 @@ def fetch_btc_15min_markets(
     client: Optional[KalshiAuthClient] = None,
     current_btc_price: Optional[float] = None,
 ) -> List[BTCMarket]:
-    """Fetch specifically 15-minute BTC markets near current price.
+    """Fetch BTC 15-minute markets from KXBTC15M series.
 
-    Filters for:
-    - Markets expiring within the next 20 minutes
-    - Strike prices within 2% of current BTC price (where there's uncertainty)
+    These are simple up/down markets that expire every 15 minutes.
+    Only 1 market exists at a time (created ~15 min before expiry).
 
     Args:
         client: Kalshi auth client
-        current_btc_price: Current BTC price to filter relevant strikes
+        current_btc_price: Current BTC price (not used for filtering, just for logging)
     """
-    markets = fetch_btc_markets(client)
+    if client is None:
+        client = get_kalshi_client()
+
+    if client is None:
+        return []
+
+    # Fetch 15-minute BTC markets directly
+    try:
+        result = client.list_markets(series_ticker="KXBTC15M", status="open")
+    except Exception as e:
+        print(f"[kalshi] Error fetching KXBTC15M: {e}")
+        return []
+
+    if not result:
+        return []
+
+    print(f"[kalshi] Found {len(result)} 15-min BTC markets")
 
     now = datetime.now(timezone.utc)
-    filtered = []
+    markets = []
 
-    for m in markets:
-        time_to_expiry = (m.expiry_time - now).total_seconds()
-
-        # Keep markets expiring in 1-20 minutes
-        if not (60 <= time_to_expiry <= 1200):
-            continue
-
-        # If we have current price, filter for strikes within 2% of current price
-        # This ensures we're trading markets with actual uncertainty
-        if current_btc_price is not None:
-            price_diff_pct = abs(m.strike_price - current_btc_price) / current_btc_price
-            if price_diff_pct > 0.02:  # Skip if strike is more than 2% away
+    for m in result:
+        try:
+            # Parse expiry time
+            expiry_str = m.get("close_time") or m.get("expiration_time")
+            if expiry_str:
+                expiry_time = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+            else:
                 continue
 
-        filtered.append(m)
+            time_to_expiry = (expiry_time - now).total_seconds()
 
-    # Sort by how close strike is to current price (most relevant first)
-    if current_btc_price is not None:
-        filtered.sort(key=lambda x: abs(x.strike_price - current_btc_price))
-    else:
-        filtered.sort(key=lambda x: x.expiry_time)
+            # Keep markets expiring in 1-15 minutes
+            if not (60 <= time_to_expiry <= 900):
+                continue
 
-    if filtered:
-        print(f"[kalshi] Found {len(filtered)} markets near current price")
-        for m in filtered[:3]:
-            print(f"  - {m.ticker}: strike ${m.strike_price:,.0f}, expires in {int((m.expiry_time - now).total_seconds() / 60)}m")
+            # Try to extract strike from market data (title, floor_strike, etc.)
+            strike_price = _extract_strike_price(m)
 
-    return filtered
+            # If no strike found, try parsing from ticker (e.g., KXBTC15M-26FEB010930-30)
+            if strike_price is None:
+                ticker = m.get("ticker", "")
+                # Try to get strike from last segment of ticker
+                parts = ticker.split("-")
+                if len(parts) >= 2:
+                    try:
+                        # Last part might be strike offset or bucket (e.g., "30" for $78,030)
+                        last_part = parts[-1]
+                        if last_part.isdigit():
+                            # Could be full strike or offset - check magnitude
+                            val = int(last_part)
+                            if val > 1000:  # Full strike like 78030
+                                strike_price = float(val)
+                            else:
+                                # Offset from round number - use current price as base
+                                base = round((current_btc_price or 78000) / 1000) * 1000
+                                strike_price = base + val
+                    except:
+                        pass
+
+            # Fallback to current price if still no strike
+            if strike_price is None:
+                strike_price = current_btc_price or 0
+
+            markets.append(BTCMarket(
+                ticker=m["ticker"],
+                title=m.get("title", ""),
+                strike_price=strike_price,
+                expiry_time=expiry_time,
+                yes_bid=_safe_float(m.get("yes_bid")),
+                yes_ask=_safe_float(m.get("yes_ask")),
+                no_bid=_safe_float(m.get("no_bid")),
+                no_ask=_safe_float(m.get("no_ask")),
+                last_price=_safe_float(m.get("last_price")),
+                volume=int(m.get("volume", 0)),
+                open_interest=int(m.get("open_interest", 0)),
+                status=m.get("status", "unknown"),
+            ))
+
+            tte_min = int(time_to_expiry / 60)
+            print(f"[kalshi] {m['ticker']}: expires in {tte_min}m, yes_ask={m.get('yes_ask')}")
+
+        except Exception:
+            continue
+
+    return markets
 
 
 def get_next_btc_market(

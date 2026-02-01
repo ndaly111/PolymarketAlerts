@@ -8,7 +8,7 @@ _NUM = r"(-?\d{1,3})"
 
 _RX_BETWEEN = re.compile(r"between\s+" + _NUM + r"\D+and\D+" + _NUM, re.IGNORECASE)
 _RX_RANGE_DASH = re.compile(r"\b" + _NUM + r"\s*[-–]\s*" + _NUM + r"\b")
-_RX_OR_HIGHER = re.compile(r"\b" + _NUM + r"\s*(?:°\s*)?(?:or\s+higher|and\s+above|\+)", re.IGNORECASE)
+_RX_OR_HIGHER = re.compile(r"\b" + _NUM + r"\s*(?:°?F?\s*)?(?:or\s+(?:higher|above)|and\s+above|\+)", re.IGNORECASE)
 _RX_OR_LOWER = re.compile(r"\b" + _NUM + r"\s*(?:°\s*)?(?:or\s+lower|and\s+below)", re.IGNORECASE)
 _RX_BELOW = re.compile(r"(?:below|under)\s+" + _NUM, re.IGNORECASE)
 _RX_ABOVE = re.compile(r"(?:above|over|greater\s+than)\s+" + _NUM, re.IGNORECASE)
