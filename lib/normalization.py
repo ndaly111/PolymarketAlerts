@@ -10,7 +10,64 @@ Consolidates duplicated normalization functions from:
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
+
+
+# Common nickname -> full name mappings
+NICKNAME_MAP = {
+    "nic": "nicolas",
+    "nick": "nicolas",
+    "mike": "michael",
+    "matt": "matthew",
+    "rob": "robert",
+    "bob": "robert",
+    "will": "william",
+    "bill": "william",
+    "tony": "anthony",
+    "joe": "joseph",
+    "joey": "joseph",
+    "dan": "daniel",
+    "danny": "daniel",
+    "ben": "benjamin",
+    "benny": "benjamin",
+    "sam": "samuel",
+    "sammy": "samuel",
+    "alex": "alexander",
+    "zach": "zachary",
+    "zack": "zachary",
+    "chris": "christopher",
+    "jon": "jonathan",
+    "josh": "joshua",
+    "jake": "jacob",
+    "andy": "andrew",
+    "drew": "andrew",
+    "steve": "steven",
+    "pat": "patrick",
+    "tj": "t j",
+    "rj": "r j",
+    "pj": "p j",
+    "cj": "c j",
+    "aj": "a j",
+    "dj": "d j",
+    "jj": "j j",
+    "kj": "k j",
+    "og": "o g",
+}
+
+
+def remove_accents(s: str) -> str:
+    """Remove accents/diacritics from a string.
+
+    Examples:
+        >>> remove_accents("Nikola Jokić")
+        "Nikola Jokic"
+        >>> remove_accents("Luka Dončić")
+        "Luka Doncic"
+    """
+    # Normalize to NFD (decomposed form), then remove combining characters
+    normalized = unicodedata.normalize("NFD", s)
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
 
 
 def normalize_player_name(s: str) -> str:
@@ -22,6 +79,8 @@ def normalize_player_name(s: str) -> str:
     - Punctuation (D.J. -> dj)
     - Apostrophes (O'Brien -> obrien)
     - Hyphens (Davis-Smith -> davis smith)
+    - Accents/diacritics (Jokić -> jokic, Dončić -> doncic)
+    - Suffixes (Jr., Jr, III, II -> removed)
     - Extra spaces
 
     Args:
@@ -37,18 +96,61 @@ def normalize_player_name(s: str) -> str:
         "dj moore"
         >>> normalize_player_name("Ja'Marr Chase")
         "jamarr chase"
+        >>> normalize_player_name("Nikola Jokić")
+        "nikola jokic"
+        >>> normalize_player_name("Jaren Jackson Jr.")
+        "jaren jackson"
     """
     if not s:
         return ""
-    return (
+
+    # Remove accents first
+    s = remove_accents(s)
+
+    # Basic normalization
+    s = (
         s.lower()
         .replace(".", "")
         .replace(",", "")
         .replace("'", "")
         .replace("-", " ")
-        .replace("  ", " ")
-        .strip()
     )
+
+    # Remove common suffixes
+    s = re.sub(r"\s+(jr|sr|ii|iii|iv|v)$", "", s)
+
+    # Clean up spaces
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s
+
+
+def normalize_player_name_with_nicknames(s: str) -> str:
+    """
+    Normalize player name and expand common nicknames.
+
+    This is a more aggressive normalization that expands nicknames
+    to their full forms for better matching across data sources.
+
+    Examples:
+        >>> normalize_player_name_with_nicknames("Nic Claxton")
+        "nicolas claxton"
+        >>> normalize_player_name_with_nicknames("Mike Conley")
+        "michael conley"
+    """
+    normalized = normalize_player_name(s)
+    if not normalized:
+        return ""
+
+    parts = normalized.split()
+    expanded = []
+    for part in parts:
+        if part in NICKNAME_MAP:
+            expanded.append(NICKNAME_MAP[part])
+        else:
+            expanded.append(part)
+
+    return " ".join(expanded)
 
 
 def normalize_team_name(s: Optional[str]) -> str:

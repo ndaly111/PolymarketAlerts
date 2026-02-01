@@ -322,19 +322,8 @@ def decimal_to_prob(odds: float) -> float:
     return 1.0 / odds
 
 
-def normalize_player_name(s: str) -> str:
-    """Normalize player name for matching."""
-    if not s:
-        return ""
-    return (
-        s.lower()
-        .replace(".", "")
-        .replace(",", "")
-        .replace("'", "")
-        .replace("-", " ")
-        .replace("  ", " ")
-        .strip()
-    )
+# Use shared normalization from lib
+from lib.normalization import normalize_player_name
 
 
 def fetch_events(

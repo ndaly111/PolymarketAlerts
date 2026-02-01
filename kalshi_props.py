@@ -56,19 +56,8 @@ KALSHI_TO_ODDSAPI = {
 }
 
 
-def normalize_player_name(s: str) -> str:
-    """Normalize player name for matching."""
-    if not s:
-        return ""
-    return (
-        s.lower()
-        .replace(".", "")
-        .replace(",", "")
-        .replace("'", "")
-        .replace("-", " ")
-        .replace("  ", " ")
-        .strip()
-    )
+# Use shared normalization from lib
+from lib.normalization import normalize_player_name
 
 
 def extract_player_from_title(title: str) -> Optional[str]:
