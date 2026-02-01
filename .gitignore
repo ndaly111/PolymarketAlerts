@@ -18,3 +18,4 @@ weather/outputs/logs/
 weather/outputs/edges/
 weather/outputs/fair_prices/
 weather/outputs/ml_edges/
+.env
