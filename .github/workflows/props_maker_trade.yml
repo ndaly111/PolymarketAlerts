@@ -74,6 +74,9 @@ jobs:
             echo "Database found"
           fi
 
+      - name: Cancel existing orders
+        run: python cancel_maker_orders.py
+
       - name: Run maker trader
         run: |
           echo "Running props maker trader..."
