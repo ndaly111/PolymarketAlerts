@@ -28,7 +28,7 @@ jobs:
       THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
       ODDS_CACHE_DIR: /tmp/odds_api_cache
       # Maker-specific settings
-      MIN_EDGE_FOR_BID: "0.02"
+      MIN_EDGE_FOR_BID: "0.05"
       MIN_BOOKS: "2"
       MAX_MAKER_ORDERS: "5"
       CONTRACTS_PER_ORDER: "1"
