@@ -1,0 +1,102 @@
+name: Props Maker Trade
+
+on:
+  schedule:
+    # Run every 30 minutes during active hours (6am-10pm ET)
+    - cron: "0,30 11-3 * * *"   # 6am-10pm ET (UTC offset)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: props-maker-trade
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+      KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
+      KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      THE_ODDS_API: ${{ secrets.THE_ODDS_API }}
+      ODDS_CACHE_DIR: /tmp/odds_api_cache
+      # Maker-specific settings
+      MIN_EDGE_FOR_BID: "0.02"
+      MIN_BOOKS: "2"
+      MAX_MAKER_ORDERS: "5"
+      CONTRACTS_PER_ORDER: "1"
+      MIN_PRICE_CENTS: "10"
+      MAX_PRICE_CENTS: "90"
+      # Database
+      PROPS_DB_PATH: props_trades.db
+      # Discord
+      DISCORD_PROPS_WEBHOOK: ${{ secrets.DISCORD_PROPS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
+      # Dry run (default true for safety)
+      DRY_RUN: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests cryptography
+
+      - name: Restore Odds API cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/odds_api_cache
+          key: odds-props-cache-${{ hashFiles('oddsapi_props.py') }}
+          restore-keys: |
+            odds-props-cache-
+
+      - name: Pull latest database
+        run: |
+          git pull --rebase origin main || true
+          if [ -f "$PROPS_DB_PATH" ]; then
+            echo "Database found"
+          fi
+
+      - name: Run maker trader
+        run: |
+          echo "Running props maker trader..."
+          echo "Dry run: $DRY_RUN"
+          python props_maker_trade.py
+
+      - name: Upload trades DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: props-trades-db-latest
+          path: ${{ env.PROPS_DB_PATH }}
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: ignore
+
+      - name: Commit DB changes
+        if: success()
+        run: |
+          if [ -f "$PROPS_DB_PATH" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$PROPS_DB_PATH" || true
+            if git diff --staged --quiet; then
+              echo "No DB changes to commit"
+            else
+              git commit -m "props: update trades database (maker)"
+              git pull --rebase && git push || true
+            fi
+          fi
