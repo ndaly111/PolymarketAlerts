@@ -2,8 +2,11 @@ name: Props Maker Trade
 
 on:
   schedule:
-    # Run every 30 minutes during active hours (6am-10pm ET)
-    - cron: "0,30 11-3 * * *"   # 6am-10pm ET (UTC offset)
+    # Run a few times during active betting hours
+    - cron: "0 12 * * *"   # 7am ET
+    - cron: "0 17 * * *"   # 12pm ET
+    - cron: "0 22 * * *"   # 5pm ET
+    - cron: "0 1 * * *"    # 8pm ET
   workflow_dispatch:
 
 permissions:
