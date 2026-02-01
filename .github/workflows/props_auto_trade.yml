@@ -122,6 +122,11 @@ jobs:
             echo "No existing database, will create new one"
           fi
 
+      - name: Debug props matching
+        run: |
+          echo "Running props matching debug..."
+          python debug_props_matching.py
+
       - name: Run auto trader
         run: |
           echo "Running props auto trader..."
