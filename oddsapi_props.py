@@ -567,10 +567,8 @@ def fetch_all_props(
                 print(f"  [cache] {sport_key}: {len(props)} props from cache")
                 continue
 
-            # NO CACHE and NOT scheduled refresh time -> skip API call entirely
-            if not is_refresh_time:
-                print(f"  [skip] {sport_key}: no cache and not scheduled refresh time - skipping API")
-                continue
+            # No cache exists - must fetch from API regardless of time
+            print(f"  [no cache] {sport_key}: fetching from API (no cached data available)")
 
         # Scheduled refresh time or force_refresh - fetch from API
         sport_props: List[Dict[str, Any]] = []
