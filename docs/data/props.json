@@ -1,16 +1,36 @@
 {
-  "total_trades": 10,
-  "filled_trades": 10,
-  "total_cost_cents": 388,
+  "total_trades": 11,
+  "filled_trades": 11,
+  "total_cost_cents": 426,
   "settled_cost_cents": 295,
-  "pending_cost_cents": 93,
-  "avg_edge": 0.1384202262564805,
+  "pending_cost_cents": 131,
+  "avg_edge": 0.13837921284896906,
   "wins": 3,
   "losses": 5,
-  "pending": 2,
+  "pending": 3,
   "total_payout_cents": 300,
   "roi": 1.694915254237288,
   "trades": [
+    {
+      "trade_date": "2026-02-01",
+      "ticker": "KXNBAAST-26FEB01MILBOS-BOSPPRITCHARD11-6",
+      "player_name": "Payton Pritchard",
+      "stat_type": "assists",
+      "line": 6.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 38,
+      "fair_prob": 0.5379690787738546,
+      "edge": 0.1379690787738546,
+      "books_count": 2,
+      "order_id": "9bfa5f5e-d44d-49ce-8b1f-f05e8cbd30e4",
+      "status": "filled",
+      "fill_price_cents": 38,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
     {
       "trade_date": "2026-01-28",
       "ticker": "MATHURIN-REB-5",
@@ -214,6 +234,11 @@
   ],
   "daily_stats": [
     {
+      "date": "2026-02-01",
+      "trades_attempted": 1,
+      "trades_filled": 1
+    },
+    {
       "date": "2026-01-28",
       "trades_attempted": 4,
       "trades_filled": 0
@@ -226,8 +251,8 @@
   ],
   "by_stat_type": {
     "assists": {
-      "count": 4,
-      "avg_edge": 0.054235056651056185
+      "count": 5,
+      "avg_edge": 0.07098186107561585
     },
     "points": {
       "count": 2,
@@ -239,6 +264,15 @@
     }
   },
   "by_ev_bucket": {
+    "10-15%": {
+      "count": 1,
+      "wins": 0,
+      "losses": 0,
+      "pending": 1,
+      "total_cost_cents": 38,
+      "total_payout_cents": 0,
+      "roi": 0
+    },
     "20%+": {
       "count": 2,
       "wins": 1,
