@@ -1,16 +1,116 @@
 {
-  "total_trades": 11,
-  "filled_trades": 11,
-  "total_cost_cents": 426,
-  "settled_cost_cents": 333,
-  "pending_cost_cents": 93,
-  "avg_edge": 0.13837921284896906,
-  "wins": 4,
+  "total_trades": 16,
+  "filled_trades": 16,
+  "total_cost_cents": 624,
+  "settled_cost_cents": 295,
+  "pending_cost_cents": 329,
+  "avg_edge": 0.12175712749103837,
+  "wins": 3,
   "losses": 5,
-  "pending": 2,
-  "total_payout_cents": 400,
-  "roi": 20.12012012012012,
+  "pending": 8,
+  "total_payout_cents": 300,
+  "roi": 1.694915254237288,
   "trades": [
+    {
+      "trade_date": "2026-02-03",
+      "ticker": "KXNBAAST-26FEB03DENDET-DENJMURRAY27-7",
+      "player_name": "Jamal Murray",
+      "stat_type": "assists",
+      "line": 7.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 46,
+      "fair_prob": 0.5307767208301915,
+      "edge": 0.05077672083019143,
+      "books_count": 8,
+      "order_id": "3ebe2297-d885-4269-a5f0-c694dbd1c6fb",
+      "status": "filled",
+      "fill_price_cents": 46,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-02-03",
+      "ticker": "KXNBAAST-26FEB03LALBKN-LALLJAMES23-6",
+      "player_name": "LeBron James",
+      "stat_type": "assists",
+      "line": 6.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 41,
+      "fair_prob": 0.48831139108069227,
+      "edge": 0.05831139108069229,
+      "books_count": 6,
+      "order_id": "0c8afd18-db73-4ee6-9470-46895fe1d8d6",
+      "status": "filled",
+      "fill_price_cents": 41,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-02-03",
+      "ticker": "KXNBAREB-26FEB03DENDET-DETCCUNNINGHAM2-6",
+      "player_name": "Cade Cunningham",
+      "stat_type": "rebounds",
+      "line": 6.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 33,
+      "fair_prob": 0.41682775001520433,
+      "edge": 0.06682775001520432,
+      "books_count": 4,
+      "order_id": "d8b7409a-b592-44af-b9fc-f3fb36f3139b",
+      "status": "filled",
+      "fill_price_cents": 33,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-02-03",
+      "ticker": "KXNBAREB-26FEB03DENDET-DENNJOKIC15-12",
+      "player_name": "Nikola Joki\u0107",
+      "stat_type": "rebounds",
+      "line": 12.0,
+      "side": "OVER",
+      "quantity": 1,
+      "limit_price_cents": 40,
+      "fair_prob": 0.5332567218778563,
+      "edge": 0.1132567218778563,
+      "books_count": 6,
+      "order_id": "7f5c9434-6a7c-47fb-962f-45c6c7c1b312",
+      "status": "filled",
+      "fill_price_cents": 40,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
+    {
+      "trade_date": "2026-02-03",
+      "ticker": "KXNBAREB-26FEB03NYKWAS-NYKKTOWNS32-12",
+      "player_name": "Karl-Anthony Towns",
+      "stat_type": "rebounds",
+      "line": 12.0,
+      "side": "UNDER",
+      "quantity": 1,
+      "limit_price_cents": 38,
+      "fair_prob": 0.5367701147140101,
+      "edge": 0.13677011471401015,
+      "books_count": 7,
+      "order_id": "34c21000-8147-4725-8c8c-4a8fa365babf",
+      "status": "filled",
+      "fill_price_cents": 38,
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
+    },
     {
       "trade_date": "2026-02-01",
       "ticker": "KXNBAAST-26FEB01MILBOS-BOSPPRITCHARD11-6",
@@ -26,10 +126,10 @@
       "order_id": "9bfa5f5e-d44d-49ce-8b1f-f05e8cbd30e4",
       "status": "filled",
       "fill_price_cents": 38,
-      "settled": 1,
-      "won": 1,
-      "payout_cents": 100,
-      "settled_at": "2026-02-02T13:04:59.422124-05:00"
+      "settled": 0,
+      "won": null,
+      "payout_cents": null,
+      "settled_at": null
     },
     {
       "trade_date": "2026-01-28",
@@ -234,6 +334,11 @@
   ],
   "daily_stats": [
     {
+      "date": "2026-02-03",
+      "trades_attempted": 5,
+      "trades_filled": 5
+    },
+    {
       "date": "2026-02-01",
       "trades_attempted": 1,
       "trades_filled": 1
@@ -251,27 +356,27 @@
   ],
   "by_stat_type": {
     "assists": {
-      "count": 5,
-      "avg_edge": 0.07098186107561585
+      "count": 7,
+      "avg_edge": 0.06628534532699472
     },
     "points": {
       "count": 2,
       "avg_edge": 0.45643333182958407
     },
     "rebounds": {
-      "count": 4,
-      "avg_edge": 0.06359884307535309
+      "count": 7,
+      "avg_edge": 0.08160713698692615
     }
   },
   "by_ev_bucket": {
     "10-15%": {
-      "count": 1,
-      "wins": 1,
+      "count": 3,
+      "wins": 0,
       "losses": 0,
-      "pending": 0,
-      "total_cost_cents": 38,
-      "total_payout_cents": 100,
-      "roi": 163.1578947368421
+      "pending": 3,
+      "total_cost_cents": 116,
+      "total_payout_cents": 0,
+      "roi": 0
     },
     "20%+": {
       "count": 2,
@@ -283,11 +388,11 @@
       "roi": 669.2307692307693
     },
     "5-10%": {
-      "count": 8,
+      "count": 11,
       "wins": 2,
       "losses": 4,
-      "pending": 2,
-      "total_cost_cents": 375,
+      "pending": 5,
+      "total_cost_cents": 495,
       "total_payout_cents": 200,
       "roi": -29.078014184397162
     }
