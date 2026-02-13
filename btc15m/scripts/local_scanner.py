@@ -81,7 +81,6 @@ from lib.discord import (
     send_edge_analysis_alert,
     send_scan_log,
     send_threshold_update_alert,
-    send_paper_mode_alert,
     send_cumulative_results_alert,
     send_ml_training_alert,
 )
@@ -103,10 +102,8 @@ RESULTS_ALERT_INTERVAL = 100  # Send cumulative results every N scans
 # ML retraining tracker - retrain when predictions increase by 25%
 LAST_RETRAIN_PREDICTION_COUNT = 0
 
-# Paper mode and dynamic threshold
-PAPER_MODE = False
+# Dynamic threshold
 CURRENT_THRESHOLD = 0.80  # Only trade at 80%+ confidence (profitable bucket)
-PAPER_MODE_WINS = 0  # Track paper wins to exit paper mode
 
 KALSHI_FEE_RATE = 0.07
 SCAN_INTERVAL_SECONDS = 2  # Base polling (event-driven as backup)
@@ -201,11 +198,8 @@ def get_adaptive_interval() -> float:
 
 
 def load_settings(db_path: Path) -> None:
-    """Load paper_mode and threshold from database."""
-    global PAPER_MODE, CURRENT_THRESHOLD
-
-    paper_str = get_setting("paper_mode", "false", db_path)
-    PAPER_MODE = paper_str.lower() == "true"
+    """Load threshold from database."""
+    global CURRENT_THRESHOLD
 
     threshold_str = get_setting("threshold", "0.60", db_path)
     try:
@@ -241,55 +235,6 @@ def check_and_update_threshold(db_path: Path) -> None:
             total_record=f"{summary['wins']}W / {summary['losses']}L",
         )
 
-
-def check_paper_mode(db_path: Path) -> None:
-    """Check if we should enter or exit paper mode."""
-    global PAPER_MODE, PAPER_MODE_WINS
-
-    recent = get_recent_pnl(lookback_trades=10, db_path=db_path)
-    summary = get_paper_trade_summary(db_path)
-
-    if not PAPER_MODE and recent["should_paper_mode"]:
-        # Enter paper mode
-        PAPER_MODE = True
-        PAPER_MODE_WINS = 0
-        set_setting("paper_mode", "true", db_path)
-
-        if recent["consecutive_losses"] >= 5:
-            reason = f"5+ consecutive losses ({recent['consecutive_losses']} in a row)"
-        else:
-            reason = f"Lost ${abs(recent['recent_pnl']):.2f} in last 10 trades"
-
-        print(f"\n[PAPER MODE] ACTIVATED - {reason}")
-        push_log(f"PAPER MODE: Activated - {reason}", "WARN", db_path)
-
-        send_paper_mode_alert(
-            activated=True,
-            reason=reason,
-            recent_pnl=recent["recent_pnl"],
-            consecutive_losses=recent["consecutive_losses"],
-            cumulative_pnl=summary["total_pnl"],
-            total_record=f"{summary['wins']}W / {summary['losses']}L",
-        )
-
-    elif PAPER_MODE and PAPER_MODE_WINS >= 5:
-        # Exit paper mode after 5 profitable paper trades
-        PAPER_MODE = False
-        PAPER_MODE_WINS = 0
-        set_setting("paper_mode", "false", db_path)
-
-        reason = "5 profitable paper trades - confidence restored"
-        print(f"\n[PAPER MODE] DEACTIVATED - {reason}")
-        push_log(f"PAPER MODE: Deactivated - {reason}", db_path=db_path)
-
-        send_paper_mode_alert(
-            activated=False,
-            reason=reason,
-            recent_pnl=recent["recent_pnl"],
-            consecutive_losses=recent["consecutive_losses"],
-            cumulative_pnl=summary["total_pnl"],
-            total_record=f"{summary['wins']}W / {summary['losses']}L",
-        )
 
 
 def place_order_with_retry(
@@ -421,8 +366,6 @@ def check_prediction_settlements(db_path: Path, current_price: float):
 
 def check_settlements(db_path: Path, current_price: float):
     """Check and settle any expired trades."""
-    global PAPER_MODE_WINS
-
     pending = get_pending_trades(db_path)
 
     for trade in pending:
@@ -438,9 +381,6 @@ def check_settlements(db_path: Path, current_price: float):
                 fee = gross_pnl * KALSHI_FEE_RATE
                 pnl = gross_pnl - fee
                 outcome = "WIN"
-                # Track paper mode wins for exit condition
-                if PAPER_MODE:
-                    PAPER_MODE_WINS += 1
             else:
                 pnl = -trade['entry_price'] * trade['stake']
                 outcome = "LOSS"
@@ -656,7 +596,6 @@ def run_scan_cycle(
         # - Cheap entries (<30¢): 7% win rate even when aligned
 
         MIN_DISTANCE_LIVE = 0.20   # Minimum distance for live trades (81.5% win rate)
-        MIN_DISTANCE_PAPER = 0.10  # Paper trade at lower threshold for data
         MIN_BID_CENTS = 30         # <30¢ has 7% win rate - avoid!
         MAX_BID_CENTS = 80         # >80¢ - expanded from 70¢
 
@@ -685,34 +624,9 @@ def run_scan_cycle(
 
         # No profit predictor needed - simple rules are more reliable!
 
-        # Determine trade type
+        # Check if trade meets all live criteria
         is_live_eligible = len(live_skip_reasons) == 0
-        is_paper_eligible = abs_distance >= MIN_DISTANCE_PAPER  # Paper trade when distance > 0.1%
 
-        # === PAPER TRADE FOR DATA COLLECTION ===
-        # Paper trade to collect data (if not going to live trade)
-        if not is_live_eligible and is_paper_eligible and market.ticker not in traded_tickers:
-            traded_tickers.add(market.ticker)
-            TRADE_FEATURES[market.ticker] = base_features.copy() if base_features else {}
-
-            trade_id = insert_paper_trade(
-                market_ticker=market.ticker,
-                side=prediction.direction,
-                entry_price=entry_price,
-                stake=1,  # 1 contract for paper
-                model_prob=prediction.probability,
-                market_prob=entry_price,
-                edge=edge,
-                expiry_time=market.expiry_time.isoformat(),
-                strike_price=market.strike_price,
-                db_path=db_path,
-            )
-
-            skip_reason = live_skip_reasons[0] if live_skip_reasons else "unknown"
-            print(f"[PAPER] #{trade_id}: {prediction.direction} @ {entry_price*100:.0f}¢ | edge={edge*100:+.1f}% | skip: {skip_reason}")
-            continue
-
-        # Skip if doesn't meet live criteria
         if not is_live_eligible:
             if live_skip_reasons:
                 print(f"[SCAN] Skip: {', '.join(live_skip_reasons[:2])}")
@@ -720,46 +634,7 @@ def run_scan_cycle(
 
         print(f"[SCAN] ✓ All live criteria passed (edge={edge*100:+.1f}%, price={ask_cents}¢, dist={abs_distance:.2f}%)")
 
-        # Check paper mode - if active, skip real orders but still record paper trade
-        if PAPER_MODE:
-            print(f"[PAPER MODE] Would trade {prediction.direction} but paper mode active")
-            # Record as paper trade for tracking
-            traded_tickers.add(market.ticker)
-            TRADE_FEATURES[market.ticker] = base_features.copy() if base_features else {}
-
-            insert_prediction_sample(
-                market_ticker=market.ticker,
-                expiry_time=market.expiry_time.isoformat(),
-                strike_price=market.strike_price,
-                btc_price=binance_price,
-                prediction=prediction.direction,
-                model_prob=prediction.probability,
-                features=base_features,
-                market_ask=current_ask,
-                edge=edge,
-                was_traded=True,  # Mark as "traded" for learning purposes
-                db_path=db_path,
-            )
-
-            trade_id = insert_paper_trade(
-                market_ticker=market.ticker,
-                side=prediction.direction,
-                entry_price=entry_price,
-                stake=contracts,
-                model_prob=prediction.probability,
-                market_prob=entry_price,
-                edge=edge,
-                expiry_time=market.expiry_time.isoformat(),
-                strike_price=market.strike_price,
-                db_path=db_path,
-            )
-
-            summary = get_paper_trade_summary(db_path)
-            print(f"[PAPER] Recorded paper trade: {prediction.direction} @ {entry_price*100:.0f}¢")
-            push_log(f"PAPER TRADE: {prediction.direction} @ {entry_price*100:.0f}¢ | Edge: {edge*100:+.1f}%", db_path=db_path)
-            continue  # Allow multiple trades per cycle
-
-        # Place real order (not in paper mode)
+        # Place real order
         # Start at market ask, can go down to max_ev_price (floor where still +EV)
         start_price_cents = int(entry_price * 100)
         min_price_cents = max(1, int(max_ev_price * 100))  # Floor for +EV
@@ -914,9 +789,6 @@ def run_scan_cycle(
             print(f"[RETRAIN] Error: {e}")
             push_log(f"RETRAIN ERROR: {e}", "ERROR", db_path)
 
-    # Check paper mode status (enter/exit based on performance)
-    check_paper_mode(db_path)
-
     # Send cumulative results periodically
     if SCAN_COUNT % RESULTS_ALERT_INTERVAL == 0 and SCAN_COUNT > 0:
         summary = get_paper_trade_summary(db_path)
@@ -929,7 +801,7 @@ def run_scan_cycle(
             win_rate=summary['win_rate'],
             avg_edge=summary['avg_edge'],
             current_threshold=CURRENT_THRESHOLD,
-            paper_mode=PAPER_MODE,
+            paper_mode=False,
         )
 
 
@@ -957,10 +829,9 @@ def main():
         set_setting("threshold", str(args.min_prob), db_path)
 
     print("=" * 60)
-    print("BTC 15-MIN LOCAL SCANNER")
+    print("BTC 15-MIN LOCAL SCANNER (LIVE)")
     print("=" * 60)
     print(f"Dynamic Threshold: {CURRENT_THRESHOLD*100:.0f}% (auto-optimized)")
-    print(f"Paper Mode: {'ACTIVE' if PAPER_MODE else 'OFF'}")
     print(f"Contracts: {args.contracts}")
     print(f"Scan interval: {args.interval}s")
     print("=" * 60)
