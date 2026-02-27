@@ -143,7 +143,7 @@ def get_unsettled_weather_trades(db_path: Path) -> List[Dict[str, Any]]:
                quantity, limit_price_cents, fill_price_cents, fair_q, ev, status
         FROM weather_trades
         WHERE (settled = 0 OR settled IS NULL)
-          AND status IN ('filled', 'FILLED', 'PLACED', 'DRY_RUN')
+          AND status IN ('filled', 'FILLED', 'PLACED', 'DRY_RUN', 'dry_run')
     """)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
