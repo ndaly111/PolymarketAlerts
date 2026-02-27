@@ -47,13 +47,15 @@ TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", "weather_trades.db"))
 # Discord webhook for trade notifications
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEATHER_TRADES_WEBHOOK", os.getenv("DISCORD_WEATHER_ALERTS", os.getenv("DISCORD_WEBHOOK_URL", "")))
 
-ENV_DRY_RUN = os.getenv("WEATHER_DRY_RUN", "0") == "1"
+# ──── TRADING MODE SAFETY ────
+# Two independent flags must BOTH agree before real money goes out:
+#   1. WEATHER_DRY_RUN must be explicitly "0" (default is "1" = paper trade)
+#   2. WEATHER_AUTOTRADE_ENABLED must be "1" (default is "0" = disabled)
+# If either flag is missing or wrong, we paper trade.
+ENV_DRY_RUN = os.getenv("WEATHER_DRY_RUN", "1") != "0"  # Default ON (safe)
 ENV_AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
-# Use environment variables to control trading mode
-# Set WEATHER_DRY_RUN=1 for paper trading (logs but no real orders)
-# Set WEATHER_AUTOTRADE_ENABLED=1 to enable live trading
-DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED  # Dry run if explicitly set OR if autotrade disabled
-AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED
+DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED
+AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED and not ENV_DRY_RUN
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
@@ -916,13 +918,18 @@ def run_data_pipeline(target_date: str, forecast_source: str) -> bool:
 def main() -> int:
     print("=" * 60)
     print("WEATHER AUTO TRADER")
+    if DRY_RUN:
+        print(">>> MODE: PAPER TRADE (DRY RUN) — no real orders <<<")
+    else:
+        print(">>> MODE: LIVE TRADING — real money at risk <<<")
+    print(f"  WEATHER_DRY_RUN={os.getenv('WEATHER_DRY_RUN', '(unset)')}")
+    print(f"  WEATHER_AUTOTRADE_ENABLED={os.getenv('WEATHER_AUTOTRADE_ENABLED', '(unset)')}")
+    print(f"  → DRY_RUN={DRY_RUN}, AUTOTRADE_ENABLED={AUTOTRADE_ENABLED}")
     print(f"Min EV threshold: {MIN_EV:.0%}")
     print(f"Min q: {MIN_Q:.1%}")
     print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
     print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Contracts per trade: {CONTRACTS_PER_TRADE}")
-    print(f"Dry run: {DRY_RUN}")
-    print(f"Autotrade enabled: {AUTOTRADE_ENABLED}")
     print("=" * 60)
 
     # Initialize

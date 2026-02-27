@@ -45,7 +45,12 @@ jobs:
       WEATHER_MAX_TRADES_PER_DAY: "10"
       WEATHER_ORDER_TIMEOUT: "30"
       WEATHER_CONTRACTS_PER_TRADE: "1"
-      WEATHER_AUTOTRADE_ENABLED: "1"
+      # SAFETY: Keep autotrade OFF until model accuracy is validated.
+      # Both flags must agree before real money goes out:
+      #   WEATHER_AUTOTRADE_ENABLED must be "1" AND WEATHER_DRY_RUN must be "0"
+      WEATHER_AUTOTRADE_ENABLED: "0"
+      # Dry run — forced ON while ML model is in paper-trade validation
+      WEATHER_DRY_RUN: "1"
       # Forecast/model config
       # Use Open-Meteo HRRR (best for US short-term, 3km resolution)
       WEATHER_FORECAST_SOURCE: open_meteo
@@ -57,8 +62,6 @@ jobs:
       WEATHER_USE_ML_MODEL: "true"
       # Discord notifications
       DISCORD_WEATHER_TRADES_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
-      # Dry run — forced ON while ML model is in paper-trade validation
-      WEATHER_DRY_RUN: "1"
 
     steps:
       - name: Checkout
