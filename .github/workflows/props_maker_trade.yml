@@ -38,8 +38,8 @@ jobs:
       PROPS_DB_PATH: props_trades.db
       # Discord
       DISCORD_PROPS_WEBHOOK: ${{ secrets.DISCORD_PROPS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
-      # Live trading enabled
-      DRY_RUN: "0"
+      # Dry run — default ON (safe). Set to "0" only for live trading.
+      DRY_RUN: "1"
 
     steps:
       - name: Checkout

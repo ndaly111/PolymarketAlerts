@@ -59,7 +59,7 @@ jobs:
           BTC_15MIN_DISCORD: ${{ secrets.BTC_15MIN_DISCORD }}
           PYTHONPATH: ${{ github.workspace }}/btc15m:${{ github.workspace }}
         run: |
-          python btc15m/scripts/trade_once.py --min-prob 0.54 --contracts 1
+          python btc15m/scripts/trade_once.py --min-prob 0.54 --contracts 1 --paper
 
       - name: Upload state artifact
         uses: actions/upload-artifact@v4
