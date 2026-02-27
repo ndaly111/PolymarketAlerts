@@ -174,6 +174,20 @@ def ensure_schema(db_path: Path) -> None:
             conn.execute(
                 "ALTER TABLE error_models ADD COLUMN source TEXT NOT NULL DEFAULT 'nws_hourly_max';"
             )
+        # Add valid_from_utc for temporal versioning of error models
+        if "valid_from_utc" not in columns:
+            conn.execute(
+                "ALTER TABLE error_models ADD COLUMN valid_from_utc TEXT;"
+            )
+            # Backfill existing rows: use updated_at_utc as valid_from_utc
+            conn.execute(
+                "UPDATE error_models SET valid_from_utc = updated_at_utc WHERE valid_from_utc IS NULL;"
+            )
+        # Add training_end_date to track the latest data used for training
+        if "training_end_date" not in columns:
+            conn.execute(
+                "ALTER TABLE error_models ADD COLUMN training_end_date TEXT;"
+            )
         conn.execute("DROP INDEX IF EXISTS idx_error_models_unique;")
         conn.execute(
             """
@@ -371,6 +385,167 @@ def ensure_schema(db_path: Path) -> None:
             ON smoke_observations(city_key, date_local, source);
             """
         )
+
+        # Daily weather observations from Open-Meteo Archive (for ML feature backfill)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS weather_observations_daily (
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              precipitation_mm REAL,
+              windspeed_max_mph REAL,
+              source TEXT DEFAULT 'open_meteo_archive',
+              fetched_at_utc TEXT,
+              PRIMARY KEY (city_key, date_local)
+            );
+            """
+        )
+
+        # Settlement alignment tracking: compare our CLI observation to Kalshi's official settlement
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settlement_alignment (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              cli_tmax_f INTEGER,                    -- our observed_cli value
+              kalshi_settlement_f INTEGER,            -- Kalshi's official settlement
+              delta INTEGER,                          -- kalshi - cli (0 = match)
+              checked_at_utc TEXT NOT NULL,
+              notes TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_alignment_unique
+            ON settlement_alignment(city_key, date_local);
+            """
+        )
+
+
+def upsert_settlement_alignment(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    cli_tmax_f: int,
+    kalshi_settlement_f: int,
+    checked_at_utc: str,
+    notes: str = "",
+) -> None:
+    """Record settlement alignment between CLI and Kalshi for validation."""
+    ensure_schema(db_path)
+    delta = kalshi_settlement_f - cli_tmax_f
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO settlement_alignment(
+              city_key, date_local, cli_tmax_f, kalshi_settlement_f, delta, checked_at_utc, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local) DO UPDATE SET
+              cli_tmax_f=excluded.cli_tmax_f,
+              kalshi_settlement_f=excluded.kalshi_settlement_f,
+              delta=excluded.delta,
+              checked_at_utc=excluded.checked_at_utc,
+              notes=excluded.notes;
+            """,
+            (city_key, date_local, cli_tmax_f, kalshi_settlement_f, delta, checked_at_utc, notes),
+        )
+
+
+def fetch_settlement_alignment_stats(
+    db_path: Path,
+    *,
+    city_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Get settlement alignment statistics."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        if city_key:
+            rows = conn.execute(
+                "SELECT delta FROM settlement_alignment WHERE city_key = ?",
+                (city_key,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT delta FROM settlement_alignment").fetchall()
+
+    if not rows:
+        return {"n": 0, "match_rate": None, "mean_delta": None, "max_abs_delta": None}
+
+    deltas = [r[0] for r in rows]
+    n = len(deltas)
+    exact_matches = sum(1 for d in deltas if d == 0)
+    within_1 = sum(1 for d in deltas if abs(d) <= 1)
+
+    return {
+        "n": n,
+        "exact_match_rate": round(exact_matches / n, 3),
+        "within_1f_rate": round(within_1 / n, 3),
+        "mean_delta": round(sum(deltas) / n, 2),
+        "mean_abs_delta": round(sum(abs(d) for d in deltas) / n, 2),
+        "max_abs_delta": max(abs(d) for d in deltas),
+    }
+
+
+def upsert_weather_observations_daily(
+    db_path: Path,
+    *,
+    city_key: str,
+    rows: list[tuple[str, Optional[float], Optional[float]]],
+    source: str = "open_meteo_archive",
+    fetched_at_utc: str,
+) -> int:
+    """Bulk upsert daily weather observations. rows = [(date_local, precip_mm, windspeed_mph), ...]."""
+    ensure_schema(db_path)
+    wrote = 0
+    with connect(db_path) as conn:
+        for date_local, precip_mm, wind_mph in rows:
+            conn.execute(
+                """
+                INSERT INTO weather_observations_daily
+                  (city_key, date_local, precipitation_mm, windspeed_max_mph, source, fetched_at_utc)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(city_key, date_local) DO UPDATE SET
+                  precipitation_mm=excluded.precipitation_mm,
+                  windspeed_max_mph=excluded.windspeed_max_mph,
+                  source=excluded.source,
+                  fetched_at_utc=excluded.fetched_at_utc;
+                """,
+                (city_key, date_local, precip_mm, wind_mph, source, fetched_at_utc),
+            )
+            wrote += 1
+    return wrote
+
+
+def fetch_weather_observations_daily(
+    db_path: Path,
+    *,
+    city_key: str,
+    dates: list[str],
+) -> Dict[str, Dict[str, float]]:
+    """Fetch daily weather obs for a list of dates. Returns {date: {precipitation_mm, windspeed_max_mph}}."""
+    ensure_schema(db_path)
+    if not dates:
+        return {}
+    with connect(db_path) as conn:
+        placeholders = ",".join("?" for _ in dates)
+        rows = conn.execute(
+            f"""
+            SELECT date_local, precipitation_mm, windspeed_max_mph
+            FROM weather_observations_daily
+            WHERE city_key = ? AND date_local IN ({placeholders})
+            """,
+            [city_key] + dates,
+        ).fetchall()
+    result: Dict[str, Dict[str, float]] = {}
+    for date_local, precip_mm, wind_mph in rows:
+        result[date_local] = {
+            "precipitation_mm": precip_mm if precip_mm is not None else 0.0,
+            "windspeed_max_mph": wind_mph if wind_mph is not None else 10.0,
+        }
+    return result
 
 
 def upsert_forecast_snapshot(
@@ -721,20 +896,26 @@ def upsert_error_model(
     n_samples: int,
     pmf: Dict[int, float],
     updated_at_utc: str,
+    valid_from_utc: Optional[str] = None,
+    training_end_date: Optional[str] = None,
 ) -> None:
     ensure_schema(db_path)
     pmf_json = json.dumps({str(k): v for k, v in pmf.items()}, separators=(",", ":"), ensure_ascii=False)
+    vf = valid_from_utc or updated_at_utc
     with connect(db_path) as conn:
         conn.execute(
             """
             INSERT INTO error_models(
-              city_key, month, snapshot_hour_local, source, n_samples, pmf_json, updated_at_utc
+              city_key, month, snapshot_hour_local, source, n_samples, pmf_json,
+              updated_at_utc, valid_from_utc, training_end_date
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city_key, month, snapshot_hour_local, source) DO UPDATE SET
               n_samples=excluded.n_samples,
               pmf_json=excluded.pmf_json,
-              updated_at_utc=excluded.updated_at_utc;
+              updated_at_utc=excluded.updated_at_utc,
+              valid_from_utc=excluded.valid_from_utc,
+              training_end_date=excluded.training_end_date;
             """,
             (
                 city_key,
@@ -744,6 +925,8 @@ def upsert_error_model(
                 int(n_samples),
                 pmf_json,
                 updated_at_utc,
+                vf,
+                training_end_date,
             ),
         )
 
@@ -940,6 +1123,57 @@ def fetch_error_model(
     pmf_raw = json.loads(pmf_json) if pmf_json else {}
     pmf = {int(k): float(v) for k, v in pmf_raw.items()}
     return {"n_samples": int(n_samples), "pmf": pmf, "updated_at_utc": updated_at_utc}
+
+
+def fetch_error_model_at_time(
+    db_path: Path,
+    *,
+    city_key: str,
+    month: int,
+    snapshot_hour_local: int,
+    source: str,
+    as_of_utc: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch error model that was available at as_of_utc (versioned).
+
+    Returns the most recent model whose valid_from_utc <= as_of_utc.
+    Falls back to fetch_error_model() if no valid_from_utc data exists.
+    """
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT n_samples, pmf_json, updated_at_utc, valid_from_utc
+            FROM error_models
+            WHERE city_key=? AND month=? AND snapshot_hour_local=? AND source=?
+              AND valid_from_utc IS NOT NULL
+              AND valid_from_utc <= ?
+            ORDER BY valid_from_utc DESC
+            LIMIT 1
+            """,
+            (city_key, int(month), int(snapshot_hour_local), str(source), as_of_utc),
+        ).fetchone()
+
+    if not row:
+        # Fall back to unversioned lookup
+        return fetch_error_model(
+            db_path,
+            city_key=city_key,
+            month=month,
+            snapshot_hour_local=snapshot_hour_local,
+            source=source,
+        )
+
+    n_samples, pmf_json, updated_at_utc, valid_from_utc = row
+    pmf_raw = json.loads(pmf_json) if pmf_json else {}
+    pmf = {int(k): float(v) for k, v in pmf_raw.items()}
+    return {
+        "n_samples": int(n_samples),
+        "pmf": pmf,
+        "updated_at_utc": updated_at_utc,
+        "valid_from_utc": valid_from_utc,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -61,32 +61,33 @@ except ImportError:
 DEFAULT_QUANTILES = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 
 # Feature names in order
+# v2: Removed lead_hours (always constant 18), smoke_present (only 5 obs).
+#     Added forecast_anomaly (deviation from climatological monthly avg).
 FEATURE_NAMES = [
     # Core temporal features
     "month",
     "day_of_year",
     "forecast_high",
     "nbm_spread",
-    "lead_hours",
-    # Weather context features (from forecast_context_json)
+    # Weather context features (from archive or forecast_context_json)
     "precip_prob",
     "cloud_cover",
     "wind_speed",
     # Recent performance features
     "prev_day_error",
     "rolling_7d_bias",
-    # Snow features (Phase 2)
+    # Snow features
     "snow_depth_inches",
     "has_snow",
-    # SST features (Phase 3)
+    # SST features
     "sst_f",
     "sst_anomaly_f",
-    # Visibility features (Phase 4)
+    # Visibility features
     "visibility_min_miles",
-    # Soil moisture proxy features (Phase 5)
+    # Soil moisture proxy
     "precip_last_3d_mm",
-    # Smoke features (Phase 6)
-    "smoke_present",
+    # Forecast anomaly: forecast_high minus climatological monthly avg
+    "forecast_anomaly",
 ]
 
 
@@ -447,18 +448,19 @@ def prepare_features(
     forecast_high: int,
     target_date: datetime,
     nbm_spread: Optional[int] = None,
-    lead_hours: int = 18,
     precip_prob: float = 0.0,
     cloud_cover: float = 0.5,
     wind_speed: float = 10.0,
     prev_day_error: int = 0,
     rolling_7d_bias: float = 0.0,
-    # New weather features
     snow_depth_inches: float = 0.0,
     sst_f: Optional[float] = None,
     sst_anomaly_f: Optional[float] = None,
     visibility_min_miles: Optional[float] = None,
     precip_last_3d_mm: float = 0.0,
+    forecast_anomaly: Optional[float] = None,
+    # Deprecated params kept for backward compat — ignored
+    lead_hours: int = 18,
     smoke_present: bool = False,
 ) -> Dict[str, float]:
     """
@@ -468,7 +470,6 @@ def prepare_features(
         forecast_high: Point forecast temperature
         target_date: Target date
         nbm_spread: NBM p90 - p10 spread (defaults to climatological estimate)
-        lead_hours: Hours until settlement
         precip_prob: Precipitation probability (0-1)
         cloud_cover: Cloud cover fraction (0-1)
         wind_speed: Wind speed (mph)
@@ -479,7 +480,7 @@ def prepare_features(
         sst_anomaly_f: SST anomaly from seasonal normal
         visibility_min_miles: Minimum visibility in miles (None if not available)
         precip_last_3d_mm: Precipitation total over last 3 days (mm)
-        smoke_present: Whether smoke is present (for West Coast cities)
+        forecast_anomaly: Forecast high minus climatological monthly avg
 
     Returns:
         Feature dictionary
@@ -499,19 +500,24 @@ def prepare_features(
     has_snow = 1.0 if snow_depth_inches > 0 else 0.0
 
     # Default values for optional features
-    # SST: Use 60F as neutral default (roughly annual average)
     sst_value = float(sst_f) if sst_f is not None else 60.0
     sst_anomaly_value = float(sst_anomaly_f) if sst_anomaly_f is not None else 0.0
-
-    # Visibility: Use 10 miles (clear) as default
     visibility_value = float(visibility_min_miles) if visibility_min_miles is not None else 10.0
+
+    # Compute forecast anomaly from climatology if not provided
+    if forecast_anomaly is None:
+        # Rough US monthly avg highs (national average, °F)
+        monthly_clim = {
+            1: 42, 2: 46, 3: 54, 4: 64, 5: 74, 6: 82,
+            7: 86, 8: 85, 9: 78, 10: 67, 11: 55, 12: 44,
+        }
+        forecast_anomaly = float(forecast_high) - monthly_clim.get(month, 65)
 
     return {
         "month": float(month),
         "day_of_year": float(day_of_year),
         "forecast_high": float(forecast_high),
         "nbm_spread": float(nbm_spread),
-        "lead_hours": float(lead_hours),
         "precip_prob": float(precip_prob),
         "cloud_cover": float(cloud_cover),
         "wind_speed": float(wind_speed),
@@ -523,7 +529,7 @@ def prepare_features(
         "sst_anomaly_f": sst_anomaly_value,
         "visibility_min_miles": visibility_value,
         "precip_last_3d_mm": float(precip_last_3d_mm),
-        "smoke_present": 1.0 if smoke_present else 0.0,
+        "forecast_anomaly": float(forecast_anomaly),
     }
 
 

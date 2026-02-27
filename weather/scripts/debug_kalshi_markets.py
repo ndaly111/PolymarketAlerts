@@ -26,6 +26,7 @@ from weather.lib.kalshi_weather import (
     best_bid_ask_from_snapshot_row,
     best_buy_prices_from_snapshot_row,
     parse_event_spec_from_title,
+    parse_event_spec_from_ticker,
     prob_event,
 )
 
@@ -204,6 +205,8 @@ def format_city_message(
 
         # Parse event spec from title
         spec = parse_event_spec_from_title(clean_title)
+        if not spec:
+            spec = parse_event_spec_from_ticker(market_ticker)
         if not spec:
             # Still show unparseable markets in debug mode
             market_rows.append({

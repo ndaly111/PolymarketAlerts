@@ -47,7 +47,7 @@ from weather.backtesting.metrics import (
 )
 from weather.lib import db as db_lib
 from weather.lib.fair import normalize_pmf, shift_pmf, summarize_pmf
-from weather.lib.kalshi_weather import parse_event_spec_from_title, prob_event
+from weather.lib.kalshi_weather import parse_event_spec_from_title, parse_event_spec_from_ticker, prob_event
 from weather.lib.fees import FeeSchedule, ev_yes, ev_no
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,8 +96,7 @@ def run_simple_backtest(
                          This tests whether our probability distributions are well-calibrated.
     """
     loader = AsOfDataLoader(db_path)
-    fees = FeeSchedule(open_fee_cents=fee_cents)
-    fee_open = fees.open_fee_dollars()
+    fees = FeeSchedule()
 
     # Get dates with both forecast and observation data
     dates = loader.get_date_range_with_data(city_key, start_date, end_date)
@@ -115,12 +114,13 @@ def run_simple_backtest(
     for date in dates:
         month = int(date.split("-")[1])
 
-        # Get latest forecast for this date
-        forecast = db_lib.fetch_latest_forecast_snapshot(
-            db_path,
-            city_key=city_key,
-            target_date_local=date,
-            source=forecast_source,
+        # Compute as-of time for proper temporal semantics
+        from weather.backtesting.data_loader import trading_time_to_utc
+        as_of_utc = trading_time_to_utc(date, trading_hour, 10, timezone)
+
+        # Get forecast available AT trading time (not latest)
+        forecast = loader.get_forecast_at_time(
+            city_key, date, as_of_utc, forecast_source,
         )
 
         if not forecast:
@@ -129,13 +129,10 @@ def run_simple_backtest(
 
         forecast_high = int(forecast["forecast_high_f"])
 
-        # Get error model
-        error_model = db_lib.fetch_error_model(
-            db_path,
-            city_key=city_key,
-            month=month,
-            snapshot_hour_local=error_model_hour,
-            source=error_model_source,
+        # Get error model available AT trading time (versioned)
+        error_model = loader.get_error_model_at_time(
+            city_key, month, error_model_hour,
+            error_model_source, as_of_utc,
         )
 
         if not error_model:
@@ -167,23 +164,8 @@ def run_simple_backtest(
         if calibration_only:
             continue  # Skip Kalshi market analysis
 
-        # Get Kalshi markets
-        snap_time = db_lib.fetch_latest_kalshi_weather_snapshot_time(
-            db_path,
-            city_key=city_key,
-            target_date_local=date,
-        )
-
-        if not snap_time:
-            skipped["no_markets"] += 1
-            continue
-
-        markets = list(db_lib.fetch_kalshi_weather_markets_at_snapshot(
-            db_path,
-            snapshot_time_utc=snap_time,
-            city_key=city_key,
-            target_date_local=date,
-        ))
+        # Get Kalshi markets available AT trading time (as-of semantics)
+        markets = loader.get_kalshi_market_at_time(city_key, date, as_of_utc)
 
         if not markets:
             skipped["no_markets"] += 1
@@ -205,6 +187,8 @@ def run_simple_backtest(
                 continue
 
             spec = parse_event_spec_from_title(title)
+            if not spec:
+                spec = parse_event_spec_from_ticker(row.get("market_ticker", ""))
             if not spec:
                 continue
 
@@ -250,14 +234,14 @@ def run_simple_backtest(
             else:
                 continue
 
-            # Calculate PnL if outcome known
+            # Calculate PnL if outcome known (7% fee on winning profit)
             if actual_outcome is not None:
                 bet_won = (best_side == "YES" and actual_outcome == 1) or \
                           (best_side == "NO" and actual_outcome == 0)
                 if bet_won:
-                    pnl = (1.0 - best_price) - fee_open
+                    pnl = (1.0 - best_price) * (1.0 - fees.profit_fee_rate)
                 else:
-                    pnl = -best_price - fee_open
+                    pnl = -best_price
 
                 predictions.append({
                     "date": date,

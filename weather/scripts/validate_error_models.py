@@ -80,15 +80,33 @@ def fetch_forecast_observed_pairs(
     return rows
 
 
+# Months that share similar forecast error characteristics
+ADJACENT_MONTH_GROUPS = {
+    1: [12, 1, 2], 2: [1, 2, 3], 3: [2, 3, 4], 4: [3, 4, 5],
+    5: [4, 5, 6], 6: [5, 6, 7], 7: [6, 7, 8], 8: [7, 8, 9],
+    9: [8, 9, 10], 10: [9, 10, 11], 11: [10, 11, 12], 12: [11, 12, 1],
+}
+
+
 def build_error_pmf_from_data(
     pairs: List[Tuple[str, int, int, int]],
     month: int,
+    pool_adjacent: bool = True,
 ) -> Tuple[Dict[int, float], float, float, int]:
     """
     Build error PMF from train data for a specific month.
+
+    When pool_adjacent=True (default), pools data from adjacent months
+    (e.g., month 1 uses Dec+Jan+Feb) to increase sample sizes ~3x.
+
     Returns (pmf, mean, std, n_samples).
     """
-    errors = [obs - fcst for (date, m, fcst, obs) in pairs if m == month]
+    if pool_adjacent:
+        target_months = ADJACENT_MONTH_GROUPS.get(month, [month])
+        errors = [obs - fcst for (date, m, fcst, obs) in pairs if m in target_months]
+    else:
+        errors = [obs - fcst for (date, m, fcst, obs) in pairs if m == month]
+
     if not errors:
         return {}, 0.0, 0.0, 0
 
@@ -97,10 +115,62 @@ def build_error_pmf_from_data(
     var = sum((e - mean) ** 2 for e in errors) / n
     std = math.sqrt(var) if var > 0 else 0.001
 
-    # Build Gaussian PMF with tail cutoff (matching production approach)
-    pmf = _gaussian_pmf_with_tail_cutoff(mean, std, min_tail_prob=0.01)
+    # Build Gaussian KDE-smoothed PMF for better tail behavior
+    pmf = _kde_smoothed_pmf(errors, bandwidth=None)
 
     return pmf, mean, std, n
+
+
+def _kde_smoothed_pmf(
+    errors: List[int],
+    bandwidth: Optional[float] = None,
+    min_tail_prob: float = 0.005,
+) -> Dict[int, float]:
+    """
+    Build discrete PMF using Gaussian Kernel Density Estimation.
+
+    KDE produces smoother distributions than raw histograms, especially
+    in the tails, which matters for pricing tail contracts.
+
+    Falls back to Gaussian PMF if sample size < 30.
+    """
+    n = len(errors)
+    if n == 0:
+        return {}
+
+    mean = sum(errors) / n
+    var = sum((e - mean) ** 2 for e in errors) / n
+    std = math.sqrt(var) if var > 0 else 1.0
+
+    # For very small samples, fall back to parametric Gaussian
+    if n < 30:
+        return _gaussian_pmf_with_tail_cutoff(mean, std, min_tail_prob)
+
+    # Silverman's rule for bandwidth selection
+    if bandwidth is None:
+        iqr = sorted(errors)[int(0.75 * n)] - sorted(errors)[int(0.25 * n)]
+        bandwidth = 0.9 * min(std, iqr / 1.34) * (n ** -0.2)
+        bandwidth = max(bandwidth, 0.5)  # Floor at 0.5°F
+
+    # Compute KDE over integer grid
+    lo = min(errors) - 5
+    hi = max(errors) + 5
+    pmf: Dict[int, float] = {}
+
+    for k in range(lo, hi + 1):
+        density = sum(
+            math.exp(-0.5 * ((k - e) / bandwidth) ** 2)
+            for e in errors
+        ) / (n * bandwidth * math.sqrt(2 * math.pi))
+        if density > 0:
+            pmf[k] = density
+
+    # Normalize
+    total = sum(pmf.values())
+    if total > 0:
+        pmf = {k: v / total for k, v in pmf.items()}
+
+    return pmf
 
 
 def _gaussian_pmf_with_tail_cutoff(
@@ -285,13 +355,14 @@ def main() -> int:
             print("  Skipping (insufficient data)")
             continue
 
-        # Build models from train data (one per month)
+        # Build models from train data (one per month, pooling adjacent months)
         models = {}
         for month in range(1, 13):
-            pmf, mean, std, n = build_error_pmf_from_data(train_pairs, month)
+            pmf, mean, std, n = build_error_pmf_from_data(train_pairs, month, pool_adjacent=True)
             if n >= 10:
                 models[month] = pmf
-                print(f"  Month {month:2d}: n={n:3d}, mean={mean:+.2f}, std={std:.2f}")
+                adj = ADJACENT_MONTH_GROUPS.get(month, [month])
+                print(f"  Month {month:2d}: n={n:3d} (pooled {adj}), mean={mean:+.2f}, std={std:.2f}")
 
         # Evaluate on test data
         results = evaluate_calibration(test_pairs, models)

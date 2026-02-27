@@ -131,11 +131,11 @@ class AsOfDataLoader:
         """
         Get error model that was available at as_of_utc.
 
-        In practice, error models are updated infrequently (monthly or less),
-        so we return the current model if it was trained before as_of_utc.
+        Uses temporal versioning via valid_from_utc column to return the
+        most recent model that existed at the decision point, preventing
+        look-ahead bias from models trained on future data.
 
-        For true temporal fidelity, we would need to version error models.
-        This implementation assumes error models are stable over the backtest period.
+        Falls back to unversioned lookup if valid_from_utc data not available.
 
         Args:
             city_key: City identifier
@@ -147,14 +147,13 @@ class AsOfDataLoader:
         Returns:
             Error model dict with PMF, or None
         """
-        # For now, return current error model
-        # TODO: Add versioning to error_models table for true as-of semantics
-        return db_lib.fetch_error_model(
+        return db_lib.fetch_error_model_at_time(
             self.db_path,
             city_key=city_key,
             month=month,
             snapshot_hour_local=snapshot_hour_local,
             source=source,
+            as_of_utc=as_of_utc,
         )
 
     def get_kalshi_market_at_time(

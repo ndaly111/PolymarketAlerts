@@ -167,15 +167,42 @@ def compute_precip_accumulation(
     return result
 
 
+def load_climatology(
+    db_path: Path,
+    city_key: str,
+    forecast_source: str,
+) -> Dict[int, float]:
+    """
+    Compute monthly climatological average forecast high for a city.
+    Returns {month: avg_forecast_high}.
+    """
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        """
+        SELECT CAST(strftime('%m', target_date_local) AS INTEGER) as month,
+               AVG(forecast_high_f)
+        FROM forecast_snapshots
+        WHERE city_key = ? AND source = ?
+        GROUP BY month
+        """,
+        (city_key, forecast_source),
+    ).fetchall()
+    conn.close()
+    return {int(m): float(avg) for m, avg in rows if avg is not None}
+
+
 def load_training_data(
     db_path: Path,
     city_key: str,
     start_date: str,
     end_date: str,
-    forecast_source: str = "open_meteo",
+    forecast_source: str = "mos_gfs_18z_archive",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Load training data: forecasts, observations, and features.
+
+    Uses weather_observations_daily for precip/wind when forecast_context_json
+    is NULL (which is 100% of MOS GFS archive rows).
 
     Returns:
         (X, y, dates) where:
@@ -210,10 +237,9 @@ def load_training_data(
     if not rows:
         return np.array([]), np.array([]), []
 
-    # Extract dates and contexts first
+    # Extract dates and contexts
     dates = [row[0] for row in rows]
     contexts_by_date = {}
-    precip_by_date = {}
 
     for row in rows:
         date_str = row[0]
@@ -225,20 +251,37 @@ def load_training_data(
             except (json.JSONDecodeError, TypeError):
                 pass
         contexts_by_date[date_str] = context
-        # Track precipitation for accumulation calculation
-        precip_by_date[date_str] = context.get("precip_total_mm", 0) if context else 0
 
     # Load additional weather features from database
     weather_features = load_weather_features(Path(db_lib.default_paths(ROOT).db_path), city_key, dates)
 
+    # Load daily weather observations (precip, wind) from backfilled archive data
+    daily_obs = db_lib.fetch_weather_observations_daily(
+        Path(db_lib.default_paths(ROOT).db_path), city_key=city_key, dates=dates
+    )
+
+    # Build precipitation map from archive data for accumulation
+    precip_by_date: Dict[str, float] = {}
+    for d in dates:
+        obs = daily_obs.get(d, {})
+        ctx = contexts_by_date.get(d, {})
+        # Prefer forecast_context_json if available, otherwise use archive
+        if ctx and "precip_total_mm" in ctx:
+            precip_by_date[d] = ctx["precip_total_mm"]
+        else:
+            precip_by_date[d] = obs.get("precipitation_mm", 0.0)
+
     # Compute precipitation accumulation
     precip_accum = compute_precip_accumulation(dates, precip_by_date, lookback_days=3)
+
+    # Load climatology for forecast_anomaly
+    climatology = load_climatology(Path(db_lib.default_paths(ROOT).db_path), city_key, forecast_source)
 
     # Build feature arrays
     X_list = []
     y_list = []
     prev_error = 0
-    rolling_errors = []
+    rolling_errors: List[float] = []
 
     for i, (date_str, forecast_high, observed_tmax, snapshot_hour, context_json) in enumerate(rows):
         # Compute error: observed - forecast
@@ -246,35 +289,51 @@ def load_training_data(
 
         # Parse date
         target_date = datetime.strptime(date_str, "%Y-%m-%d")
+        month = target_date.month
 
-        # Get context for this date
+        # Get forecast context and archive obs for this date
         context = contexts_by_date.get(date_str, {})
+        obs = daily_obs.get(date_str, {})
 
-        # Extract weather context features (stored as percentages, convert to 0-1)
-        precip_prob = context.get("precip_prob_max", 0) / 100.0 if context else 0.0
-        cloud_cover = context.get("cloud_cover_avg", 50) / 100.0 if context else 0.5
-        wind_speed = context.get("wind_speed_avg", 10) if context else 10.0
+        # Weather context: prefer forecast_context_json, fall back to archive observations
+        if context and context.get("precip_prob_max") is not None:
+            precip_prob = context["precip_prob_max"] / 100.0
+        else:
+            # Binary rain proxy from observed precipitation
+            precip_prob = 1.0 if obs.get("precipitation_mm", 0) > 0.5 else 0.0
+
+        if context and context.get("cloud_cover_avg") is not None:
+            cloud_cover = context["cloud_cover_avg"] / 100.0
+        else:
+            cloud_cover = 0.5  # Keep default when no data
+
+        if context and context.get("wind_speed_avg") is not None:
+            wind_speed = context["wind_speed_avg"]
+        else:
+            wind_speed = obs.get("windspeed_max_mph", 10.0)
 
         # Get additional weather features
         wf = weather_features.get(date_str, {})
+
+        # Compute forecast anomaly
+        clim_avg = climatology.get(month, 65.0)
+        forecast_anomaly = float(forecast_high) - clim_avg
 
         # Compute features
         features = prepare_features(
             forecast_high=forecast_high,
             target_date=target_date,
-            lead_hours=max(0, 18 - snapshot_hour),  # Approximate lead time
             precip_prob=precip_prob,
             cloud_cover=cloud_cover,
             wind_speed=wind_speed,
             prev_day_error=prev_error,
             rolling_7d_bias=np.mean(rolling_errors[-7:]) if rolling_errors else 0.0,
-            # New weather features
             snow_depth_inches=wf.get("snow_depth_inches", 0.0),
             sst_f=wf.get("sst_f"),
             sst_anomaly_f=wf.get("sst_anomaly_f"),
             visibility_min_miles=wf.get("visibility_min_miles"),
             precip_last_3d_mm=precip_accum.get(date_str, 0.0),
-            smoke_present=wf.get("smoke_present", False),
+            forecast_anomaly=forecast_anomaly,
         )
 
         # Convert to array
@@ -284,7 +343,7 @@ def load_training_data(
 
         # Update tracking
         prev_error = error
-        rolling_errors.append(error)
+        rolling_errors.append(float(error))
 
     return np.array(X_list), np.array(y_list), dates
 
@@ -529,8 +588,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--forecast-source",
-        default="open_meteo",
-        help="Forecast source to train on (default: open_meteo)",
+        default="mos_gfs_18z_archive",
+        help="Forecast source to train on (default: mos_gfs_18z_archive)",
     )
     parser.add_argument(
         "--val-months",

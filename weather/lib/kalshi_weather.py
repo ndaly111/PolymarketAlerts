@@ -91,6 +91,36 @@ def parse_event_spec_from_title(title: str) -> Optional[EventSpec]:
     return None
 
 
+# Regex patterns for market ticker suffixes
+_RX_TICKER_B = re.compile(r"-B(\d+)\.5$")   # B15.5 → bracket 15-16
+_RX_TICKER_T = re.compile(r"-T(\d+)$")      # T21 → above 21
+
+
+def parse_event_spec_from_ticker(market_ticker: str) -> Optional[EventSpec]:
+    """Parse a Kalshi market ticker suffix into an EventSpec.
+
+    Handles:
+      - "-B15.5"  → between 15 and 16
+      - "-T21"    → ge 21
+
+    Returns None if the ticker doesn't match a known pattern.
+    """
+    t = (market_ticker or "").strip()
+    if not t:
+        return None
+
+    m = _RX_TICKER_B.search(t)
+    if m:
+        a = int(m.group(1))
+        return EventSpec(kind="between", a=a, b=a + 1)
+
+    m = _RX_TICKER_T.search(t)
+    if m:
+        return EventSpec(kind="ge", a=int(m.group(1)))
+
+    return None
+
+
 def prob_event(pmf_high_f: Dict[int, float], spec: EventSpec) -> float:
     """Map a discrete PMF over TMAX to event probability q."""
     if not pmf_high_f:

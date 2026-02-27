@@ -166,7 +166,7 @@ def generate_training_data_from_backtest(
         - metadata: list of dicts with trade details
     """
     from weather.lib.fair import normalize_pmf, shift_pmf
-    from weather.lib.kalshi_weather import parse_event_spec_from_title, prob_event
+    from weather.lib.kalshi_weather import parse_event_spec_from_title, parse_event_spec_from_ticker, prob_event
 
     import yaml
     config_path = ROOT / "weather" / "config" / "cities.yml"
@@ -295,6 +295,9 @@ def generate_training_data_from_backtest(
                     continue
 
                 event_spec = parse_event_spec_from_title(title)
+                if not event_spec:
+                    ticker = row.get("market_ticker") or row.get("ticker", "")
+                    event_spec = parse_event_spec_from_ticker(ticker)
                 if not event_spec:
                     continue
 

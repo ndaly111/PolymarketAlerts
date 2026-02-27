@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 from weather.lib import db as db_lib
 from weather.lib.fees import FeeSchedule
 from weather.lib.fair import normalize_pmf, shift_pmf
-from weather.lib.kalshi_weather import EventSpec, parse_event_spec_from_title, prob_event
+from weather.lib.kalshi_weather import EventSpec, parse_event_spec_from_title, parse_event_spec_from_ticker, prob_event
 
 DB_PATH = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 MODEL_DIR = ROOT / "weather" / "models"
@@ -622,6 +622,9 @@ def scan_city(
             continue
 
         event_spec = parse_event_spec_from_title(title)
+        if not event_spec:
+            ticker = row.get("market_ticker") or row.get("ticker", "")
+            event_spec = parse_event_spec_from_ticker(ticker)
         if not event_spec:
             continue
 

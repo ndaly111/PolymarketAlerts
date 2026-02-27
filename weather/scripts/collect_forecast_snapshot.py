@@ -237,6 +237,7 @@ def main() -> int:
                     continue
 
             # Fetch forecast based on source
+            forecast_context = None
             if forecast_source.startswith("open_meteo"):
                 # Use Open-Meteo API
                 forecast = om_lib.get_daily_high_forecast(
@@ -254,6 +255,14 @@ def main() -> int:
                 }
                 points_url = f"open_meteo:{c.lat},{c.lon}"
                 forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={c.lat}&longitude={c.lon}"
+
+                # Fetch weather context (precip prob, cloud cover, wind speed)
+                try:
+                    forecast_context = om_lib.get_daily_forecast_context(
+                        s, c.lat, c.lon, target_date_local, c.tz
+                    )
+                except Exception as ctx_err:
+                    print(f"  [warn] Failed to get forecast context: {ctx_err}", file=sys.stderr)
 
             else:
                 # Use NWS API
@@ -295,6 +304,7 @@ def main() -> int:
                 forecast_url=forecast_url,
                 qc_flags=qc,
                 raw=raw_trimmed,
+                forecast_context=forecast_context,
             )
             wrote += 1
             print(

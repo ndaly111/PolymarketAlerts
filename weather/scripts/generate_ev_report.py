@@ -53,6 +53,7 @@ from weather.lib.fees import FeeSchedule, ev_no, ev_yes
 from weather.lib.kalshi_weather import (
     best_buy_prices_from_snapshot_row,
     parse_event_spec_from_title,
+    parse_event_spec_from_ticker,
     prob_event,
 )
 from weather.backtesting.data_loader import AsOfDataLoader, trading_time_to_utc
@@ -262,6 +263,8 @@ def compute_ev_for_city(
             continue
 
         spec = parse_event_spec_from_title(title)
+        if not spec:
+            spec = parse_event_spec_from_ticker(row.get("market_ticker", ""))
         if not spec:
             continue
 

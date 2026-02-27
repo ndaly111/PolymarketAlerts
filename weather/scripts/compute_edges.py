@@ -35,6 +35,7 @@ from weather.lib.kalshi_weather import (
     best_buy_prices_from_snapshot_row,
     best_bid_ask_from_snapshot_row,
     parse_event_spec_from_title,
+    parse_event_spec_from_ticker,
     prob_event,
 )
 
@@ -603,6 +604,9 @@ def main() -> int:
                 continue
 
             spec = parse_event_spec_from_title(title)
+            if not spec:
+                # Fallback: try parsing from market ticker (handles -B15.5, -T21 patterns)
+                spec = parse_event_spec_from_ticker(row.get("market_ticker", ""))
             if not spec:
                 drops["unparsed"] += 1
                 _audit_append(
