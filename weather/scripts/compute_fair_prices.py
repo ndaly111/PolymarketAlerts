@@ -1,35 +1,65 @@
 #!/usr/bin/env python3
 """Compute a calibrated distribution for today's high temperature.
 
-Step 2 (foundation):
-  - Read today's forecast snapshot (forecast high) from the DB
-  - Read the month-of-year error PMF for the same snapshot hour
-  - Produce an observed-high PMF = forecast_high + error
-  - Write a small JSON artifact per city to:
-      weather/outputs/fair_prices/YYYY-MM-DD/{CITY_KEY}.json
+Uses a tiered approach:
+  1. PRIMARY: ML quantile regression model (LightGBM) predicting error quantiles
+     conditioned on 17 features (weather context, recent bias, synoptic regime)
+  2. SECONDARY: Multi-model spread from Open-Meteo (HRRR, ECMWF, GFS) + NWS
+  3. FALLBACK: Static monthly error PMF (legacy approach)
+  4. LAST RESORT: Gaussian with std=4°F
+
+The ML model and multi-model spread are blended via ProbabilityLadder, then
+converted back to a PMF dict for backward compatibility with compute_edges.py.
+
+Output:
+  weather/outputs/fair_prices/{source}/{YYYY-MM-DD}/{CITY_KEY}.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import yaml
 
-import math
-
 from weather.lib import db as db_lib
 from weather.lib.fair import adjust_pmf_with_progress, normalize_pmf, shift_pmf, summarize_pmf
+from weather.lib.probability_ladder import (
+    ProbabilityLadder,
+    apply_calibration,
+    blend_ladders,
+    from_percentiles,
+    from_pmf,
+    from_point_forecast_and_error_pmf,
+)
+
+# ML model imports — optional, graceful fallback if not installed
+try:
+    from weather.lib.ml_models import (
+        QuantileForestModel,
+        SimpleFallbackModel,
+        get_model,
+        prepare_features,
+    )
+    HAS_ML = True
+except ImportError:
+    HAS_ML = False
 
 
-def _build_fallback_gaussian_pmf(center: int, std: float = 4.0, min_tail_prob: float = 0.01) -> Dict[int, float]:
-    """Build a Gaussian PMF when no error model exists. Default std=4°F is typical NWS error."""
+DEFAULT_FALLBACK_STD = 4.0  # Typical NWS same-day forecast error
+
+
+def _build_fallback_gaussian_pmf(center: int, std: float = DEFAULT_FALLBACK_STD, min_tail_prob: float = 0.01) -> Dict[int, float]:
+    """Build a Gaussian PMF. std is data-driven when available, else 4°F."""
+    std = max(1.5, std)  # Floor: never narrower than 1.5°F
     denom = 2.0 * (std ** 2)
 
     def gaussian_density(k: int) -> float:
@@ -58,9 +88,198 @@ def _build_fallback_gaussian_pmf(center: int, std: float = 4.0, min_tail_prob: f
     return {k: v / total for k, v in sorted(out.items())}
 
 
+def _get_multi_model_spread(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+) -> Tuple[Optional[int], List[Dict[str, Any]]]:
+    """Query all forecast sources for a city/date and compute model spread.
+
+    Returns (spread, model_details) where spread is max(highs) - min(highs)
+    or None if fewer than 2 sources found.
+    """
+    conn = db_lib.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT source, forecast_high_f, snapshot_time_utc
+            FROM forecast_snapshots
+            WHERE city_key = ? AND target_date_local = ?
+            ORDER BY snapshot_time_utc DESC
+            """,
+            (city_key, target_date_local),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return None, []
+
+    # Deduplicate: keep the latest snapshot per source
+    seen_sources: Dict[str, Dict[str, Any]] = {}
+    for source, high_f, snap_time in rows:
+        if source not in seen_sources:
+            seen_sources[source] = {
+                "source": source,
+                "forecast_high_f": int(high_f),
+                "snapshot_time_utc": snap_time,
+            }
+
+    details = list(seen_sources.values())
+    if len(details) < 2:
+        return None, details
+
+    highs = [d["forecast_high_f"] for d in details]
+    spread = max(highs) - min(highs)
+    return spread, details
+
+
+def _get_prev_day_error(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+    forecast_source: str,
+) -> Optional[int]:
+    """Get yesterday's forecast error (observed - forecast)."""
+    try:
+        dt = datetime.strptime(target_date_local, "%Y-%m-%d")
+        yesterday = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+    conn = db_lib.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT o.tmax_f - f.forecast_high_f
+            FROM observed_cli o
+            JOIN forecast_snapshots f
+              ON f.city_key = o.city_key
+             AND f.target_date_local = o.date_local
+             AND f.source = ?
+            WHERE o.city_key = ?
+              AND o.date_local = ?
+            ORDER BY f.snapshot_time_utc DESC
+            LIMIT 1
+            """,
+            (forecast_source, city_key, yesterday),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return int(row[0]) if row else None
+
+
+def _get_rolling_bias(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+    forecast_source: str,
+    window_days: int = 7,
+) -> Optional[float]:
+    """Get rolling N-day forecast bias (mean of observed - forecast)."""
+    try:
+        dt = datetime.strptime(target_date_local, "%Y-%m-%d")
+        start = (dt - timedelta(days=window_days)).strftime("%Y-%m-%d")
+        end = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+    conn = db_lib.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT o.tmax_f - f.forecast_high_f
+            FROM observed_cli o
+            JOIN forecast_snapshots f
+              ON f.city_key = o.city_key
+             AND f.target_date_local = o.date_local
+             AND f.source = ?
+            WHERE o.city_key = ?
+              AND o.date_local BETWEEN ? AND ?
+            ORDER BY o.date_local DESC
+            """,
+            (forecast_source, city_key, start, end),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return None
+
+    errors = [int(r[0]) for r in rows]
+    return sum(errors) / len(errors)
+
+
+def _extract_ml_features(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+    forecast_high: int,
+    forecast_source: str,
+    snap: Dict[str, Any],
+) -> Dict[str, float]:
+    """Extract all ML features from the database for a city/date.
+
+    Uses prepare_features() from ml_models.py with values gathered from DB.
+    """
+    dt = datetime.strptime(target_date_local, "%Y-%m-%d")
+
+    # Multi-model spread as nbm_spread proxy
+    spread, _ = _get_multi_model_spread(db_path, city_key, target_date_local)
+
+    # NBM percentile spread if available
+    nbm = db_lib.fetch_latest_nbm_forecast(
+        db_path, city_key=city_key, target_date_local=target_date_local
+    )
+    nbm_spread = None
+    if nbm and nbm.get("p90") is not None and nbm.get("p10") is not None:
+        nbm_spread = int(nbm["p90"]) - int(nbm["p10"])
+    elif spread is not None:
+        nbm_spread = spread
+
+    # Lead hours: from snapshot to ~18:00 local (approximate settlement time)
+    lead_hours = 18  # default
+    snap_time_str = snap.get("snapshot_time_utc", "")
+    if snap_time_str:
+        try:
+            snap_dt = datetime.fromisoformat(snap_time_str.replace("Z", "+00:00"))
+            # Settlement is roughly 18:00 local on target date
+            settle_local = datetime.strptime(target_date_local, "%Y-%m-%d").replace(
+                hour=18, tzinfo=ZoneInfo(snap.get("snapshot_tz", "America/New_York"))
+            )
+            diff = settle_local - snap_dt.astimezone(settle_local.tzinfo)
+            lead_hours = max(1, int(diff.total_seconds() / 3600))
+        except Exception:
+            pass
+
+    # Weather context from forecast_context_json
+    context = snap.get("forecast_context") or {}
+    precip_prob = float(context.get("precip_prob", context.get("precipitation_probability", 0.0)) or 0.0)
+    cloud_cover = float(context.get("cloud_cover", context.get("cloudcover", 0.5)) or 0.5)
+    wind_speed = float(context.get("wind_speed", context.get("windspeed_10m", 10.0)) or 10.0)
+
+    # Recent performance
+    prev_error = _get_prev_day_error(db_path, city_key, target_date_local, forecast_source)
+    rolling_bias = _get_rolling_bias(db_path, city_key, target_date_local, forecast_source)
+
+    return prepare_features(
+        forecast_high=forecast_high,
+        target_date=dt,
+        nbm_spread=nbm_spread,
+        lead_hours=lead_hours,
+        precip_prob=precip_prob,
+        cloud_cover=cloud_cover,
+        wind_speed=wind_speed,
+        prev_day_error=prev_error or 0,
+        rolling_7d_bias=rolling_bias or 0.0,
+    )
+
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
 DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
+DEFAULT_MODEL_DIR = ROOT / "weather" / "models"
 OUT_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 
 
@@ -87,6 +306,40 @@ def load_cities(config_path: Path) -> List[City]:
             )
         )
     return out
+
+
+def _build_ml_ladder(
+    ml_model: Any,
+    forecast_high: int,
+    features: Dict[str, float],
+) -> Optional[ProbabilityLadder]:
+    """Build a ProbabilityLadder from ML quantile regression predictions.
+
+    Returns None if the model produces degenerate output.
+    """
+    try:
+        p10, p25, p50, p75, p90 = ml_model.predict_observed_distribution(
+            forecast_high, features
+        )
+    except Exception as e:
+        print(f"  [warn] ML prediction failed: {e}")
+        return None
+
+    # Sanity check: quantiles must be monotonically non-decreasing
+    if p10 > p50 or p50 > p90 or p10 >= p90:
+        print(f"  [warn] ML model degenerate: p10={p10} p50={p50} p90={p90}")
+        return None
+
+    return from_percentiles(p10, p25, p50, p75, p90, source="ml_quantile")
+
+
+def _build_pmf_ladder(
+    forecast_high: int,
+    error_pmf: Dict[int, float],
+) -> ProbabilityLadder:
+    """Build a ProbabilityLadder from the static monthly error PMF (legacy path)."""
+    pmf_high = normalize_pmf(shift_pmf(error_pmf, forecast_high))
+    return from_pmf(pmf_high, source="error_pmf")
 
 
 def main() -> int:
@@ -123,11 +376,28 @@ def main() -> int:
         default=os.getenv("WEATHER_ENABLE_INTRADAY_ADJUSTMENT", "").lower() in ("1", "true", "yes"),
         help="Apply intraday progress adjustment to PMF (truncation + dispersion shrink).",
     )
+    p.add_argument(
+        "--use-ml-model",
+        action="store_true",
+        default=os.getenv("WEATHER_USE_ML_MODEL", "").lower() in ("1", "true", "yes"),
+        help="Use ML quantile regression models instead of static error PMF.",
+    )
+    p.add_argument(
+        "--model-dir",
+        default=os.getenv("WEATHER_MODEL_DIR", str(DEFAULT_MODEL_DIR)),
+        help="Directory containing trained ML model .pkl files.",
+    )
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
     fallback_source = os.getenv("WEATHER_FALLBACK_SOURCE", "").strip() or f"{args.forecast_source}_fallback"
     use_latest = args.use_latest
+    use_ml = args.use_ml_model and HAS_ML
+    model_dir = Path(args.model_dir)
+
+    if args.use_ml_model and not HAS_ML:
+        print("[warn] --use-ml-model requested but ML dependencies not available (numpy/lightgbm).")
+        print("[warn] Falling back to static error PMF.")
 
     # Error model source/hour - defaults to MOS archive if available, else same as forecast
     error_model_source = args.error_model_source.strip() or str(args.forecast_source)
@@ -141,6 +411,17 @@ def main() -> int:
     else:
         print(f"[info] Looking for snapshots: source={args.forecast_source}, hour={snapshot_hour_local}")
     print(f"[info] Error model source: {error_model_source}, hour={error_model_hour}")
+
+    # Pre-load ML models for all cities if ML mode is enabled
+    ml_models: Dict[str, Any] = {}
+    if use_ml:
+        print(f"[info] ML mode enabled. Loading models from {model_dir}")
+        for c in cities:
+            if args.city and c.key != args.city:
+                continue
+            ml_models[c.key] = get_model(c.key, model_dir)
+            model_type = type(ml_models[c.key]).__name__
+            print(f"  {c.key}: {model_type}")
 
     for c in cities:
         if args.city and c.key != args.city:
@@ -185,41 +466,137 @@ def main() -> int:
                 print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
             continue
 
-        # Try error model from specified source first, then fallback to forecast source
-        model = db_lib.fetch_error_model(
-            db_path,
-            city_key=c.key,
-            month=month,
-            snapshot_hour_local=error_model_hour,
-            source=error_model_source,
-        )
+        forecast_high = int(snap["forecast_high_f"])
+
+        # --- Build probability distribution (tiered approach) ---
+        model_source_type = "fallback_gaussian"
+        ml_quantiles = None
+        multi_model_info = None
+        error_model_n_samples = 0
+        error_model_updated_at_utc = None
         model_source = error_model_source
         model_snapshot_hour_local = error_model_hour
+        error_model_missing = True
+        ladder: Optional[ProbabilityLadder] = None
 
-        # If no model from error_model_source, try forecast source
-        if not model and error_model_source != str(args.forecast_source):
-            model = db_lib.fetch_error_model(
+        # Tier 1: ML quantile regression model
+        if use_ml and c.key in ml_models and ml_models[c.key].is_fitted:
+            features = _extract_ml_features(
+                db_path, c.key, target_date_local, forecast_high,
+                str(args.forecast_source), snap,
+            )
+            ml_ladder = _build_ml_ladder(ml_models[c.key], forecast_high, features)
+
+            if ml_ladder is not None:
+                ladder = ml_ladder
+                model_source_type = "ml_quantile"
+                ml_quantiles = {
+                    "p10": ml_ladder.p10,
+                    "p25": ml_ladder.p25,
+                    "p50": ml_ladder.p50,
+                    "p75": ml_ladder.p75,
+                    "p90": ml_ladder.p90,
+                }
+                print(
+                    f"[ml] {c.key}: forecast={forecast_high}F → "
+                    f"p10={ml_ladder.p10} p50={ml_ladder.p50} p90={ml_ladder.p90}"
+                )
+
+                # Optionally blend with multi-model spread ladder
+                spread, multi_details = _get_multi_model_spread(
+                    db_path, c.key, target_date_local,
+                )
+                if spread is not None and len(multi_details) >= 2:
+                    multi_model_info = {
+                        "spread": spread,
+                        "n_models": len(multi_details),
+                        "models": multi_details,
+                    }
+                    # Build a simple ensemble ladder from multi-model forecasts
+                    model_highs = [d["forecast_high_f"] for d in multi_details]
+                    ensemble_mean = sum(model_highs) / len(model_highs)
+                    # Use model spread as std dev proxy (spread ≈ 2*std for uniform-ish)
+                    ensemble_std = max(1.0, spread / 2.0)
+                    ensemble_pmf = _build_fallback_gaussian_pmf(
+                        int(round(ensemble_mean)), std=ensemble_std,
+                    )
+                    ensemble_ladder = from_pmf(ensemble_pmf, source="multi_model_ensemble")
+                    # Blend: 70% ML, 30% ensemble
+                    ladder = blend_ladders(
+                        [(ml_ladder, 0.7), (ensemble_ladder, 0.3)],
+                        source="ml+ensemble",
+                    )
+                    model_source_type = "ml+ensemble"
+                    print(
+                        f"  [blend] {len(multi_details)} models, spread={spread}F → "
+                        f"blended p10={ladder.p10} p50={ladder.p50} p90={ladder.p90}"
+                    )
+
+        # Fetch bias data for non-ML paths (used to correct distribution center)
+        rolling_bias = _get_rolling_bias(
+            db_path, c.key, target_date_local, str(args.forecast_source),
+        )
+
+        # Fetch multi-model spread for data-driven Gaussian width
+        spread_for_fallback, spread_details = _get_multi_model_spread(
+            db_path, c.key, target_date_local,
+        )
+
+        # Tier 2: Static monthly error PMF (legacy)
+        if ladder is None:
+            pmf_model = db_lib.fetch_error_model(
                 db_path,
                 city_key=c.key,
                 month=month,
-                snapshot_hour_local=snapshot_hour_local,
-                source=str(args.forecast_source),
+                snapshot_hour_local=error_model_hour,
+                source=error_model_source,
             )
-            if model:
-                model_source = str(args.forecast_source)
-                model_snapshot_hour_local = snapshot_hour_local
+            model_source = error_model_source
+            model_snapshot_hour_local = error_model_hour
 
-        forecast_high = int(snap["forecast_high_f"])
-        if model:
-            pmf_error: Dict[int, float] = model["pmf"]
-            pmf_high = normalize_pmf(shift_pmf(pmf_error, forecast_high))
-            error_model_n_samples = int(model["n_samples"])
-            error_model_updated_at_utc = model["updated_at_utc"]
-        else:
-            # Fallback: use Gaussian with std=4°F (typical NWS forecast error)
-            pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=4.0)
-            error_model_n_samples = 0
-            error_model_updated_at_utc = None
+            # If no model from error_model_source, try forecast source
+            if not pmf_model and error_model_source != str(args.forecast_source):
+                pmf_model = db_lib.fetch_error_model(
+                    db_path,
+                    city_key=c.key,
+                    month=month,
+                    snapshot_hour_local=snapshot_hour_local,
+                    source=str(args.forecast_source),
+                )
+                if pmf_model:
+                    model_source = str(args.forecast_source)
+                    model_snapshot_hour_local = snapshot_hour_local
+
+            if pmf_model:
+                ladder = _build_pmf_ladder(forecast_high, pmf_model["pmf"])
+                model_source_type = "error_pmf"
+                error_model_n_samples = int(pmf_model["n_samples"])
+                error_model_updated_at_utc = pmf_model["updated_at_utc"]
+                error_model_missing = False
+
+        # Tier 3: Fallback Gaussian with data-driven std
+        if ladder is None:
+            # Use multi-model spread to derive std if available
+            # spread ≈ p90 - p10 ≈ 2.56σ for normal distribution
+            if spread_for_fallback is not None and spread_for_fallback > 0:
+                fallback_std = max(1.5, spread_for_fallback / 2.56)
+                print(f"  [fallback] {c.key}: using multi-model spread={spread_for_fallback}F → std={fallback_std:.1f}F")
+            else:
+                fallback_std = DEFAULT_FALLBACK_STD
+            pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=fallback_std)
+            ladder = from_pmf(pmf_high, source="fallback_gaussian")
+            model_source_type = "fallback_gaussian"
+
+        # Apply rolling bias correction to non-ML distributions
+        # This shifts the distribution center to account for systematic forecast bias
+        bias_applied = 0.0
+        if rolling_bias is not None and abs(rolling_bias) >= 0.5 and model_source_type != "ml_quantile":
+            bias_applied = round(rolling_bias, 1)
+            ladder = apply_calibration(ladder, bias=bias_applied, source=f"{ladder.source}+bias({bias_applied:+.1f})")
+            print(f"  [bias] {c.key}: applied 7d rolling bias correction of {bias_applied:+.1f}F")
+
+        # Convert ladder PMF to the output format (backward compat with compute_edges.py)
+        pmf_high = dict(ladder.pmf)
 
         # Apply intraday adjustment if enabled and we have observation data
         intraday_adjustment = None
@@ -249,7 +626,7 @@ def main() -> int:
 
         summary = summarize_pmf(pmf_high)
 
-        out = {
+        out: Dict[str, Any] = {
             "city_key": c.key,
             "label": c.label,
             "tz": c.tz,
@@ -259,12 +636,17 @@ def main() -> int:
             "snapshot_kind": snapshot_kind,
             "fallback_source": fallback_source,
             "forecast_high_f": forecast_high,
+            "model_source": model_source_type,
             "error_model_month": month,
             "error_model_n_samples": error_model_n_samples,
             "error_model_updated_at_utc": error_model_updated_at_utc,
             "error_model_source": model_source,
             "error_model_snapshot_hour_local": model_snapshot_hour_local,
-            "error_model_missing": model is None,
+            "error_model_missing": error_model_missing,
+            "bias_correction": {
+                "rolling_7d_bias": round(rolling_bias, 2) if rolling_bias is not None else None,
+                "bias_applied": bias_applied,
+            },
             "pmf_high_f": {str(k): v for k, v in sorted(pmf_high.items())},
             "summary": {
                 "mean": summary.mean,
@@ -281,6 +663,12 @@ def main() -> int:
             },
             "intraday_adjustment": intraday_adjustment,
         }
+
+        # Include ML-specific metadata when available
+        if ml_quantiles is not None:
+            out["ml_quantiles"] = ml_quantiles
+        if multi_model_info is not None:
+            out["multi_model_info"] = multi_model_info
 
         source_slug = str(args.forecast_source).replace("/", "_")
         out_dir = OUT_BASE / source_slug / target_date_local

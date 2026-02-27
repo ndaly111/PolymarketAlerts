@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Automated weather trading script.
+Automated weather trading on Kalshi.
 
-Workflow:
-1. Compute fair prices from NWS forecasts + error models
-2. Collect fresh Kalshi weather market quotes
-3. Compute edges (fee-adjusted EV)
-4. Filter for opportunities: EV >= 10%, q in [5%, 95%], ask <= 85¢
-5. Re-fetch fresh Kalshi price before trading
-6. Place limit order at ask for N contracts (no fill polling)
-7. Post one consolidated Discord summary
-8. Max 10 trades/day across all weather markets
+Expects the data pipeline (forecast collection, fair prices, Kalshi markets,
+edge computation) to have already run — either via the GitHub Actions workflow
+steps or manually. This script just:
+
+1. Loads pre-computed edge opportunities from JSON artifacts
+2. Filters for tradeable opportunities (EV, price, probability thresholds)
+3. Re-fetches fresh Kalshi prices before each trade
+4. Places limit orders (or paper-trades in DRY_RUN mode)
+5. Logs everything to SQLite and posts a Discord summary
 """
 
 from __future__ import annotations
@@ -34,11 +34,13 @@ from kalshi_auth_client import KalshiAuthClient
 # --- Configuration ---
 MIN_EV = float(
     os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.10"))
-)  # 10% min EV (matches edge computation)
-MIN_Q = float(os.getenv("WEATHER_MIN_Q", "0.05"))  # 5% min probability
-MAX_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MAX_ASK", "85"))  # ≤ 85¢
+)
+MIN_Q = float(os.getenv("WEATHER_MIN_Q", "0.05"))
+MAX_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MAX_ASK", "85"))
+MIN_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MIN_ASK", "20"))
 MAX_TRADES_PER_DAY = int(os.getenv("WEATHER_MAX_TRADES_PER_DAY", "10"))
 CONTRACTS_PER_TRADE = int(os.getenv("WEATHER_CONTRACTS_PER_TRADE", "1"))
+KALSHI_FEE_RATE = 0.07  # 7% on winning profits only
 
 # Database paths
 WEATHER_DB_PATH = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
@@ -47,18 +49,21 @@ TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", "weather_trades.db"))
 # Discord webhook for trade notifications
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEATHER_TRADES_WEBHOOK", os.getenv("DISCORD_WEATHER_ALERTS", os.getenv("DISCORD_WEBHOOK_URL", "")))
 
-ENV_DRY_RUN = os.getenv("WEATHER_DRY_RUN", "0") == "1"
+# ──── TRADING MODE SAFETY ────
+# Two independent flags must BOTH agree before real money goes out:
+#   1. WEATHER_DRY_RUN must be explicitly "0" (default is "1" = paper trade)
+#   2. WEATHER_AUTOTRADE_ENABLED must be "1" (default is "0" = disabled)
+# If either flag is missing or wrong, we paper trade.
+ENV_DRY_RUN = os.getenv("WEATHER_DRY_RUN", "1") != "0"  # Default ON (safe)
 ENV_AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
-# Use environment variables to control trading mode
-# Set WEATHER_DRY_RUN=1 for paper trading (logs but no real orders)
-# Set WEATHER_AUTOTRADE_ENABLED=1 to enable live trading
-DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED  # Dry run if explicitly set OR if autotrade disabled
-AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED
+DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED
+AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED and not ENV_DRY_RUN
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
-FAIR_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 
+
+# ──── Database ────
 
 def ensure_db_schema(db_path: Path) -> None:
     """Create database tables if they don't exist."""
@@ -84,28 +89,15 @@ def ensure_db_schema(db_path: Path) -> None:
             placed_at_utc TEXT,
             last_checked_at_utc TEXT,
             filled_at_utc TEXT,
+            settled INTEGER DEFAULT 0,
+            won INTEGER,
+            payout_cents INTEGER,
+            settled_at_utc TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(trade_date, market_ticker)
         )
     """)
-
-    columns = {row[1] for row in cur.execute("PRAGMA table_info(weather_trades);").fetchall()}
-    if "placed_at_utc" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN placed_at_utc TEXT;")
-    if "last_checked_at_utc" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN last_checked_at_utc TEXT;")
-    if "filled_at_utc" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN filled_at_utc TEXT;")
-    # Settlement tracking columns
-    if "settled" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN settled INTEGER DEFAULT 0;")
-    if "won" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN won INTEGER;")
-    if "payout_cents" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN payout_cents INTEGER;")
-    if "settled_at_utc" not in columns:
-        cur.execute("ALTER TABLE weather_trades ADD COLUMN settled_at_utc TEXT;")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS weather_daily_stats (
@@ -138,156 +130,6 @@ def ensure_db_schema(db_path: Path) -> None:
 
     conn.commit()
     conn.close()
-
-
-def get_ev_bucket(ev: float) -> str:
-    """Classify EV into bucket."""
-    if ev < 0.05:
-        return "0-5%"
-    elif ev < 0.10:
-        return "5-10%"
-    elif ev < 0.15:
-        return "10-15%"
-    elif ev < 0.20:
-        return "15-20%"
-    else:
-        return "20%+"
-
-
-def get_results_by_ev_bucket(db_path: Path) -> Dict[str, Dict[str, Any]]:
-    """
-    Get trading results grouped by EV bucket.
-
-    Returns dict with keys like "0-5%", "5-10%", etc.
-    Each value contains: trades, wins, losses, pending, total_cost, total_payout, roi
-    """
-    conn = sqlite3.connect(str(db_path))
-    cur = conn.cursor()
-
-    # Get all filled trades with their outcomes
-    cur.execute("""
-        SELECT
-            ev,
-            limit_price_cents,
-            fill_price_cents,
-            settled,
-            won,
-            payout_cents,
-            side,
-            fair_q
-        FROM weather_trades
-        WHERE status IN ('filled', 'FILLED')
-    """)
-    rows = cur.fetchall()
-    conn.close()
-
-    buckets = {
-        "0-5%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
-        "5-10%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
-        "10-15%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
-        "15-20%": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
-        "20%+": {"trades": 0, "wins": 0, "losses": 0, "pending": 0, "total_cost_cents": 0, "total_payout_cents": 0, "kalshi_odds": []},
-    }
-
-    for ev, limit_price, fill_price, settled, won, payout, side, fair_q in rows:
-        bucket = get_ev_bucket(ev or 0)
-        if bucket not in buckets:
-            continue
-
-        b = buckets[bucket]
-        b["trades"] += 1
-
-        cost = fill_price if fill_price else limit_price
-        b["total_cost_cents"] += cost or 0
-        b["kalshi_odds"].append(cost or 0)
-
-        if settled:
-            if won:
-                b["wins"] += 1
-                b["total_payout_cents"] += payout or 100  # Win pays $1 = 100 cents
-            else:
-                b["losses"] += 1
-                b["total_payout_cents"] += 0
-        else:
-            b["pending"] += 1
-
-    # Calculate ROI for each bucket
-    for bucket, data in buckets.items():
-        if data["total_cost_cents"] > 0:
-            profit = data["total_payout_cents"] - data["total_cost_cents"]
-            data["roi_pct"] = (profit / data["total_cost_cents"]) * 100
-        else:
-            data["roi_pct"] = 0.0
-
-        # Average Kalshi odds
-        if data["kalshi_odds"]:
-            data["avg_kalshi_cents"] = sum(data["kalshi_odds"]) / len(data["kalshi_odds"])
-        else:
-            data["avg_kalshi_cents"] = 0
-        del data["kalshi_odds"]  # Remove raw list from output
-
-    return buckets
-
-
-def mark_trade_settled(
-    db_path: Path,
-    market_ticker: str,
-    won: bool,
-    payout_cents: int = 0,
-) -> None:
-    """Mark a trade as settled with win/loss result."""
-    now = datetime.now(ZoneInfo("UTC")).isoformat()
-    conn = sqlite3.connect(str(db_path))
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE weather_trades
-        SET settled = 1, won = ?, payout_cents = ?, settled_at_utc = ?, updated_at = ?
-        WHERE market_ticker = ? AND settled = 0
-    """, (1 if won else 0, payout_cents, now, now, market_ticker))
-    conn.commit()
-    conn.close()
-
-
-def format_ev_bucket_report(buckets: Dict[str, Dict[str, Any]]) -> str:
-    """Format EV bucket results as a Discord-friendly string."""
-    lines = ["**Weather Trades by EV Bucket**", ""]
-    lines.append("| EV Bucket | Trades | W-L-P | Avg Ask | ROI |")
-    lines.append("|-----------|--------|-------|---------|-----|")
-
-    total_trades = 0
-    total_wins = 0
-    total_losses = 0
-    total_pending = 0
-    total_cost = 0
-    total_payout = 0
-
-    for bucket in ["0-5%", "5-10%", "10-15%", "15-20%", "20%+"]:
-        data = buckets.get(bucket, {})
-        trades = data.get("trades", 0)
-        wins = data.get("wins", 0)
-        losses = data.get("losses", 0)
-        pending = data.get("pending", 0)
-        avg_ask = data.get("avg_kalshi_cents", 0)
-        roi = data.get("roi_pct", 0)
-
-        total_trades += trades
-        total_wins += wins
-        total_losses += losses
-        total_pending += pending
-        total_cost += data.get("total_cost_cents", 0)
-        total_payout += data.get("total_payout_cents", 0)
-
-        if trades > 0:
-            lines.append(f"| {bucket} | {trades} | {wins}-{losses}-{pending} | {avg_ask:.0f}¢ | {roi:+.1f}% |")
-
-    # Total row
-    if total_cost > 0:
-        total_roi = ((total_payout - total_cost) / total_cost) * 100
-    else:
-        total_roi = 0
-    lines.append(f"| **Total** | {total_trades} | {total_wins}-{total_losses}-{total_pending} | - | {total_roi:+.1f}% |")
-
-    return "\n".join(lines)
 
 
 def get_trades_today(db_path: Path) -> int:
@@ -328,16 +170,11 @@ def record_trade(
     forecast_high_f: Optional[int],
     order_id: Optional[str],
     status: str,
-    fill_price_cents: Optional[int] = None,
-    placed_at_utc: Optional[str] = None,
-    last_checked_at_utc: Optional[str] = None,
-    filled_at_utc: Optional[str] = None,
 ) -> None:
     """Record a trade in the database."""
     now = datetime.now(ZoneInfo("UTC")).isoformat()
     today = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    if placed_at_utc is None and status in {"PLACED", "dry_run"}:
-        placed_at_utc = now
+    placed_at_utc = now if status in {"PLACED", "dry_run"} else None
 
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
@@ -346,14 +183,12 @@ def record_trade(
         INSERT OR REPLACE INTO weather_trades (
             trade_date, city_key, market_ticker, event_display, side,
             quantity, limit_price_cents, fair_q, ev, forecast_high_f,
-            order_id, status, fill_price_cents, placed_at_utc,
-            last_checked_at_utc, filled_at_utc, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            order_id, status, placed_at_utc, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         today, city_key, market_ticker, event_display, side,
         quantity, limit_price_cents, fair_q, ev, forecast_high_f,
-        order_id, status, fill_price_cents, placed_at_utc,
-        last_checked_at_utc, filled_at_utc, now, now
+        order_id, status, placed_at_utc, now, now
     ))
 
     conn.commit()
@@ -407,6 +242,8 @@ def already_traded_today(db_path: Path, market_ticker: str) -> bool:
     return row is not None
 
 
+# ──── Kalshi ────
+
 def fetch_fresh_kalshi_price(client: KalshiAuthClient, ticker: str) -> Optional[Dict[str, int]]:
     """Fetch fresh bid/ask from Kalshi for a specific ticker."""
     try:
@@ -421,6 +258,8 @@ def fetch_fresh_kalshi_price(client: KalshiAuthClient, ticker: str) -> Optional[
         print(f"  [error] Failed to fetch Kalshi price for {ticker}: {e}")
         return None
 
+
+# ──── Edge loading ────
 
 def load_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict[str, Any]]:
     """Load pre-computed edge opportunities from JSON artifacts."""
@@ -452,10 +291,11 @@ def load_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict
                 if q < MIN_Q or q > (1 - MIN_Q):
                     continue
 
-                # Convert price to cents
                 ask_cents = int(buy_price * 100) if buy_price else 100
 
                 if ask_cents > MAX_KALSHI_ASK_CENTS:
+                    continue
+                if ask_cents < MIN_KALSHI_ASK_CENTS:
                     continue
 
                 event = candidate.get("event", {})
@@ -485,20 +325,156 @@ def load_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict
         except Exception as e:
             print(f"  [warn] Error loading {json_file}: {e}")
 
-    # Sort by EV descending
     opportunities.sort(key=lambda x: x.get("ev", 0), reverse=True)
     return opportunities
 
+
+# ──── Trade execution ────
+
+def _make_result(
+    ticker: str,
+    city_key: str,
+    event_display: str,
+    side: str,
+    fair_q: float,
+    ev: float,
+    status: str,
+    limit: Optional[int] = None,
+    order_id: Optional[str] = None,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a standardized trade result dict."""
+    result: Dict[str, Any] = {
+        "ticker": ticker,
+        "city": city_key,
+        "event": event_display,
+        "side": side,
+        "limit": limit,
+        "fair_q": fair_q,
+        "ev": ev,
+        "order_id": order_id,
+        "status": status,
+    }
+    if error:
+        result["error"] = error
+    return result
+
+
+def compute_fresh_ev(fair_q: float, kalshi_ask: int, side: str) -> float:
+    """Recalculate EV with a fresh Kalshi price, accounting for the 7% fee on profits."""
+    kalshi_prob = kalshi_ask / 100.0
+    profit_if_win = 1.0 - kalshi_prob
+    net_profit_if_win = profit_if_win * (1 - KALSHI_FEE_RATE)
+
+    if side == "YES":
+        return fair_q * net_profit_if_win - (1 - fair_q) * kalshi_prob
+    else:
+        return (1 - fair_q) * net_profit_if_win - fair_q * kalshi_prob
+
+
+def execute_trade(
+    client: KalshiAuthClient,
+    db_path: Path,
+    opportunity: Dict[str, Any],
+    trade_enabled: bool,
+) -> Dict[str, Any]:
+    """Execute the trade workflow for a single opportunity."""
+    ticker = opportunity["market_ticker"]
+    city_key = opportunity["city_key"]
+    event_display = opportunity["event_display"]
+    side = opportunity["side"]
+    fair_q = opportunity["fair_q"]
+    pre_ev = opportunity["ev"]
+    forecast_high_f = opportunity.get("forecast_high_f")
+
+    print(f"\n--- Processing: {city_key} | {event_display} ({side}) ---")
+
+    # Already traded this ticker today?
+    if already_traded_today(db_path, ticker):
+        print(f"  [skip] Already traded {ticker} today")
+        return _make_result(ticker, city_key, event_display, side, fair_q, pre_ev, "SKIPPED_ALREADY_TRADED")
+
+    # Already have a position?
+    try:
+        if client.has_position(ticker):
+            print(f"  [skip] Already have position in {ticker}")
+            record_trade(db_path, city_key, ticker, event_display, side, 0, 0, fair_q, pre_ev, forecast_high_f, None, "SKIPPED_HAS_POSITION")
+            return _make_result(ticker, city_key, event_display, side, fair_q, pre_ev, "SKIPPED_HAS_POSITION")
+    except Exception as e:
+        print(f"  [warn] Could not check position: {e}")
+
+    # Re-fetch fresh Kalshi orderbook
+    print("  Fetching fresh Kalshi price...")
+    fresh_kalshi = fetch_fresh_kalshi_price(client, ticker)
+    if not fresh_kalshi:
+        print(f"  [skip] Could not get fresh Kalshi price")
+        record_trade(db_path, city_key, ticker, event_display, side, 0, 0, fair_q, pre_ev, forecast_high_f, None, "SKIPPED_NO_PRICE")
+        return _make_result(ticker, city_key, event_display, side, fair_q, pre_ev, "SKIPPED_NO_PRICE")
+
+    kalshi_ask = fresh_kalshi["yes_ask"] if side == "YES" else fresh_kalshi["no_ask"]
+    kalshi_side = "yes" if side == "YES" else "no"
+    print(f"  Fresh Kalshi ask: {kalshi_ask}¢")
+
+    # Price range checks
+    if kalshi_ask < MIN_KALSHI_ASK_CENTS:
+        print(f"  [skip] Kalshi ask {kalshi_ask}¢ < {MIN_KALSHI_ASK_CENTS}¢ floor")
+        record_trade(db_path, city_key, ticker, event_display, side, 0, kalshi_ask, fair_q, pre_ev, forecast_high_f, None, "SKIPPED_MIN_ASK")
+        return _make_result(ticker, city_key, event_display, side, fair_q, pre_ev, "SKIPPED_MIN_ASK", limit=kalshi_ask)
+
+    if kalshi_ask > MAX_KALSHI_ASK_CENTS:
+        print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ limit")
+        record_trade(db_path, city_key, ticker, event_display, side, 0, kalshi_ask, fair_q, pre_ev, forecast_high_f, None, "SKIPPED_MAX_ASK")
+        return _make_result(ticker, city_key, event_display, side, fair_q, pre_ev, "SKIPPED_MAX_ASK", limit=kalshi_ask)
+
+    # Recalculate EV with fresh price
+    ev = compute_fresh_ev(fair_q, kalshi_ask, side)
+    print(f"  Fair q: {fair_q:.1%}, Fresh price: {kalshi_ask/100:.1%}, EV: {ev:.1%}")
+
+    if ev < MIN_EV:
+        print(f"  [skip] Fresh EV {ev:.1%} < {MIN_EV:.1%} threshold")
+        record_trade(db_path, city_key, ticker, event_display, side, 0, kalshi_ask, fair_q, ev, forecast_high_f, None, "SKIPPED_MIN_EV")
+        return _make_result(ticker, city_key, event_display, side, fair_q, ev, "SKIPPED_MIN_EV", limit=kalshi_ask)
+
+    # All checks passed
+    print(f"  Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
+
+    if not trade_enabled:
+        print("  [skip] Auto-trade disabled")
+        record_trade(db_path, city_key, ticker, event_display, side, CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f, None, "SKIPPED_AUTOTRADE_DISABLED")
+        return _make_result(ticker, city_key, event_display, side, fair_q, ev, "SKIPPED_AUTOTRADE_DISABLED", limit=kalshi_ask)
+
+    if DRY_RUN:
+        print("  [DRY_RUN] Would place order")
+        record_trade(db_path, city_key, ticker, event_display, side, CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f, "DRY_RUN", "dry_run")
+        return _make_result(ticker, city_key, event_display, side, fair_q, ev, "DRY_RUN", limit=kalshi_ask, order_id="DRY_RUN")
+
+    try:
+        order = client.place_order(
+            ticker=ticker,
+            side=kalshi_side,
+            quantity=CONTRACTS_PER_TRADE,
+            limit_price=kalshi_ask,
+        )
+        order_id = order.get("order_id", order.get("id", ""))
+        print(f"  Order placed: {order_id}")
+        record_trade(db_path, city_key, ticker, event_display, side, CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f, order_id, "PLACED")
+        return _make_result(ticker, city_key, event_display, side, fair_q, ev, "PLACED", limit=kalshi_ask, order_id=order_id)
+
+    except Exception as e:
+        print(f"  [error] Failed to place order: {e}")
+        record_trade(db_path, city_key, ticker, event_display, side, CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f, None, "FAILED_PLACE_ORDER")
+        return _make_result(ticker, city_key, event_display, side, fair_q, ev, "FAILED_PLACE_ORDER", limit=kalshi_ask, error=str(e)[:120])
+
+
+# ──── Discord ────
 
 def post_discord(message: str) -> None:
     """Post to Discord webhook."""
     if not DISCORD_WEBHOOK:
         return
-
     try:
         import requests
-        payload = {"content": message[:1990]}
-        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        requests.post(DISCORD_WEBHOOK, json={"content": message[:1990]}, timeout=10)
     except Exception as e:
         print(f"  [warn] Discord post failed: {e}")
 
@@ -515,7 +491,7 @@ def format_summary_message(
     header_lines = [
         f"**Weather Auto-Trade Summary — {target_date}**",
         f"Forecast source: {forecast_source}",
-        f"Min EV: {MIN_EV:.0%} | Max ask: {MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
+        f"Min EV: {MIN_EV:.0%} | Ask range: {MIN_KALSHI_ASK_CENTS}-{MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
         f"Placed: {len(placed)} | Skipped: {len(skipped)} | Failed: {len(failed)}",
     ]
     if DRY_RUN:
@@ -525,35 +501,23 @@ def format_summary_message(
 
     sections: List[str] = ["\n".join(header_lines)]
 
-    def add_section(title: str, rows: List[str]) -> None:
-        if not rows:
-            return
-        sections.append(f"\n{title}\n" + "\n".join(rows))
+    def fmt_ev(value: Optional[float]) -> str:
+        return f"{value:.1%}" if value is not None else "n/a"
 
-    def format_ev(value: Optional[float]) -> str:
-        if value is None:
-            return "n/a"
-        return f"{value:.1%}"
+    def add_section(title: str, rows: List[str]) -> None:
+        if rows:
+            sections.append(f"\n{title}\n" + "\n".join(rows))
 
     placed_rows = [
-        (
-            f"- {r['ticker']} {r['side']} | {r['limit']}¢ | EV {format_ev(r.get('ev'))} | "
-            f"Order {r['order_id']}"
-        )
+        f"- {r['ticker']} {r['side']} | {r['limit']}¢ | EV {fmt_ev(r.get('ev'))} | Order {r['order_id']}"
         for r in placed
     ]
     skipped_rows = [
-        (
-            f"- {r['ticker']} {r['side']} | "
-            f"{r['status']} ({format_ev(r.get('ev'))})"
-        )
+        f"- {r['ticker']} {r['side']} | {r['status']} ({fmt_ev(r.get('ev'))})"
         for r in skipped
     ]
     failed_rows = [
-        (
-            f"- {r['ticker']} {r['side']} | "
-            f"{r['status']} ({r.get('error', 'unknown error')})"
-        )
+        f"- {r['ticker']} {r['side']} | {r['status']} ({r.get('error', 'unknown error')})"
         for r in failed
     ]
 
@@ -565,6 +529,7 @@ def format_summary_message(
     if len(message) <= 1990:
         return message
 
+    # Trim to fit Discord's limit
     trimmed_sections: List[str] = [sections[0]]
     for title, rows in [("✅ PLACED", placed_rows), ("⏭️ SKIPPED", skipped_rows), ("❌ FAILED", failed_rows)]:
         if not rows:
@@ -576,356 +541,28 @@ def format_summary_message(
             block += f"\n- ... and {remaining} more"
         trimmed_sections.append(block)
 
-    trimmed_message = "\n".join(trimmed_sections)
-    return trimmed_message[:1990]
+    return "\n".join(trimmed_sections)[:1990]
 
 
-def execute_trade(
-    client: KalshiAuthClient,
-    db_path: Path,
-    opportunity: Dict[str, Any],
-    trade_enabled: bool,
-) -> Dict[str, Any]:
-    """
-    Execute the trade workflow for a single opportunity.
-
-    Returns a result dict summarizing the outcome.
-    """
-    ticker = opportunity["market_ticker"]
-    city_key = opportunity["city_key"]
-    event_display = opportunity["event_display"]
-    side = opportunity["side"]
-    fair_q = opportunity["fair_q"]
-    pre_ev = opportunity["ev"]
-    forecast_high_f = opportunity.get("forecast_high_f")
-
-    print(f"\n--- Processing: {city_key} | {event_display} ({side}) ---")
-
-    # Check if already traded today
-    if already_traded_today(db_path, ticker):
-        print(f"  [skip] Already traded {ticker} today")
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": None,
-            "fair_q": fair_q,
-            "ev": pre_ev,
-            "order_id": None,
-            "status": "SKIPPED_ALREADY_TRADED",
-        }
-
-    # Check if we have existing position
-    try:
-        if client.has_position(ticker):
-            print(f"  [skip] Already have position in {ticker}")
-            record_trade(
-                db_path, city_key, ticker, event_display, side,
-                0, 0, fair_q, pre_ev, forecast_high_f,
-                None, "SKIPPED_HAS_POSITION"
-            )
-            return {
-                "ticker": ticker,
-                "city": city_key,
-                "event": event_display,
-                "side": side,
-                "limit": None,
-                "fair_q": fair_q,
-                "ev": pre_ev,
-                "order_id": None,
-                "status": "SKIPPED_HAS_POSITION",
-            }
-    except Exception as e:
-        print(f"  [warn] Could not check position: {e}")
-
-    # Re-fetch fresh Kalshi orderbook
-    print("  Fetching fresh Kalshi price...")
-    fresh_kalshi = fetch_fresh_kalshi_price(client, ticker)
-    if not fresh_kalshi:
-        print(f"  [skip] Could not get fresh Kalshi price")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            0, 0, fair_q, pre_ev, forecast_high_f,
-            None, "SKIPPED_NO_PRICE"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": None,
-            "fair_q": fair_q,
-            "ev": pre_ev,
-            "order_id": None,
-            "status": "SKIPPED_NO_PRICE",
-        }
-
-    # Determine which price to use based on side
-    if side == "YES":
-        kalshi_ask = fresh_kalshi["yes_ask"]
-        kalshi_side = "yes"
-    else:
-        kalshi_ask = fresh_kalshi["no_ask"]
-        kalshi_side = "no"
-
-    print(f"  Fresh Kalshi ask: {kalshi_ask}¢")
-
-    # Check price hasn't moved too much
-    if kalshi_ask > MAX_KALSHI_ASK_CENTS:
-        print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ limit")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            0, kalshi_ask, fair_q, ev, forecast_high_f,
-            None, "SKIPPED_MAX_ASK"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": None,
-            "status": "SKIPPED_MAX_ASK",
-        }
-
-    # Recalculate EV with fresh price using accurate 7% fee on profits
-    # Kalshi charges 7% on winning profits only (not on losses)
-    KALSHI_FEE_RATE = 0.07
-    kalshi_prob = kalshi_ask / 100.0
-    profit_if_win = 1.0 - kalshi_prob  # Gross profit on win
-    net_profit_if_win = profit_if_win * (1 - KALSHI_FEE_RATE)  # After 7% fee
-
-    if side == "YES":
-        # EV = P(win) * net_profit - P(lose) * stake
-        ev = fair_q * net_profit_if_win - (1 - fair_q) * kalshi_prob
-    else:
-        # EV for NO side
-        ev = (1 - fair_q) * net_profit_if_win - fair_q * kalshi_prob
-
-    print(f"  Fair q: {fair_q:.1%}, Fresh price: {kalshi_prob:.1%}, EV: {ev:.1%}")
-
-    if ev < MIN_EV:
-        print(f"  [skip] Fresh EV {ev:.1%} < {MIN_EV:.1%} threshold")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            0, kalshi_ask, fair_q, ev, forecast_high_f,
-            None, "SKIPPED_MIN_EV"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": None,
-            "status": "SKIPPED_MIN_EV",
-        }
-
-    # All checks passed - place order
-    print(f"  Placing limit order: {CONTRACTS_PER_TRADE} contract(s) at {kalshi_ask}¢")
-
-    if not trade_enabled:
-        print("  [skip] Auto-trade disabled")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            None, "SKIPPED_AUTOTRADE_DISABLED"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": None,
-            "status": "SKIPPED_AUTOTRADE_DISABLED",
-        }
-
-    if DRY_RUN:
-        print("  [DRY_RUN] Would place order")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            "DRY_RUN", "dry_run"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": "DRY_RUN",
-            "status": "DRY_RUN",
-        }
-
-    try:
-        order = client.place_order(
-            ticker=ticker,
-            side=kalshi_side,
-            quantity=CONTRACTS_PER_TRADE,
-            limit_price=kalshi_ask,
-        )
-        order_id = order.get("order_id", order.get("id", ""))
-        print(f"  Order placed: {order_id}")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            order_id, "PLACED"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": order_id,
-            "status": "PLACED",
-        }
-
-    except Exception as e:
-        print(f"  [error] Failed to place order: {e}")
-        record_trade(
-            db_path, city_key, ticker, event_display, side,
-            CONTRACTS_PER_TRADE, kalshi_ask, fair_q, ev, forecast_high_f,
-            None, "FAILED_PLACE_ORDER"
-        )
-        return {
-            "ticker": ticker,
-            "city": city_key,
-            "event": event_display,
-            "side": side,
-            "limit": kalshi_ask,
-            "fair_q": fair_q,
-            "ev": ev,
-            "order_id": None,
-            "status": "FAILED_PLACE_ORDER",
-            "error": str(e)[:120],
-        }
-
-
-def run_data_pipeline(target_date: str, forecast_source: str) -> bool:
-    """
-    Run the data collection and fair price computation pipeline.
-    Returns True if successful.
-    """
-    import subprocess
-
-    print("\n--- Running data pipeline ---")
-
-    # 1. Collect fresh NWS forecast snapshot
-    print("Collecting fresh NWS forecast...")
-    result = subprocess.run([
-        sys.executable, "-m", "weather.scripts.collect_forecast_snapshot",
-        "--no-gate", "--use-local-hour",
-        "--source", forecast_source,
-        "--target-date", target_date,
-        "--db", str(WEATHER_DB_PATH),
-    ], capture_output=True, text=True, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)})
-    if result.returncode != 0:
-        print(f"  [warn] Forecast collection: {result.stderr[:200]}")
-    else:
-        print("  Forecast collection OK")
-
-    # 2. Collect intraday observations
-    print("Collecting intraday observations...")
-    result = subprocess.run([
-        sys.executable, "-m", "weather.scripts.collect_intraday_observations",
-        "--no-gate",
-        "--db", str(WEATHER_DB_PATH),
-    ], capture_output=True, text=True, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)})
-    if result.returncode != 0:
-        print(f"  [warn] Intraday collection: {result.stderr[:200]}")
-    else:
-        print("  Intraday collection OK")
-
-    # 3. Compute fair prices
-    print("Computing fair prices...")
-    result = subprocess.run([
-        sys.executable, "-m", "weather.scripts.compute_fair_prices",
-        "--forecast-source", forecast_source,
-        "--use-latest",
-        "--db", str(WEATHER_DB_PATH),
-    ], capture_output=True, text=True, cwd=str(ROOT), env={
-        **os.environ,
-        "PYTHONPATH": str(ROOT),
-        "WEATHER_ERROR_MODEL_SOURCE": "mos_gfs_18z_archive",
-        "WEATHER_ERROR_MODEL_HOUR": "12",
-        "WEATHER_ENABLE_INTRADAY_ADJUSTMENT": "true",
-    })
-    if result.returncode != 0:
-        print(f"  [error] Fair price computation failed: {result.stderr[:300]}")
-        return False
-    print("  Fair prices computed OK")
-
-    # 4. Collect Kalshi weather markets
-    print("Collecting Kalshi weather markets...")
-    result = subprocess.run([
-        sys.executable, "-m", "weather.scripts.collect_kalshi_weather_markets",
-        "--require-city-match",
-        "--db", str(WEATHER_DB_PATH),
-    ], capture_output=True, text=True, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)})
-    if result.returncode != 0:
-        print(f"  [error] Kalshi collection failed: {result.stderr[:300]}")
-        return False
-
-    # Parse output to check if markets were found
-    try:
-        output = json.loads(result.stdout)
-        rows_written = output.get("rows_written", 0)
-        print(f"  Kalshi markets collected: {rows_written} rows")
-        if rows_written == 0:
-            print("  [warn] No Kalshi markets found")
-            return False
-    except Exception:
-        print(f"  [warn] Could not parse Kalshi output: {result.stdout[:200]}")
-
-    # 5. Compute edges
-    print("Computing edges...")
-    result = subprocess.run([
-        sys.executable, "-m", "weather.scripts.compute_edges",
-        "--forecast-source", forecast_source,
-        "--date", target_date,
-        "--require-ask",
-        "--db", str(WEATHER_DB_PATH),
-    ], capture_output=True, text=True, cwd=str(ROOT), env={
-        **os.environ,
-        "PYTHONPATH": str(ROOT),
-        "WEATHER_MIN_EV": str(MIN_EV),
-        "WEATHER_MIN_Q": str(MIN_Q),
-        "WEATHER_BUY_FEE_CENTS": "2",
-    })
-    if result.returncode != 0:
-        print(f"  [error] Edge computation failed: {result.stderr[:300]}")
-        return False
-    print("  Edges computed OK")
-
-    return True
-
+# ──── Main ────
 
 def main() -> int:
     print("=" * 60)
     print("WEATHER AUTO TRADER")
+    if DRY_RUN:
+        print(">>> MODE: PAPER TRADE (DRY RUN) — no real orders <<<")
+    else:
+        print(">>> MODE: LIVE TRADING — real money at risk <<<")
+    print(f"  WEATHER_DRY_RUN={os.getenv('WEATHER_DRY_RUN', '(unset)')}")
+    print(f"  WEATHER_AUTOTRADE_ENABLED={os.getenv('WEATHER_AUTOTRADE_ENABLED', '(unset)')}")
+    print(f"  → DRY_RUN={DRY_RUN}, AUTOTRADE_ENABLED={AUTOTRADE_ENABLED}")
     print(f"Min EV threshold: {MIN_EV:.0%}")
     print(f"Min q: {MIN_Q:.1%}")
-    print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
+    print(f"Kalshi ask range: {MIN_KALSHI_ASK_CENTS}-{MAX_KALSHI_ASK_CENTS}¢")
     print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Contracts per trade: {CONTRACTS_PER_TRADE}")
-    print(f"Dry run: {DRY_RUN}")
-    print(f"Autotrade enabled: {AUTOTRADE_ENABLED}")
     print("=" * 60)
 
-    # Initialize
     ensure_db_schema(TRADES_DB_PATH)
 
     if AUTOTRADE_ENABLED and MAX_TRADES_PER_DAY <= 0:
@@ -942,18 +579,17 @@ def main() -> int:
 
     remaining_trades = MAX_TRADES_PER_DAY - trades_today
 
-    # Get target date (today in ET)
+    # Target date and forecast source
     now_et = datetime.now(ZoneInfo("America/New_York"))
     target_date = now_et.strftime("%Y-%m-%d")
-    # Default to open_meteo for better accuracy (can override with WEATHER_FORECAST_SOURCE)
     forecast_source = os.getenv("WEATHER_FORECAST_SOURCE", "open_meteo")
 
     print(f"\nTarget date: {target_date}")
     print(f"Forecast source: {forecast_source}")
 
+    # Initialize Kalshi client
     client = None
     if AUTOTRADE_ENABLED or DRY_RUN:
-        # Initialize Kalshi client
         print("\nInitializing Kalshi client...")
         try:
             client = KalshiAuthClient.from_env()
@@ -964,12 +600,7 @@ def main() -> int:
             print(f"Failed to initialize Kalshi client: {e}")
             return 1
 
-    # Run data pipeline to get fresh prices and edges
-    if not run_data_pipeline(target_date, forecast_source):
-        print("\n[error] Data pipeline failed. Exiting.")
-        return 1
-
-    # Load opportunities from edge artifacts
+    # Load pre-computed edge opportunities
     print("\n--- Loading opportunities ---")
     opportunities = load_edge_opportunities(forecast_source, target_date)
     print(f"Found {len(opportunities)} opportunities meeting criteria")
@@ -1017,34 +648,14 @@ def main() -> int:
             trades_placed += 1
             increment_trades_today(TRADES_DB_PATH)
 
-    # Post only when an edge/opportunity was found.
+    # Post Discord summary when opportunities were found
     if opportunities:
         summary_message = format_summary_message(results, target_date, forecast_source)
         post_discord(summary_message)
 
-    # Post EV bucket performance report (once per day at 8pm ET or later)
-    now_et = datetime.now(ZoneInfo("America/New_York"))
-    if now_et.hour >= 20:
-        try:
-            buckets = get_results_by_ev_bucket(TRADES_DB_PATH)
-            total_trades = sum(b.get("trades", 0) for b in buckets.values())
-            if total_trades > 0:
-                report = format_ev_bucket_report(buckets)
-                post_discord(report)
-        except Exception as e:
-            print(f"  [warn] Failed to generate EV bucket report: {e}")
-
     print(f"\n{'=' * 60}")
     print(f"Session complete: {trades_placed} orders placed")
     print("=" * 60)
-
-    # Update dashboard JSON
-    try:
-        from scripts.generate_dashboard_data import update_dashboard
-        update_dashboard(quiet=True)
-        print("Dashboard data updated")
-    except Exception as e:
-        print(f"  [warn] Failed to update dashboard: {e}")
 
     return 0
 

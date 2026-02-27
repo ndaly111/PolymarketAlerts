@@ -55,8 +55,8 @@ jobs:
       PROPS_DB_PATH: props_trades.db
       # Discord notifications
       DISCORD_PROPS_WEBHOOK: ${{ secrets.DISCORD_PROPS_WEBHOOK || secrets.DISCORD_WEBHOOK_URL }}
-      # Dry run (default true for safety)
-      DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+      # Dry run — default ON (safe). Only disabled on manual dispatch with dry_run=false.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false' && '0' || '1' }}
 
     steps:
       - name: Checkout

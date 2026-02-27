@@ -507,8 +507,10 @@ def shrink_dispersion(
     """
     Shrink distribution dispersion based on intraday progress.
 
-    As the day progresses and we have more observations, uncertainty
-    about the final high temperature decreases.
+    Uses sqrt-based curve for less aggressive shrinkage:
+    - At progress=0.25: retains 87% of spread (vs 75% linear)
+    - At progress=0.50: retains 71% of spread (vs 50% linear)
+    - At progress=0.75: retains 50% of spread (vs 25% linear)
 
     Args:
         ladder: Original ladder
@@ -529,7 +531,7 @@ def shrink_dispersion(
         )
 
     mean = ladder.mean()
-    shrink_factor = 1.0 - progress
+    shrink_factor = math.sqrt(1.0 - progress)
     new_pmf = {}
 
     for temp, prob in ladder.pmf.items():
@@ -549,10 +551,13 @@ def compute_ev_for_contract(
     threshold_or_range: Tuple[int, ...],
     market_price: float,
     side: str,
-    fee: float = 0.02,
+    fee: float = 0.0,
+    profit_fee_rate: float = 0.07,
 ) -> float:
     """
     Compute expected value for a Kalshi weather contract.
+
+    Uses Kalshi's actual fee model: 7% fee on winning profits only.
 
     Args:
         ladder: Probability ladder for temperature distribution
@@ -560,7 +565,8 @@ def compute_ev_for_contract(
         threshold_or_range: (threshold,) for above/below, (low, high) for between
         market_price: Current market price (0-1)
         side: "YES" or "NO"
-        fee: Transaction fee (default 2 cents = 0.02)
+        fee: Deprecated flat fee (ignored, kept for API compat)
+        profit_fee_rate: Kalshi profit fee rate (default 7%)
 
     Returns:
         Expected value of the trade
@@ -577,16 +583,17 @@ def compute_ev_for_contract(
     else:
         raise ValueError(f"Unknown contract type: {contract_type}")
 
-    # Compute EV
-    # For YES: EV = model_prob - market_price - fee (simplified)
-    # For NO: EV = (1 - model_prob) - (1 - market_price) - fee = market_price - model_prob - fee
+    # Kalshi fee model: 7% fee on winning profits only
+    # Net profit on win = (1 - price) * (1 - profit_fee_rate)
+    net_profit_rate = 1.0 - profit_fee_rate
+
     if side.upper() == "YES":
-        # Win payout is (1 - price), lose is -price
-        # EV = model_prob * (1 - price) - (1 - model_prob) * price - fee
-        ev = model_prob * (1.0 - market_price) - (1.0 - model_prob) * market_price - fee
+        # Win (prob=model_prob): net profit = (1-price) * 0.93
+        # Lose (prob=1-model_prob): lose price
+        ev = model_prob * (1.0 - market_price) * net_profit_rate - (1.0 - model_prob) * market_price
     else:  # NO
-        # NO is betting against the event
-        # EV = (1 - model_prob) * (1 - price) - model_prob * price - fee
-        ev = (1.0 - model_prob) * (1.0 - market_price) - model_prob * market_price - fee
+        # Win (prob=1-model_prob): net profit = (1-price) * 0.93
+        # Lose (prob=model_prob): lose price
+        ev = (1.0 - model_prob) * (1.0 - market_price) * net_profit_rate - model_prob * market_price
 
     return ev

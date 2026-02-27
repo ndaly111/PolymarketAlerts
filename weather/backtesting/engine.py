@@ -9,6 +9,7 @@ results reflect real-world performance.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,14 +27,11 @@ from weather.backtesting.metrics import (
 )
 from weather.lib.probability_ladder import (
     ProbabilityLadder,
+    blend_ladders,
     from_percentiles,
     from_pmf,
+    from_point_forecast_and_error_pmf,
     compute_ev_for_contract,
-)
-from weather.lib.fair import (
-    build_ladder_from_forecast_and_error,
-    build_ladder_from_nbm,
-    build_blended_ladder,
 )
 
 
@@ -281,7 +279,7 @@ class BacktestEngine:
                 as_of_utc,
             )
             if nbm and nbm.get("p50") is not None:
-                nbm_ladder = build_ladder_from_nbm(
+                nbm_ladder = from_percentiles(
                     p10=nbm["p10"],
                     p25=nbm["p25"],
                     p50=nbm["p50"],
@@ -300,7 +298,7 @@ class BacktestEngine:
             as_of_utc,
         )
         if error_model and error_model.get("pmf"):
-            error_ladder = build_ladder_from_forecast_and_error(
+            error_ladder = from_point_forecast_and_error_pmf(
                 forecast_high,
                 error_model["pmf"],
                 source="error_model",
@@ -309,12 +307,7 @@ class BacktestEngine:
 
         # Blend or use single source
         if len(ladders_to_blend) >= 2:
-            return build_blended_ladder(
-                ladders_to_blend[0][0],
-                ladders_to_blend[1][0],
-                nbm_weight=ladders_to_blend[0][1],
-                error_weight=ladders_to_blend[1][1],
-            )
+            return blend_ladders(ladders_to_blend, source="blended")
         elif ladders_to_blend:
             return ladders_to_blend[0][0]
         else:
@@ -524,8 +517,8 @@ class BacktestEngine:
             "n_forecasts": n_forecasts,
             "n_markets": n_markets,
             "n_trades": n_trades,
-            "forecast_mae": round(mae, 2) if not isinstance(mae, float) or not mae != mae else None,
-            "forecast_bias": round(bias, 2) if not isinstance(bias, float) or not bias != bias else None,
+            "forecast_mae": round(mae, 2) if not (isinstance(mae, float) and math.isnan(mae)) else None,
+            "forecast_bias": round(bias, 2) if not (isinstance(bias, float) and math.isnan(bias)) else None,
             "max_drawdown": round(max_dd, 4),
             **trade_metrics,
         }

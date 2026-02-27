@@ -405,6 +405,81 @@ def get_sports_stats(db_path: Path) -> dict:
     }
 
 
+def get_weather_calibration(db_path: Path) -> dict:
+    """Get model calibration data — predicted probability vs actual win rate."""
+    if not db_path.exists():
+        return {"buckets": [], "brier_score": None, "total_predictions": 0}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    rows = []
+
+    # From actual trades
+    try:
+        trades = conn.execute("""
+            SELECT fair_q, won FROM weather_trades
+            WHERE settled = 1 AND fair_q IS NOT NULL AND fair_q > 0
+        """).fetchall()
+        for t in trades:
+            rows.append({"prob": t["fair_q"], "won": bool(t["won"])})
+    except Exception:
+        pass
+
+    # From scanned opportunities
+    try:
+        opps = conn.execute("""
+            SELECT fair_q, result FROM weather_scanned_opportunities
+            WHERE result IS NOT NULL AND fair_q IS NOT NULL AND fair_q > 0
+        """).fetchall()
+        for o in opps:
+            rows.append({"prob": o["fair_q"], "won": o["result"] == "won"})
+    except Exception:
+        pass
+
+    conn.close()
+
+    if not rows:
+        return {"buckets": [], "brier_score": None, "total_predictions": 0}
+
+    # Compute calibration by probability bucket
+    prob_buckets = [
+        ("5-20%", 0.05, 0.20),
+        ("20-40%", 0.20, 0.40),
+        ("40-60%", 0.40, 0.60),
+        ("60-80%", 0.60, 0.80),
+        ("80%+", 0.80, 1.01),
+    ]
+
+    buckets = []
+    total_brier = 0.0
+    for name, low, high in prob_buckets:
+        bucket = [r for r in rows if low <= r["prob"] < high]
+        if not bucket:
+            continue
+        wins = sum(1 for r in bucket if r["won"])
+        actual_rate = wins / len(bucket)
+        expected_rate = (low + min(high, 1.0)) / 2
+        buckets.append({
+            "bucket": name,
+            "count": len(bucket),
+            "wins": wins,
+            "actual_win_rate": round(actual_rate, 3),
+            "expected_win_rate": round(expected_rate, 3),
+            "calibration_error": round(actual_rate - expected_rate, 3),
+        })
+        for r in bucket:
+            total_brier += (r["prob"] - (1.0 if r["won"] else 0.0)) ** 2
+
+    brier = round(total_brier / len(rows), 4) if rows else None
+
+    return {
+        "buckets": buckets,
+        "brier_score": brier,
+        "total_predictions": len(rows),
+    }
+
+
 def get_model_accuracy(db_path: Path) -> dict:
     """Get weather model accuracy comparison data."""
     if not db_path.exists():
@@ -558,6 +633,9 @@ def update_dashboard(quiet: bool = False) -> None:
     # Generate model accuracy data
     model_accuracy = get_model_accuracy(WEATHER_ACCURACY_DB)
 
+    # Generate weather calibration data
+    weather_calibration = get_weather_calibration(WEATHER_DB)
+
     # Combined summary
     summary = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -587,6 +665,7 @@ def update_dashboard(quiet: bool = False) -> None:
     (OUTPUT_DIR / "sports.json").write_text(json.dumps(sports_stats, indent=2))
     (OUTPUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2))
     (OUTPUT_DIR / "model_accuracy.json").write_text(json.dumps(model_accuracy, indent=2))
+    (OUTPUT_DIR / "weather_calibration.json").write_text(json.dumps(weather_calibration, indent=2))
 
     if not quiet:
         print(f"Dashboard data updated at {OUTPUT_DIR}")
@@ -596,6 +675,8 @@ def update_dashboard(quiet: bool = False) -> None:
         if model_accuracy["models"]:
             best = model_accuracy["models"][0]
             print(f"  Model Accuracy: {len(model_accuracy['models'])} models tracked, best={best['source']} (MAE: {best['mae']}°F)")
+        if weather_calibration["brier_score"] is not None:
+            print(f"  Calibration: Brier={weather_calibration['brier_score']:.3f} ({weather_calibration['total_predictions']} predictions)")
 
 
 def main():

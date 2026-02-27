@@ -58,6 +58,8 @@ jobs:
       WEATHER_TOP_N: ${{ (github.event.inputs.top_n != '' && github.event.inputs.top_n) || '25' }}
       # Enable intraday progress adjustment (truncate + shrink dispersion)
       WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
+      # Enable ML quantile regression models (trained .pkl files in weather/models/)
+      WEATHER_USE_ML_MODEL: "true"
 
     steps:
       - name: Checkout
@@ -190,6 +192,7 @@ jobs:
           echo "[intraday] Collecting current temperature observations"
           python -m weather.scripts.collect_intraday_observations \
             --no-gate \
+            --forecast-source "$FORECAST_SOURCE" \
             --db "$WEATHER_DB_PATH"
 
       - name: Compute fair prices

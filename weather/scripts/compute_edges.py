@@ -858,6 +858,7 @@ def main() -> int:
             "target_date_local": target_date_local,
             "forecast_source": str(args.forecast_source),
             "forecast_high_f": fair.get("forecast_high_f"),
+            "model_source": fair.get("model_source", "unknown"),
             "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
             "kalshi_snapshot_time_utc": snap_time,
             "filters": {

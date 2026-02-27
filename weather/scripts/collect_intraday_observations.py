@@ -131,7 +131,11 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=str(DEFAULT_CONFIG))
     p.add_argument("--db", default=str(DEFAULT_DB))
-    p.add_argument("--forecast-source", default="nws_hourly_max")
+    p.add_argument(
+        "--forecast-source",
+        default=os.getenv("FORECAST_SOURCE", "nws_hourly_max"),
+        help="Forecast source (reads FORECAST_SOURCE env var for consistency with snapshot collection)",
+    )
     p.add_argument("--city", default="", help="Optional city_key filter")
     p.add_argument("--no-gate", action="store_true", help="Ignore time gate (run anytime)")
     args = p.parse_args()
@@ -169,9 +173,21 @@ def main() -> int:
                 print(f"[err] {c.key}: no observation station found")
                 continue
 
-            # Get observation
+            # Get observation — try primary station, then fall back to alternates
             nws_lib.polite_sleep()
             obs = nws_lib.get_latest_observation(s, station_id)
+            if not obs:
+                # Try alternate stations from cache
+                alt_stations = db_lib.fetch_all_city_stations(db_path, city_key=c.key)
+                for alt in alt_stations:
+                    alt_id = alt.get("station_id") if isinstance(alt, dict) else None
+                    if alt_id and alt_id != station_id:
+                        nws_lib.polite_sleep()
+                        obs = nws_lib.get_latest_observation(s, alt_id)
+                        if obs:
+                            qc_flags.append(f"ALT_STATION_{alt_id}")
+                            print(f"[info] {c.key}: primary {station_id} failed, using alt {alt_id}")
+                            break
             if not obs:
                 qc_flags.append("NO_OBSERVATION")
                 print(f"[err] {c.key}: no observation from {station_id}")
