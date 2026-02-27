@@ -54,8 +54,8 @@ jobs:
       SPORTS_DB_PATH: sports_trades.db
       # Discord notifications - use sports betting lines channel
       DISCORD_SPORTS_WEBHOOK: ${{ secrets.DISCORD_SPORTS_ALERT || secrets.DISCORD_WEBHOOK_URL }}
-      # Dry run (default true for safety)
-      SPORTS_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+      # Dry run — default ON (safe). Only disabled on manual dispatch with dry_run=false.
+      SPORTS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false' && '0' || '1' }}
 
     steps:
       - name: Checkout
