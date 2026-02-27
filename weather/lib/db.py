@@ -5,7 +5,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -1138,6 +1138,29 @@ def fetch_preferred_station(
             (city_key,),
         ).fetchone()
     return str(row[0]) if row else None
+
+
+def fetch_all_city_stations(
+    db_path: Path,
+    *,
+    city_key: str,
+) -> List[Dict[str, Any]]:
+    """Return all cached stations for a city, ordered by priority."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT station_id, station_name, priority
+            FROM city_stations
+            WHERE city_key = ?
+            ORDER BY priority ASC;
+            """,
+            (city_key,),
+        ).fetchall()
+    return [
+        {"station_id": r[0], "station_name": r[1], "priority": r[2]}
+        for r in rows
+    ]
 
 
 def ensure_weather_trades_schema(db_path: Path) -> None:

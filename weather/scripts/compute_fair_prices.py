@@ -34,6 +34,7 @@ from weather.lib import db as db_lib
 from weather.lib.fair import adjust_pmf_with_progress, normalize_pmf, shift_pmf, summarize_pmf
 from weather.lib.probability_ladder import (
     ProbabilityLadder,
+    apply_calibration,
     blend_ladders,
     from_percentiles,
     from_pmf,
@@ -53,8 +54,12 @@ except ImportError:
     HAS_ML = False
 
 
-def _build_fallback_gaussian_pmf(center: int, std: float = 4.0, min_tail_prob: float = 0.01) -> Dict[int, float]:
-    """Build a Gaussian PMF when no error model exists. Default std=4°F is typical NWS error."""
+DEFAULT_FALLBACK_STD = 4.0  # Typical NWS same-day forecast error
+
+
+def _build_fallback_gaussian_pmf(center: int, std: float = DEFAULT_FALLBACK_STD, min_tail_prob: float = 0.01) -> Dict[int, float]:
+    """Build a Gaussian PMF. std is data-driven when available, else 4°F."""
+    std = max(1.5, std)  # Floor: never narrower than 1.5°F
     denom = 2.0 * (std ** 2)
 
     def gaussian_density(k: int) -> float:
@@ -527,6 +532,16 @@ def main() -> int:
                         f"blended p10={ladder.p10} p50={ladder.p50} p90={ladder.p90}"
                     )
 
+        # Fetch bias data for non-ML paths (used to correct distribution center)
+        rolling_bias = _get_rolling_bias(
+            db_path, c.key, target_date_local, str(args.forecast_source),
+        )
+
+        # Fetch multi-model spread for data-driven Gaussian width
+        spread_for_fallback, spread_details = _get_multi_model_spread(
+            db_path, c.key, target_date_local,
+        )
+
         # Tier 2: Static monthly error PMF (legacy)
         if ladder is None:
             pmf_model = db_lib.fetch_error_model(
@@ -559,11 +574,26 @@ def main() -> int:
                 error_model_updated_at_utc = pmf_model["updated_at_utc"]
                 error_model_missing = False
 
-        # Tier 3: Fallback Gaussian
+        # Tier 3: Fallback Gaussian with data-driven std
         if ladder is None:
-            pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=4.0)
+            # Use multi-model spread to derive std if available
+            # spread ≈ p90 - p10 ≈ 2.56σ for normal distribution
+            if spread_for_fallback is not None and spread_for_fallback > 0:
+                fallback_std = max(1.5, spread_for_fallback / 2.56)
+                print(f"  [fallback] {c.key}: using multi-model spread={spread_for_fallback}F → std={fallback_std:.1f}F")
+            else:
+                fallback_std = DEFAULT_FALLBACK_STD
+            pmf_high = _build_fallback_gaussian_pmf(forecast_high, std=fallback_std)
             ladder = from_pmf(pmf_high, source="fallback_gaussian")
             model_source_type = "fallback_gaussian"
+
+        # Apply rolling bias correction to non-ML distributions
+        # This shifts the distribution center to account for systematic forecast bias
+        bias_applied = 0.0
+        if rolling_bias is not None and abs(rolling_bias) >= 0.5 and model_source_type != "ml_quantile":
+            bias_applied = round(rolling_bias, 1)
+            ladder = apply_calibration(ladder, bias=bias_applied, source=f"{ladder.source}+bias({bias_applied:+.1f})")
+            print(f"  [bias] {c.key}: applied 7d rolling bias correction of {bias_applied:+.1f}F")
 
         # Convert ladder PMF to the output format (backward compat with compute_edges.py)
         pmf_high = dict(ladder.pmf)
@@ -613,6 +643,10 @@ def main() -> int:
             "error_model_source": model_source,
             "error_model_snapshot_hour_local": model_snapshot_hour_local,
             "error_model_missing": error_model_missing,
+            "bias_correction": {
+                "rolling_7d_bias": round(rolling_bias, 2) if rolling_bias is not None else None,
+                "bias_applied": bias_applied,
+            },
             "pmf_high_f": {str(k): v for k, v in sorted(pmf_high.items())},
             "summary": {
                 "mean": summary.mean,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
@@ -106,12 +107,17 @@ def compute_progress(
 
 def shrink_pmf_dispersion(pmf: Dict[int, float], progress: float) -> Dict[int, float]:
     """
-    Shrink PMF dispersion linearly with progress (1:1 ratio).
+    Shrink PMF dispersion using a sqrt-based curve (less aggressive than linear).
 
-    As progress increases, the distribution shrinks toward its mean.
-    At progress=1.0, collapses to a point mass at the mean.
+    The shrink factor uses sqrt(1 - progress) so that:
+    - At progress=0.0: shrink_factor=1.0 (no change)
+    - At progress=0.25: shrink_factor=0.87 (13% narrower, was 25% with linear)
+    - At progress=0.50: shrink_factor=0.71 (29% narrower, was 50% with linear)
+    - At progress=0.75: shrink_factor=0.50 (50% narrower, was 75% with linear)
+    - At progress=1.0: shrink_factor=0.0 (collapses to mean)
 
-    Formula: new_dispersion = original_dispersion * (1 - progress)
+    This preserves more uncertainty in the early/mid day when the temperature
+    hasn't peaked yet, only collapsing aggressively near end of day.
 
     Args:
         pmf: Original PMF {temp: probability}
@@ -133,11 +139,13 @@ def shrink_pmf_dispersion(pmf: Dict[int, float], progress: float) -> Dict[int, f
 
     mean = sum(k * v for k, v in pmf.items()) / total
 
+    # sqrt-based shrinkage: preserves more width early in the day
+    shrink_factor = math.sqrt(1.0 - progress)
+
     # Shrink each temperature toward the mean
-    # new_temp = mean + (old_temp - mean) * (1 - progress)
     shrunk: Dict[float, float] = {}
     for k, v in pmf.items():
-        new_k = mean + (k - mean) * (1 - progress)
+        new_k = mean + (k - mean) * shrink_factor
         shrunk[new_k] = shrunk.get(new_k, 0.0) + v
 
     # Round to integers and renormalize

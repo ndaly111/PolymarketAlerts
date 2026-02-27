@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import requests
+from urllib3.util.retry import Retry
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,15 @@ def make_session(user_agent: str, timeout: float = 25.0) -> requests.Session:
             "Accept": "application/geo+json, application/json;q=0.9, */*;q=0.5",
         }
     )
-    adapter = requests.adapters.HTTPAdapter(max_retries=3)
+    # Retry with exponential backoff: 1s, 2s, 4s on 5xx errors and connection failures
+    retry = Retry(
+        total=4,
+        backoff_factor=1.0,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = requests.adapters.HTTPAdapter(max_retries=retry)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     s.request = _wrap_timeout(s.request, timeout)
@@ -98,7 +107,14 @@ def get_nearby_stations(
         r = s.get(url)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except requests.exceptions.Timeout:
+        print(f"[nws] TIMEOUT fetching stations for ({lat}, {lon})")
+        return []
+    except requests.exceptions.ConnectionError as e:
+        print(f"[nws] CONNECTION_ERROR fetching stations: {e}")
+        return []
+    except Exception as e:
+        print(f"[nws] ERROR fetching stations: {type(e).__name__}: {e}")
         return []
 
     features = data.get("features", [])
@@ -133,7 +149,14 @@ def get_latest_observation(
         r = s.get(url)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except requests.exceptions.Timeout:
+        print(f"[nws] TIMEOUT fetching observation from {station_id}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        print(f"[nws] CONNECTION_ERROR fetching observation from {station_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"[nws] ERROR fetching observation from {station_id}: {type(e).__name__}: {e}")
         return None
 
     props = data.get("properties", {})
@@ -205,7 +228,14 @@ def get_daily_observed_high(
         r = s.get(url, params=params)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except requests.exceptions.Timeout:
+        print(f"[nws] TIMEOUT fetching daily obs for {station_id} on {date_local}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        print(f"[nws] CONNECTION_ERROR fetching daily obs for {station_id}: {e}")
+        return None
+    except Exception as e:
+        print(f"[nws] ERROR fetching daily obs for {station_id}: {type(e).__name__}: {e}")
         return None
 
     features = data.get("features", [])
