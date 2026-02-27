@@ -188,7 +188,3 @@ jobs:
               done
             fi
           fi
-               sleep 2
-              done
-            fi
-          fi
