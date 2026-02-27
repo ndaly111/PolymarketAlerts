@@ -53,10 +53,12 @@ jobs:
       WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive
       WEATHER_ERROR_MODEL_HOUR: "12"
       WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
+      # ML model config (paper trading until validated)
+      WEATHER_USE_ML_MODEL: "true"
       # Discord notifications
       DISCORD_WEATHER_TRADES_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
-      # Dry run (off by default for live trading)
-      WEATHER_DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+      # Dry run — forced ON while ML model is in paper-trade validation
+      WEATHER_DRY_RUN: "1"
 
     steps:
       - name: Checkout
