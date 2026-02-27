@@ -214,6 +214,88 @@ def settle_weather_trades(client: KalshiAuthClient) -> SettlementResult:
 
 
 # =============================================================================
+# Weather Scanned Opportunities (model accuracy tracking)
+# =============================================================================
+
+def get_unsettled_scanned_opportunities(db_path: Path) -> List[Dict[str, Any]]:
+    """Get unsettled scanned opportunities for model accuracy tracking."""
+    if not db_path.exists():
+        return []
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    # Check if table exists
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='weather_scanned_opportunities'"
+    ).fetchone()
+    if not table_exists:
+        conn.close()
+        return []
+
+    # Ensure result/settled_at columns exist
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(weather_scanned_opportunities);").fetchall()}
+    if "result" not in columns:
+        conn.execute("ALTER TABLE weather_scanned_opportunities ADD COLUMN result TEXT;")
+        conn.commit()
+    if "settled_at" not in columns:
+        conn.execute("ALTER TABLE weather_scanned_opportunities ADD COLUMN settled_at TEXT;")
+        conn.commit()
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, scan_date, city_key, market_ticker, event_display, side,
+               ask_cents, fair_q, ev
+        FROM weather_scanned_opportunities
+        WHERE result IS NULL
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def settle_scanned_opportunities(client: KalshiAuthClient) -> int:
+    """Settle scanned opportunities to track model accuracy."""
+    print("\n" + "=" * 50)
+    print("WEATHER SCANNED OPPORTUNITIES (model accuracy)")
+    print("=" * 50)
+
+    opps = get_unsettled_scanned_opportunities(WEATHER_DB)
+    print(f"Found {len(opps)} unsettled scanned opportunities")
+
+    settled_count = 0
+    conn = sqlite3.connect(str(WEATHER_DB))
+    cur = conn.cursor()
+
+    for opp in opps:
+        ticker = opp["market_ticker"]
+        side = opp["side"].upper()
+
+        settlement = check_market_settlement(client, ticker)
+        if settlement is None or not settlement["settled"]:
+            continue
+
+        market_result = settlement["result"]
+        won = (side == "YES" and market_result == "yes") or \
+              (side == "NO" and market_result == "no")
+        result_str = "won" if won else "lost"
+        now = datetime.now(UTC).isoformat()
+
+        cur.execute("""
+            UPDATE weather_scanned_opportunities
+            SET result = ?, settled_at = ?
+            WHERE id = ?
+        """, (result_str, now, opp["id"]))
+
+        settled_count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"Settled {settled_count} scanned opportunities")
+    return settled_count
+
+
+# =============================================================================
 # NBM Strategy Trades (paper trades for comparison)
 # =============================================================================
 
@@ -512,6 +594,108 @@ def settle_sports_trades(client: KalshiAuthClient) -> SettlementResult:
 # Main
 # =============================================================================
 
+def generate_weather_calibration_report(db_path: Path) -> Optional[str]:
+    """
+    Generate a calibration report comparing model predicted probs vs actual outcomes.
+
+    Uses both weather_trades and weather_scanned_opportunities to get a fuller picture.
+    Returns a Discord-friendly string, or None if insufficient data.
+    """
+    if not db_path.exists():
+        return None
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    # Get settled trades with model probabilities
+    rows = []
+
+    # From actual trades
+    try:
+        trades = conn.execute("""
+            SELECT fair_q, ev, won, fill_price_cents, limit_price_cents, payout_cents, side
+            FROM weather_trades
+            WHERE settled = 1 AND fair_q IS NOT NULL AND fair_q > 0
+        """).fetchall()
+        for t in trades:
+            rows.append({"prob": t["fair_q"], "won": bool(t["won"]), "source": "trade"})
+    except Exception:
+        pass
+
+    # From scanned opportunities
+    try:
+        opps = conn.execute("""
+            SELECT fair_q, ev, result, side
+            FROM weather_scanned_opportunities
+            WHERE result IS NOT NULL AND fair_q IS NOT NULL AND fair_q > 0
+        """).fetchall()
+        for o in opps:
+            rows.append({"prob": o["fair_q"], "won": o["result"] == "won", "source": "scan"})
+    except Exception:
+        pass
+
+    conn.close()
+
+    if len(rows) < 10:
+        return None
+
+    # Bucket by predicted probability
+    prob_buckets = [
+        ("5-20%", 0.05, 0.20),
+        ("20-40%", 0.20, 0.40),
+        ("40-60%", 0.40, 0.60),
+        ("60-80%", 0.60, 0.80),
+        ("80%+", 0.80, 1.01),
+    ]
+
+    lines = [
+        "**Weather Model Calibration Report**",
+        f"Based on {len(rows)} settled predictions",
+        "",
+        "```",
+        f"{'Predicted':>12} | {'Count':>6} | {'Wins':>5} | {'Actual':>8} | {'Status':>10}",
+        "-" * 55,
+    ]
+
+    total_brier = 0.0
+    for name, low, high in prob_buckets:
+        bucket = [r for r in rows if low <= r["prob"] < high]
+        if not bucket:
+            continue
+
+        wins = sum(1 for r in bucket if r["won"])
+        actual_rate = wins / len(bucket)
+        expected_rate = (low + min(high, 1.0)) / 2
+        diff = actual_rate - expected_rate
+
+        # Calibration assessment
+        if abs(diff) < 0.10:
+            status = "Good"
+        elif diff > 0:
+            status = "Overperform"
+        else:
+            status = "Underperform"
+
+        lines.append(
+            f"{name:>12} | {len(bucket):>6} | {wins:>5} | {actual_rate:>7.0%} | {status:>10}"
+        )
+
+        # Brier score contribution
+        for r in bucket:
+            total_brier += (r["prob"] - (1.0 if r["won"] else 0.0)) ** 2
+
+    brier = total_brier / len(rows) if rows else 0
+    total_wins = sum(1 for r in rows if r["won"])
+    overall_rate = total_wins / len(rows)
+
+    lines.append("-" * 55)
+    lines.append(f"{'Overall':>12} | {len(rows):>6} | {total_wins:>5} | {overall_rate:>7.0%} |")
+    lines.append(f"Brier Score: {brier:.3f} (lower is better, 0.25 = random)")
+    lines.append("```")
+
+    return "\n".join(lines)
+
+
 def post_settlement_discord(result: SettlementResult, webhook: str) -> None:
     """Post settlement summary to Discord."""
     if result.settled_count == 0 or not webhook:
@@ -551,6 +735,9 @@ def main() -> int:
     props_result = settle_props_trades(client)
     sports_result = settle_sports_trades(client)
 
+    # Settle scanned opportunities (model accuracy tracking)
+    scanned_settled = settle_scanned_opportunities(client)
+
     # Summary
     total_settled = weather_result.settled_count + nbm_result.settled_count + props_result.settled_count + sports_result.settled_count
     total_wins = weather_result.wins + nbm_result.wins + props_result.wins + sports_result.wins
@@ -570,8 +757,19 @@ def main() -> int:
     post_settlement_discord(props_result, DISCORD_PROPS)
     post_settlement_discord(sports_result, DISCORD_SPORTS)
 
+    # Post calibration report once per day (6pm ET check)
+    now_et = datetime.now(ET)
+    if now_et.hour == 18:
+        try:
+            cal_report = generate_weather_calibration_report(WEATHER_DB)
+            if cal_report:
+                post_discord(DISCORD_WEATHER, cal_report)
+                print("\nCalibration report posted to Discord")
+        except Exception as e:
+            print(f"\n[warn] Failed to generate calibration report: {e}")
+
     # Update dashboard
-    if total_settled > 0:
+    if total_settled > 0 or scanned_settled > 0:
         try:
             from scripts.generate_dashboard_data import update_dashboard
             update_dashboard(quiet=True)
