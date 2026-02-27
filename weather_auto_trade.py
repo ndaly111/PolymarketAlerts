@@ -33,10 +33,11 @@ from kalshi_auth_client import KalshiAuthClient
 
 # --- Configuration ---
 MIN_EV = float(
-    os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.20"))
-)  # 20% min EV — lower-EV trades historically unprofitable
+    os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.10"))
+)  # 10% min EV
 MIN_Q = float(os.getenv("WEATHER_MIN_Q", "0.05"))  # 5% min probability
 MAX_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MAX_ASK", "85"))  # ≤ 85¢
+MIN_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MIN_ASK", "20"))  # ≥ 20¢ (skip cheap longshots)
 MAX_TRADES_PER_DAY = int(os.getenv("WEATHER_MAX_TRADES_PER_DAY", "10"))
 CONTRACTS_PER_TRADE = int(os.getenv("WEATHER_CONTRACTS_PER_TRADE", "1"))
 
@@ -459,6 +460,8 @@ def load_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict
 
                 if ask_cents > MAX_KALSHI_ASK_CENTS:
                     continue
+                if ask_cents < MIN_KALSHI_ASK_CENTS:
+                    continue
 
                 event = candidate.get("event", {})
                 event_display = event.get("desc", "")
@@ -517,7 +520,7 @@ def format_summary_message(
     header_lines = [
         f"**Weather Auto-Trade Summary — {target_date}**",
         f"Forecast source: {forecast_source}",
-        f"Min EV: {MIN_EV:.0%} | Max ask: {MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
+        f"Min EV: {MIN_EV:.0%} | Ask range: {MIN_KALSHI_ASK_CENTS}-{MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
         f"Placed: {len(placed)} | Skipped: {len(skipped)} | Failed: {len(failed)}",
     ]
     if DRY_RUN:
@@ -673,7 +676,26 @@ def execute_trade(
 
     print(f"  Fresh Kalshi ask: {kalshi_ask}¢")
 
-    # Check price hasn't moved too much
+    # Check price is within acceptable range
+    if kalshi_ask < MIN_KALSHI_ASK_CENTS:
+        print(f"  [skip] Kalshi ask {kalshi_ask}¢ < {MIN_KALSHI_ASK_CENTS}¢ floor (cheap longshot)")
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            0, kalshi_ask, fair_q, pre_ev, forecast_high_f,
+            None, "SKIPPED_MIN_ASK"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": pre_ev,
+            "order_id": None,
+            "status": "SKIPPED_MIN_ASK",
+        }
+
     if kalshi_ask > MAX_KALSHI_ASK_CENTS:
         print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ limit")
         record_trade(
@@ -927,7 +949,7 @@ def main() -> int:
     print(f"  → DRY_RUN={DRY_RUN}, AUTOTRADE_ENABLED={AUTOTRADE_ENABLED}")
     print(f"Min EV threshold: {MIN_EV:.0%}")
     print(f"Min q: {MIN_Q:.1%}")
-    print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
+    print(f"Kalshi ask range: {MIN_KALSHI_ASK_CENTS}-{MAX_KALSHI_ASK_CENTS}¢")
     print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Contracts per trade: {CONTRACTS_PER_TRADE}")
     print("=" * 60)
