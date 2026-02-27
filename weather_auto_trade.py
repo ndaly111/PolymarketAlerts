@@ -33,8 +33,8 @@ from kalshi_auth_client import KalshiAuthClient
 
 # --- Configuration ---
 MIN_EV = float(
-    os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.10"))
-)  # 10% min EV (matches edge computation)
+    os.getenv("WEATHER_AUTOTRADE_MIN_EV", os.getenv("WEATHER_MIN_EV", "0.20"))
+)  # 20% min EV — lower-EV trades historically unprofitable
 MIN_Q = float(os.getenv("WEATHER_MIN_Q", "0.05"))  # 5% min probability
 MAX_KALSHI_ASK_CENTS = int(os.getenv("WEATHER_MAX_ASK", "85"))  # ≤ 85¢
 MAX_TRADES_PER_DAY = int(os.getenv("WEATHER_MAX_TRADES_PER_DAY", "10"))
