@@ -27,40 +27,37 @@ jobs:
     env:
       TZ: America/New_York
       PYTHONPATH: ${{ github.workspace }}
+      FORECAST_SOURCE: open_meteo
+      OPEN_METEO_MODEL: hrrr
       # Kalshi API credentials
       KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
       KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY }}
       KALSHI_BASE: ${{ vars.KALSHI_BASE || 'https://api.elections.kalshi.com/trade-api/v2' }}
+      WEATHER_KALSHI_SERIES_TICKERS: ${{ vars.WEATHER_KALSHI_SERIES_TICKERS }}
       # NWS API
       NWS_USER_AGENT: "weather-auto-trader/0.1 (contact: ${{ secrets.NWS_CONTACT_EMAIL || 'you@example.com' }})"
-      # Weather database
+      # Database paths
       WEATHER_DB_PATH: weather/data/weather_forecast_accuracy.db
-      # Trades database
       WEATHER_TRADES_DB_PATH: weather_trades.db
+      # Model config (must match daily scan)
+      WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive
+      WEATHER_ERROR_MODEL_HOUR: "12"
+      WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
+      WEATHER_USE_ML_MODEL: "true"
       # Trading parameters
       WEATHER_MIN_EV: "0.10"
       WEATHER_AUTOTRADE_MIN_EV: ${{ vars.WEATHER_AUTOTRADE_MIN_EV || '0.10' }}
       WEATHER_MIN_ASK: "20"
       WEATHER_MIN_Q: "0.05"
       WEATHER_MAX_ASK: "85"
+      WEATHER_BUY_FEE_CENTS: "2"
       WEATHER_MAX_TRADES_PER_DAY: "10"
-      WEATHER_ORDER_TIMEOUT: "30"
       WEATHER_CONTRACTS_PER_TRADE: "1"
       # SAFETY: Keep autotrade OFF until model accuracy is validated.
       # Both flags must agree before real money goes out:
       #   WEATHER_AUTOTRADE_ENABLED must be "1" AND WEATHER_DRY_RUN must be "0"
       WEATHER_AUTOTRADE_ENABLED: "0"
-      # Dry run — forced ON while ML model is in paper-trade validation
       WEATHER_DRY_RUN: "1"
-      # Forecast/model config
-      # Use Open-Meteo HRRR (best for US short-term, 3km resolution)
-      WEATHER_FORECAST_SOURCE: open_meteo
-      OPEN_METEO_MODEL: hrrr
-      WEATHER_ERROR_MODEL_SOURCE: mos_gfs_18z_archive
-      WEATHER_ERROR_MODEL_HOUR: "12"
-      WEATHER_ENABLE_INTRADAY_ADJUSTMENT: "true"
-      # ML model config (paper trading until validated)
-      WEATHER_USE_ML_MODEL: "true"
       # Discord notifications
       DISCORD_WEATHER_TRADES_WEBHOOK: ${{ secrets.DISCORD_WEATHER_ALERTS || secrets.DISCORD_WEBHOOK_URL }}
 
@@ -71,22 +68,16 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Weather setup
+        uses: ./.github/actions/weather_setup
         with:
           python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install requests cryptography pyyaml numpy lightgbm scikit-learn
+          install-root-requirements: "true"
 
       - name: Check credentials
         run: |
           if [ -z "$KALSHI_API_KEY_ID" ] || [ -z "$KALSHI_PRIVATE_KEY" ]; then
             echo "ERROR: Kalshi credentials not configured"
-            echo "Please set KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY secrets"
             exit 1
           fi
           echo "Credentials OK"
@@ -98,7 +89,74 @@ jobs:
           mkdir -p weather/outputs/models
           mkdir -p weather/data
 
+      - name: Set run date
+        id: run_date
+        run: echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+
+      # --- Data pipeline (same steps as daily scan, fresh each run) ---
+
+      - name: Collect fresh forecast snapshot
+        run: |
+          python -m weather.scripts.collect_forecast_snapshot \
+            --no-gate \
+            --use-local-hour \
+            --source "$FORECAST_SOURCE" \
+            --target-date "${{ steps.run_date.outputs.date }}" \
+            --db "$WEATHER_DB_PATH"
+
+      - name: Collect intraday observations
+        run: |
+          python -m weather.scripts.collect_intraday_observations \
+            --no-gate \
+            --forecast-source "$FORECAST_SOURCE" \
+            --db "$WEATHER_DB_PATH"
+
+      - name: Compute fair prices
+        run: |
+          python -m weather.scripts.compute_fair_prices \
+            --forecast-source "$FORECAST_SOURCE" \
+            --use-latest \
+            --db "$WEATHER_DB_PATH"
+
+      - name: Collect Kalshi weather markets
+        id: kalshi_markets
+        run: |
+          set -euo pipefail
+          mkdir -p weather/outputs
+          SERIES_ARG=""
+          if [ -n "${WEATHER_KALSHI_SERIES_TICKERS:-}" ]; then
+            SERIES_ARG="--series-tickers ${WEATHER_KALSHI_SERIES_TICKERS}"
+          fi
+          python -m weather.scripts.collect_kalshi_weather_markets \
+            ${SERIES_ARG} \
+            --require-city-match \
+            --db "$WEATHER_DB_PATH" \
+            --out-json weather/outputs/kalshi_collect.json
+          python - <<'PY'
+          import json, os
+          with open("weather/outputs/kalshi_collect.json") as f:
+              data = json.load(f)
+          ok = "true" if data.get("rows_written", 0) > 0 else "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"ok={ok}\n")
+          PY
+
+      - name: Compute edges
+        if: steps.kalshi_markets.outputs.ok == 'true'
+        run: |
+          python -m weather.scripts.compute_edges \
+            --forecast-source "$FORECAST_SOURCE" \
+            --date "${{ steps.run_date.outputs.date }}" \
+            --fee-cents "$WEATHER_BUY_FEE_CENTS" \
+            --min-ev "$WEATHER_MIN_EV" \
+            --min-q "$WEATHER_MIN_Q" \
+            --require-ask \
+            --db "$WEATHER_DB_PATH"
+
+      # --- Trading (lightweight: just reads edges and places orders) ---
+
       - name: Run auto trader
+        if: steps.kalshi_markets.outputs.ok == 'true'
         run: |
           echo "Running weather auto trader..."
           echo "Dry run: $WEATHER_DRY_RUN"
