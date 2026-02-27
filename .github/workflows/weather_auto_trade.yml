@@ -2,9 +2,8 @@ name: Weather Auto Trade
 
 on:
   schedule:
-    # Run every 15 min from 4am to 1pm ET (no API costs - NWS and Kalshi are free)
-    - cron: "*/15 9-17 * * *"   # 4am-12:45pm ET (9-17 UTC)
-    - cron: "0 18 * * *"        # 1pm ET final run (18 UTC)
+    # Run 3x/day: 5am ET, 8am ET, 11am ET (v2: reduced from every-15-min)
+    - cron: "0 10,13,16 * * *"   # 5am, 8am, 11am ET (UTC)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -186,6 +185,10 @@ jobs:
                 git pull --rebase && git push && break
                 echo "Push attempt $i failed, retrying..."
                 sleep 2
+              done
+            fi
+          fi
+               sleep 2
               done
             fi
           fi
