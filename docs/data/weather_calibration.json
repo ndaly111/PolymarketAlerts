@@ -1,0 +1,46 @@
+{
+  "buckets": [
+    {
+      "bucket": "5-20%",
+      "count": 77,
+      "wins": 23,
+      "actual_win_rate": 0.299,
+      "expected_win_rate": 0.125,
+      "calibration_error": 0.174
+    },
+    {
+      "bucket": "20-40%",
+      "count": 52,
+      "wins": 14,
+      "actual_win_rate": 0.269,
+      "expected_win_rate": 0.3,
+      "calibration_error": -0.031
+    },
+    {
+      "bucket": "40-60%",
+      "count": 34,
+      "wins": 7,
+      "actual_win_rate": 0.206,
+      "expected_win_rate": 0.5,
+      "calibration_error": -0.294
+    },
+    {
+      "bucket": "60-80%",
+      "count": 11,
+      "wins": 4,
+      "actual_win_rate": 0.364,
+      "expected_win_rate": 0.7,
+      "calibration_error": -0.336
+    },
+    {
+      "bucket": "80%+",
+      "count": 9,
+      "wins": 2,
+      "actual_win_rate": 0.222,
+      "expected_win_rate": 0.9,
+      "calibration_error": -0.678
+    }
+  ],
+  "brier_score": 0.2518,
+  "total_predictions": 183
+}
