@@ -596,10 +596,11 @@ def settle_sports_trades(client: KalshiAuthClient) -> SettlementResult:
 
 def generate_weather_calibration_report(db_path: Path) -> Optional[str]:
     """
-    Generate a calibration report comparing model predicted probs vs actual outcomes.
+    Generate a per-city P&L report for weather trades.
 
-    Uses both weather_trades and weather_scanned_opportunities to get a fuller picture.
-    Returns a Discord-friendly string, or None if insufficient data.
+    Shows trades and P&L broken down by city in a narrow,
+    mobile-friendly format.  Returns a Discord-friendly string,
+    or None if insufficient data.
     """
     if not db_path.exists():
         return None
@@ -607,90 +608,54 @@ def generate_weather_calibration_report(db_path: Path) -> Optional[str]:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
-    # Get settled trades with model probabilities
-    rows = []
-
-    # From actual trades
     try:
-        trades = conn.execute("""
-            SELECT fair_q, ev, won, fill_price_cents, limit_price_cents, payout_cents, side
+        rows = conn.execute("""
+            SELECT city_key,
+                   COUNT(*) AS trades,
+                   SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN won = 0 THEN 1 ELSE 0 END) AS losses,
+                   SUM(COALESCE(payout_cents, 0)
+                       - COALESCE(fill_price_cents, limit_price_cents, 0))
+                       AS pnl_cents
             FROM weather_trades
-            WHERE settled = 1 AND fair_q IS NOT NULL AND fair_q > 0
+            WHERE settled = 1
+            GROUP BY city_key
+            ORDER BY pnl_cents DESC
         """).fetchall()
-        for t in trades:
-            rows.append({"prob": t["fair_q"], "won": bool(t["won"]), "source": "trade"})
     except Exception:
-        pass
-
-    # From scanned opportunities
-    try:
-        opps = conn.execute("""
-            SELECT fair_q, ev, result, side
-            FROM weather_scanned_opportunities
-            WHERE result IS NOT NULL AND fair_q IS NOT NULL AND fair_q > 0
-        """).fetchall()
-        for o in opps:
-            rows.append({"prob": o["fair_q"], "won": o["result"] == "won", "source": "scan"})
-    except Exception:
-        pass
+        conn.close()
+        return None
 
     conn.close()
 
-    if len(rows) < 10:
+    if not rows:
         return None
 
-    # Bucket by predicted probability
-    prob_buckets = [
-        ("5-20%", 0.05, 0.20),
-        ("20-40%", 0.20, 0.40),
-        ("40-60%", 0.40, 0.60),
-        ("60-80%", 0.60, 0.80),
-        ("80%+", 0.80, 1.01),
-    ]
+    total_trades = sum(r["trades"] for r in rows)
+    total_wins = sum(r["wins"] for r in rows)
+    total_losses = sum(r["losses"] for r in rows)
+    total_pnl = sum(r["pnl_cents"] for r in rows)
 
     lines = [
-        "**Weather Model Calibration Report**",
-        f"Based on {len(rows)} settled predictions",
+        "**Weather P&L by City**",
+        f"{total_trades} settled trades",
         "",
         "```",
-        f"{'Predicted':>12} | {'Count':>6} | {'Wins':>5} | {'Actual':>8} | {'Status':>10}",
-        "-" * 55,
+        f"{'City':<6} W-L    P&L",
+        "-" * 22,
     ]
 
-    total_brier = 0.0
-    for name, low, high in prob_buckets:
-        bucket = [r for r in rows if low <= r["prob"] < high]
-        if not bucket:
-            continue
+    for r in rows:
+        city = r["city_key"][:6]
+        record = f"{r['wins']}-{r['losses']}"
+        pnl = r["pnl_cents"]
+        pnl_str = f"{pnl:+d}c"
+        lines.append(f"{city:<6} {record:<6} {pnl_str:>6}")
 
-        wins = sum(1 for r in bucket if r["won"])
-        actual_rate = wins / len(bucket)
-        expected_rate = (low + min(high, 1.0)) / 2
-        diff = actual_rate - expected_rate
-
-        # Calibration assessment
-        if abs(diff) < 0.10:
-            status = "Good"
-        elif diff > 0:
-            status = "Overperform"
-        else:
-            status = "Underperform"
-
-        lines.append(
-            f"{name:>12} | {len(bucket):>6} | {wins:>5} | {actual_rate:>7.0%} | {status:>10}"
-        )
-
-        # Brier score contribution
-        for r in bucket:
-            total_brier += (r["prob"] - (1.0 if r["won"] else 0.0)) ** 2
-
-    brier = total_brier / len(rows) if rows else 0
-    total_wins = sum(1 for r in rows if r["won"])
-    overall_rate = total_wins / len(rows)
-
-    lines.append("-" * 55)
-    lines.append(f"{'Overall':>12} | {len(rows):>6} | {total_wins:>5} | {overall_rate:>7.0%} |")
-    lines.append(f"Brier Score: {brier:.3f} (lower is better, 0.25 = random)")
+    lines.append("-" * 22)
+    record = f"{total_wins}-{total_losses}"
+    pnl_str = f"{total_pnl:+d}c"
+    lines.append(f"{'Total':<6} {record:<6} {pnl_str:>6}")
     lines.append("```")
 
     return "\n".join(lines)
