@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd /home/ubuntu/PolymarketAlerts
-source .env
+set -a; source .env; set +a
 export PYTHONPATH=/home/ubuntu/PolymarketAlerts
 PYTHON=/home/ubuntu/venv/bin/python
 
