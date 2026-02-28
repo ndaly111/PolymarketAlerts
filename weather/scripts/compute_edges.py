@@ -213,6 +213,81 @@ def _strike_overlaps_support(spec_kind: str, a: int, b: Optional[int], support_l
     return False
 
 
+def _market_type_from_spec(spec_kind: str) -> str:
+    """Classify a market as 'threshold' (T-ticker) or 'bucket' (B-ticker) based on event kind."""
+    k = (spec_kind or "").strip().lower()
+    if k in ("ge", "gte", "gt", "le", "lte", "lt"):
+        return "threshold"
+    return "bucket"
+
+
+_TYPE_PRIORITY = {"threshold": 0, "basket": 1, "bucket": 2}
+
+
+def compute_baskets(scored_markets: List[Dict[str, Any]], min_ev: float) -> List[Dict[str, Any]]:
+    """Group positive-EV YES bucket markets and combine into basket opportunities.
+
+    Returns list of basket candidates (one basket = all qualifying legs for a city).
+    """
+    buckets = [
+        m for m in scored_markets
+        if m.get("market_type") == "bucket"
+        and float((m.get("decision") or {}).get("ev") or 0.0) > 0
+        and (m.get("decision") or {}).get("side_to_buy") == "YES"
+    ]
+    if len(buckets) < 2:
+        return []
+
+    buckets.sort(key=lambda m: (m.get("event") or {}).get("a", 0))
+
+    basket_ev = sum(float((m.get("decision") or {}).get("ev") or 0.0) for m in buckets)
+    if basket_ev <= min_ev:
+        return []
+
+    combined_q = sum(float(m.get("model_q") or 0.0) for m in buckets)
+    total_cost_cents = sum(
+        round(float((m.get("prices") or {}).get("yes_ask") or 0.0) * 100)
+        for m in buckets
+    )
+
+    first_event = buckets[0].get("event") or {}
+    last_event = buckets[-1].get("event") or {}
+    first_a = first_event.get("a")
+    last_b = last_event.get("b")
+
+    return [{
+        "market_type": "basket",
+        "market_ticker": ",".join(m.get("market_ticker", "") for m in buckets),
+        "title": f"Basket: {first_event.get('desc', '')} to {last_event.get('desc', '')}",
+        "event": {
+            "kind": "basket",
+            "a": first_a,
+            "b": last_b,
+            "desc": f"{first_a}-{last_b}°F basket ({len(buckets)} legs)",
+        },
+        "model_q": combined_q,
+        "prices": {
+            "yes_ask": total_cost_cents / 100.0,
+            "no_ask": None,
+        },
+        "decision": {
+            "side_to_buy": "YES",
+            "buy_price": total_cost_cents / 100.0,
+            "ev": basket_ev,
+        },
+        "legs": [
+            {
+                "market_ticker": m.get("market_ticker", ""),
+                "ask_cents": round(float((m.get("prices") or {}).get("yes_ask") or 0.0) * 100),
+                "q": float(m.get("model_q") or 0.0),
+                "ev": float((m.get("decision") or {}).get("ev") or 0.0),
+            }
+            for m in buckets
+        ],
+        "liquidity": buckets[0].get("liquidity", {}),
+    }]
+
+
 def load_cities(config_path: Path) -> List[City]:
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     out: List[City] = []
@@ -831,6 +906,7 @@ def main() -> int:
 
             scored.append(
                 {
+                    "market_type": _market_type_from_spec(spec.kind),
                     "market_ticker": row.get("market_ticker"),
                     "title": title,
                     "event": {"kind": spec.kind, "a": spec.a, "b": spec.b, "desc": spec.describe()},
@@ -852,8 +928,13 @@ def main() -> int:
                 }
             )
 
-        scored.sort(key=lambda r: float(((r.get("decision") or {}).get("ev") or 0.0)), reverse=True)
+        scored.sort(key=lambda r: (
+            _TYPE_PRIORITY.get(r.get("market_type", "bucket"), 2),
+            -float(((r.get("decision") or {}).get("ev") or 0.0)),
+        ))
         scored = scored[: max(1, top_n)]
+
+        baskets = compute_baskets(scored, min_ev)
 
         out = {
             "city_key": c.key,
@@ -881,6 +962,7 @@ def main() -> int:
             },
             "drops": drops,
             "candidates": scored,
+            "baskets": baskets,
         }
 
         out_dir.mkdir(parents=True, exist_ok=True)

@@ -490,6 +490,180 @@ def load_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict
     return opportunities
 
 
+def load_basket_opportunities(forecast_source: str, target_date: str) -> List[Dict[str, Any]]:
+    """Load pre-computed basket opportunities from JSON edge artifacts."""
+    baskets = []
+    src_slug = forecast_source.replace("/", "_")
+    edges_dir = EDGES_BASE / src_slug / target_date
+
+    if not edges_dir.exists():
+        return []
+
+    for json_file in edges_dir.glob("*.json"):
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+            city_key = data.get("city_key", json_file.stem)
+            forecast_high_f = data.get("forecast_high_f")
+
+            for basket in data.get("baskets", []):
+                ev = (basket.get("decision") or {}).get("ev", 0)
+                if ev < MIN_EV:
+                    continue
+                baskets.append({
+                    "city_key": city_key,
+                    "basket": basket,
+                    "forecast_high_f": forecast_high_f,
+                    "ev": ev,
+                })
+        except Exception as e:
+            print(f"  [warn] Error loading baskets from {json_file}: {e}")
+
+    baskets.sort(key=lambda x: x.get("ev", 0), reverse=True)
+    return baskets
+
+
+def execute_basket(
+    client: KalshiAuthClient,
+    db_path: Path,
+    basket_opp: Dict[str, Any],
+    trade_enabled: bool,
+) -> List[Dict[str, Any]]:
+    """Place one YES order per qualifying leg in the basket.
+
+    Each leg counts as 1 toward the daily trade limit.
+    Skips legs with fresh ask < 5¢ (junk/already-resolved markets).
+    Returns a result dict per leg processed.
+    """
+    basket = basket_opp["basket"]
+    city_key = basket_opp["city_key"]
+    forecast_high_f = basket_opp.get("forecast_high_f")
+    basket_ticker = basket.get("market_ticker", "")
+    basket_desc = (basket.get("event") or {}).get("desc", basket_ticker)
+    basket_ev = basket_opp.get("ev", 0)
+
+    print(f"\n--- Processing basket: {city_key} | {basket_desc} ---")
+    print(f"  {len(basket.get('legs', []))} legs | basket EV: {basket_ev:.1%}")
+
+    results = []
+    for leg in basket.get("legs", []):
+        ticker = leg["market_ticker"]
+        ask_cents = leg["ask_cents"]
+        leg_ev = leg.get("ev", 0)
+        fair_q = leg.get("q", 0)
+
+        # Skip junk/already-resolved markets
+        if ask_cents < 5:
+            print(f"  [skip leg] {ticker} ask {ask_cents}¢ < 5¢ (junk market)")
+            continue
+
+        if already_traded_today(db_path, ticker):
+            print(f"  [skip leg] Already traded {ticker} today")
+            results.append({
+                "ticker": ticker,
+                "city": city_key,
+                "event": basket_desc,
+                "side": "YES",
+                "limit": ask_cents,
+                "fair_q": fair_q,
+                "ev": leg_ev,
+                "order_id": None,
+                "status": "SKIPPED_ALREADY_TRADED",
+            })
+            continue
+
+        # Re-fetch fresh price if client available; apply min-ask guard
+        if client is not None:
+            fresh = fetch_fresh_kalshi_price(client, ticker)
+            if fresh:
+                fresh_ask = fresh["yes_ask"]
+                if fresh_ask < 5:
+                    print(f"  [skip leg] {ticker} fresh ask {fresh_ask}¢ < 5¢")
+                    continue
+                ask_cents = fresh_ask
+        print(f"  Leg: {ticker} YES at {ask_cents}¢ | leg EV {leg_ev:.1%}")
+
+        if not trade_enabled:
+            record_trade(
+                db_path, city_key, ticker, basket_desc, "YES",
+                CONTRACTS_PER_TRADE, ask_cents, fair_q, leg_ev, forecast_high_f,
+                None, "SKIPPED_AUTOTRADE_DISABLED",
+            )
+            results.append({
+                "ticker": ticker,
+                "city": city_key,
+                "event": basket_desc,
+                "side": "YES",
+                "limit": ask_cents,
+                "fair_q": fair_q,
+                "ev": leg_ev,
+                "order_id": None,
+                "status": "SKIPPED_AUTOTRADE_DISABLED",
+            })
+            continue
+
+        if DRY_RUN:
+            print(f"  [DRY_RUN] Would place {ticker} YES at {ask_cents}¢")
+            record_trade(
+                db_path, city_key, ticker, basket_desc, "YES",
+                CONTRACTS_PER_TRADE, ask_cents, fair_q, leg_ev, forecast_high_f,
+                "DRY_RUN", "dry_run",
+            )
+            results.append({
+                "ticker": ticker,
+                "city": city_key,
+                "event": basket_desc,
+                "side": "YES",
+                "limit": ask_cents,
+                "fair_q": fair_q,
+                "ev": leg_ev,
+                "order_id": "DRY_RUN",
+                "status": "DRY_RUN",
+            })
+            continue
+
+        try:
+            order = client.place_order(
+                ticker=ticker,
+                side="yes",
+                quantity=CONTRACTS_PER_TRADE,
+                limit_price=ask_cents,
+            )
+            order_id = order.get("order_id", order.get("id", ""))
+            print(f"    Order placed: {order_id}")
+            record_trade(
+                db_path, city_key, ticker, basket_desc, "YES",
+                CONTRACTS_PER_TRADE, ask_cents, fair_q, leg_ev, forecast_high_f,
+                order_id, "PLACED",
+            )
+            results.append({
+                "ticker": ticker,
+                "city": city_key,
+                "event": basket_desc,
+                "side": "YES",
+                "limit": ask_cents,
+                "fair_q": fair_q,
+                "ev": leg_ev,
+                "order_id": order_id,
+                "status": "PLACED",
+            })
+        except Exception as e:
+            print(f"  [error] Failed to place leg {ticker}: {e}")
+            results.append({
+                "ticker": ticker,
+                "city": city_key,
+                "event": basket_desc,
+                "side": "YES",
+                "limit": ask_cents,
+                "fair_q": fair_q,
+                "ev": leg_ev,
+                "order_id": None,
+                "status": "FAILED_PLACE_ORDER",
+                "error": str(e)[:120],
+            })
+
+    return results
+
+
 def post_discord(message: str) -> None:
     """Post to Discord webhook."""
     if not DISCORD_WEBHOOK:
@@ -1012,8 +1186,30 @@ def main() -> int:
             trades_placed += 1
             increment_trades_today(TRADES_DB_PATH)
 
+    # Load and process basket opportunities
+    basket_opportunities = load_basket_opportunities(forecast_source, target_date)
+    print(f"\nFound {len(basket_opportunities)} basket opportunities")
+
+    for basket_opp in basket_opportunities:
+        n_legs = len(basket_opp["basket"].get("legs", []))
+        if trades_placed + n_legs > remaining_trades:
+            print(f"  [skip basket] Need {n_legs} trades, only {remaining_trades - trades_placed} remaining")
+            continue
+
+        leg_results = execute_basket(
+            client,
+            TRADES_DB_PATH,
+            basket_opp,
+            trade_enabled=AUTOTRADE_ENABLED or DRY_RUN,
+        )
+        results.extend(leg_results)
+        placed_in_basket = sum(1 for r in leg_results if r["status"] in {"PLACED", "DRY_RUN"})
+        trades_placed += placed_in_basket
+        for _ in range(placed_in_basket):
+            increment_trades_today(TRADES_DB_PATH)
+
     # Post only when an edge/opportunity was found.
-    if opportunities:
+    if opportunities or basket_opportunities:
         summary_message = format_summary_message(results, target_date, forecast_source)
         post_discord(summary_message)
 
