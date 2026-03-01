@@ -191,6 +191,213 @@ def load_climatology(
     return {int(m): float(avg) for m, avg in rows if avg is not None}
 
 
+def load_multi_model_features(
+    db_path: Path,
+    city_key: str,
+    dates: List[str],
+) -> Dict[str, Dict[str, float]]:
+    """
+    Load multi-model forecast features from forecast_snapshots.
+
+    Queries HRRR, ECMWF, GFS, and NWS hourly sources for each date.
+    Returns dict mapping date -> {model_spread_f, model_mean_f, ecmwf_f, n_models}.
+    """
+    conn = sqlite3.connect(db_path)
+    features: Dict[str, Dict[str, float]] = {}
+
+    # Get all multi-model forecasts for these dates in one query
+    placeholders = ",".join("?" * len(dates))
+    sources = ("open_meteo_hrrr", "open_meteo_ecmwf", "open_meteo_gfs", "nws_hourly_max")
+    src_placeholders = ",".join("?" * len(sources))
+
+    rows = conn.execute(
+        f"""
+        SELECT target_date_local, source, forecast_high_f
+        FROM forecast_snapshots
+        WHERE city_key = ?
+          AND target_date_local IN ({placeholders})
+          AND source IN ({src_placeholders})
+        ORDER BY target_date_local, snapshot_time_utc DESC
+        """,
+        (city_key, *dates, *sources),
+    ).fetchall()
+    conn.close()
+
+    # Group by date, deduplicate by source (keep latest per source)
+    by_date: Dict[str, Dict[str, int]] = {}
+    for date_str, source, high_f in rows:
+        if date_str not in by_date:
+            by_date[date_str] = {}
+        if source not in by_date[date_str]:  # first = latest due to ORDER BY
+            by_date[date_str][source] = int(high_f)
+
+    for date_str, model_highs in by_date.items():
+        highs = list(model_highs.values())
+        if not highs:
+            continue
+        features[date_str] = {
+            "model_spread_f": float(max(highs) - min(highs)),
+            "model_mean_f": float(sum(highs) / len(highs)),
+            "ecmwf_f": float(model_highs.get("open_meteo_ecmwf", sum(highs) / len(highs))),
+            "n_models": float(len(highs)),
+        }
+
+    return features
+
+
+def load_upper_air_features(
+    db_path: Path,
+    city_key: str,
+    dates: List[str],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Load upper-air features (z500, t850, dewpoint) from upper_air_snapshots.
+
+    Also computes z500_anomaly using monthly climatological mean across all loaded data.
+    Returns dict mapping date -> {z500, t850, z500_anomaly, dewpoint_f}.
+    """
+    conn = sqlite3.connect(db_path)
+    features: Dict[str, Dict[str, Optional[float]]] = {}
+
+    placeholders = ",".join("?" * len(dates))
+    rows = conn.execute(
+        f"""
+        SELECT date_local, z500_m, t850_c, dewpoint_2m_c
+        FROM upper_air_snapshots
+        WHERE city_key = ?
+          AND date_local IN ({placeholders})
+        ORDER BY date_local, snapshot_time_utc DESC
+        """,
+        (city_key, *dates),
+    ).fetchall()
+    conn.close()
+
+    # Deduplicate by date (first = latest), collect z500 values by month for anomaly
+    seen_dates: set = set()
+    z500_by_month: Dict[int, List[float]] = {}
+
+    for date_str, z500_m, t850_c, dew_c in rows:
+        if date_str in seen_dates:
+            continue
+        seen_dates.add(date_str)
+        month = int(date_str[5:7])
+
+        dew_f = (dew_c * 9.0 / 5.0 + 32.0) if dew_c is not None else None
+        features[date_str] = {
+            "z500": z500_m,
+            "t850": t850_c,
+            "dewpoint_f": dew_f,
+        }
+        if z500_m is not None:
+            z500_by_month.setdefault(month, []).append(z500_m)
+
+    # Compute monthly z500 climatological means and then z500_anomaly
+    z500_monthly_mean = {m: sum(vals) / len(vals) for m, vals in z500_by_month.items()}
+    for date_str, feat in features.items():
+        month = int(date_str[5:7])
+        z500_val = feat.get("z500")
+        if z500_val is not None and month in z500_monthly_mean:
+            feat["z500_anomaly"] = z500_val - z500_monthly_mean[month]
+        else:
+            feat["z500_anomaly"] = None
+
+    return features
+
+
+def load_climate_index_features(
+    db_path: Path,
+    dates: List[str],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Load climate teleconnection indices for each date.
+
+    Performs forward-fill: for each date, finds the nearest prior record.
+    Returns dict mapping date -> {nao, ao, pna, mei_enso, pdo, mjo_amplitude}.
+    """
+    if not dates:
+        return {}
+
+    conn = sqlite3.connect(db_path)
+
+    # Fetch all indices up to the max date in a single query
+    max_date = max(dates)
+    rows = conn.execute(
+        """
+        SELECT date_local, nao, ao, pna, mei_enso, pdo, mjo_amplitude
+        FROM climate_indices
+        WHERE date_local <= ?
+        ORDER BY date_local ASC
+        """,
+        (max_date,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return {}
+
+    # Build a sorted list of (date_local, values) for binary search / forward-fill
+    sorted_records = [
+        (row[0], {
+            "nao": row[1],
+            "ao": row[2],
+            "pna": row[3],
+            "mei_enso": row[4],
+            "pdo": row[5],
+            "mjo_amplitude": row[6],
+        })
+        for row in rows
+    ]
+    sorted_dates = [r[0] for r in sorted_records]
+
+    import bisect
+    features: Dict[str, Dict[str, Optional[float]]] = {}
+    for date_str in dates:
+        # Find latest record <= date_str (forward-fill)
+        idx = bisect.bisect_right(sorted_dates, date_str) - 1
+        if idx >= 0:
+            features[date_str] = sorted_records[idx][1]
+        else:
+            features[date_str] = {}
+
+    return features
+
+
+def load_morning_temp_features(
+    db_path: Path,
+    city_key: str,
+    dates: List[str],
+) -> Dict[str, Optional[float]]:
+    """
+    Load morning temperature (first intraday observation of each day) from intraday_observations.
+
+    Returns dict mapping date -> morning_temp_f (or None if no observation).
+    """
+    conn = sqlite3.connect(db_path)
+    features: Dict[str, Optional[float]] = {}
+
+    placeholders = ",".join("?" * len(dates))
+    rows = conn.execute(
+        f"""
+        SELECT target_date_local, morning_temp_f
+        FROM intraday_observations
+        WHERE city_key = ?
+          AND target_date_local IN ({placeholders})
+          AND morning_temp_f IS NOT NULL
+        ORDER BY target_date_local, observation_time_utc ASC
+        """,
+        (city_key, *dates),
+    ).fetchall()
+    conn.close()
+
+    seen: set = set()
+    for date_str, morning_temp in rows:
+        if date_str not in seen:
+            seen.add(date_str)
+            features[date_str] = float(morning_temp) if morning_temp is not None else None
+
+    return features
+
+
 def load_training_data(
     db_path: Path,
     city_key: str,
@@ -260,6 +467,22 @@ def load_training_data(
         Path(db_lib.default_paths(ROOT).db_path), city_key=city_key, dates=dates
     )
 
+    # Phase 1: Load multi-model spread features
+    multi_model_features = load_multi_model_features(db_path, city_key, dates)
+    print(f"  Multi-model features: {len(multi_model_features)}/{len(dates)} dates")
+
+    # Phase 2: Load upper-air features
+    upper_air_features = load_upper_air_features(db_path, city_key, dates)
+    print(f"  Upper-air features: {len(upper_air_features)}/{len(dates)} dates")
+
+    # Phase 3: Load climate teleconnection indices
+    climate_features = load_climate_index_features(db_path, dates)
+    print(f"  Climate index features: {len(climate_features)}/{len(dates)} dates")
+
+    # Phase 4: Load morning temperature
+    morning_temps = load_morning_temp_features(db_path, city_key, dates)
+    print(f"  Morning temp features: {len(morning_temps)}/{len(dates)} dates")
+
     # Build precipitation map from archive data for accumulation
     precip_by_date: Dict[str, float] = {}
     for d in dates:
@@ -319,6 +542,18 @@ def load_training_data(
         clim_avg = climatology.get(month, 65.0)
         forecast_anomaly = float(forecast_high) - clim_avg
 
+        # Phase 1: multi-model spread
+        mmf = multi_model_features.get(date_str, {})
+
+        # Phase 2: upper-air
+        uaf = upper_air_features.get(date_str, {})
+
+        # Phase 3: teleconnection indices
+        clf = climate_features.get(date_str, {})
+
+        # Phase 4: morning temperature
+        morning_temp_f = morning_temps.get(date_str)
+
         # Compute features
         features = prepare_features(
             forecast_high=forecast_high,
@@ -334,6 +569,25 @@ def load_training_data(
             visibility_min_miles=wf.get("visibility_min_miles"),
             precip_last_3d_mm=precip_accum.get(date_str, 0.0),
             forecast_anomaly=forecast_anomaly,
+            # Phase 1
+            model_spread_f=mmf.get("model_spread_f"),
+            model_mean_f=mmf.get("model_mean_f"),
+            ecmwf_f=mmf.get("ecmwf_f"),
+            n_models=mmf.get("n_models"),
+            # Phase 2
+            z500=uaf.get("z500"),
+            t850=uaf.get("t850"),
+            z500_anomaly=uaf.get("z500_anomaly"),
+            dewpoint_f=uaf.get("dewpoint_f"),
+            # Phase 3
+            nao=clf.get("nao"),
+            ao=clf.get("ao"),
+            pna=clf.get("pna"),
+            mei_enso=clf.get("mei_enso"),
+            pdo=clf.get("pdo"),
+            mjo_amplitude=clf.get("mjo_amplitude"),
+            # Phase 4
+            morning_temp_f=morning_temp_f,
         )
 
         # Convert to array

@@ -3,7 +3,8 @@
 
 Uses a tiered approach:
   1. PRIMARY: ML quantile regression model (LightGBM) predicting error quantiles
-     conditioned on 17 features (weather context, recent bias, synoptic regime)
+     conditioned on 32 features (weather context, recent bias, synoptic regime,
+     multi-model spread, upper-air indices, teleconnections, morning temp)
   2. SECONDARY: Multi-model spread from Open-Meteo (HRRR, ECMWF, GFS) + NWS
   3. FALLBACK: Static monthly error PMF (legacy approach)
   4. LAST RESORT: Gaussian with std=4°F
@@ -211,6 +212,119 @@ def _get_rolling_bias(
     return sum(errors) / len(errors)
 
 
+def _get_multi_model_features(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+    forecast_high: int,
+) -> Dict[str, Optional[float]]:
+    """Extract Phase 1 multi-model spread features from forecast_snapshots."""
+    spread, details = _get_multi_model_spread(db_path, city_key, target_date_local)
+    if not details:
+        return {}
+
+    # Deduplicate sources (already done in _get_multi_model_spread but we need by-source data)
+    conn = db_lib.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT source, forecast_high_f
+            FROM forecast_snapshots
+            WHERE city_key = ? AND target_date_local = ?
+              AND source IN ('open_meteo_hrrr','open_meteo_ecmwf','open_meteo_gfs','nws_hourly_max')
+            ORDER BY snapshot_time_utc DESC
+            """,
+            (city_key, target_date_local),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    seen: dict = {}
+    for src, high_f in rows:
+        if src not in seen:
+            seen[src] = int(high_f)
+
+    if not seen:
+        return {}
+
+    highs = list(seen.values())
+    return {
+        "model_spread_f": float(max(highs) - min(highs)),
+        "model_mean_f": float(sum(highs) / len(highs)),
+        "ecmwf_f": float(seen.get("open_meteo_ecmwf", sum(highs) / len(highs))),
+        "n_models": float(len(highs)),
+    }
+
+
+def _get_upper_air_features(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+) -> Dict[str, Optional[float]]:
+    """Extract Phase 2 upper-air features from upper_air_snapshots."""
+    row = db_lib.fetch_upper_air_snapshot(db_path, city_key=city_key, date_local=target_date_local)
+    if not row:
+        return {}
+
+    z500_m = row.get("z500_m")
+    t850_c = row.get("t850_c")
+    dew_c = row.get("dewpoint_2m_c")
+    dew_f = (dew_c * 9.0 / 5.0 + 32.0) if dew_c is not None else None
+
+    # z500_anomaly: query monthly mean for this city across all available data
+    # Use a simple approximation here (full climatology computed in training)
+    # For inference, use 0 as anomaly if we can't compute it quickly
+    return {
+        "z500": z500_m,
+        "t850": t850_c,
+        "z500_anomaly": None,  # Will use 0 as default in prepare_features
+        "dewpoint_f": dew_f,
+    }
+
+
+def _get_climate_index_features(
+    db_path: Path,
+    target_date_local: str,
+) -> Dict[str, Optional[float]]:
+    """Extract Phase 3 teleconnection indices from climate_indices."""
+    row = db_lib.fetch_climate_indices(db_path, date_local=target_date_local)
+    if not row:
+        return {}
+    return {
+        "nao": row.get("nao"),
+        "ao": row.get("ao"),
+        "pna": row.get("pna"),
+        "mei_enso": row.get("mei_enso"),
+        "pdo": row.get("pdo"),
+        "mjo_amplitude": row.get("mjo_amplitude"),
+    }
+
+
+def _get_morning_temp(
+    db_path: Path,
+    city_key: str,
+    target_date_local: str,
+) -> Optional[float]:
+    """Extract Phase 4 morning temperature from intraday_observations."""
+    conn = db_lib.connect(db_path)
+    try:
+        row = conn.execute(
+            """
+            SELECT morning_temp_f
+            FROM intraday_observations
+            WHERE city_key = ? AND target_date_local = ?
+              AND morning_temp_f IS NOT NULL
+            ORDER BY observation_time_utc ASC
+            LIMIT 1
+            """,
+            (city_key, target_date_local),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return float(row[0]) if row else None
+
+
 def _extract_ml_features(
     db_path: Path,
     city_key: str,
@@ -263,6 +377,18 @@ def _extract_ml_features(
     prev_error = _get_prev_day_error(db_path, city_key, target_date_local, forecast_source)
     rolling_bias = _get_rolling_bias(db_path, city_key, target_date_local, forecast_source)
 
+    # Phase 1: multi-model spread features
+    mmf = _get_multi_model_features(db_path, city_key, target_date_local, forecast_high)
+
+    # Phase 2: upper-air features
+    uaf = _get_upper_air_features(db_path, city_key, target_date_local)
+
+    # Phase 3: climate teleconnection indices
+    clf = _get_climate_index_features(db_path, target_date_local)
+
+    # Phase 4: morning temperature (only if past ~8am local)
+    morning_temp_f = _get_morning_temp(db_path, city_key, target_date_local)
+
     return prepare_features(
         forecast_high=forecast_high,
         target_date=dt,
@@ -273,6 +399,25 @@ def _extract_ml_features(
         wind_speed=wind_speed,
         prev_day_error=prev_error or 0,
         rolling_7d_bias=rolling_bias or 0.0,
+        # Phase 1
+        model_spread_f=mmf.get("model_spread_f"),
+        model_mean_f=mmf.get("model_mean_f"),
+        ecmwf_f=mmf.get("ecmwf_f"),
+        n_models=mmf.get("n_models"),
+        # Phase 2
+        z500=uaf.get("z500"),
+        t850=uaf.get("t850"),
+        z500_anomaly=uaf.get("z500_anomaly"),
+        dewpoint_f=uaf.get("dewpoint_f"),
+        # Phase 3
+        nao=clf.get("nao"),
+        ao=clf.get("ao"),
+        pna=clf.get("pna"),
+        mei_enso=clf.get("mei_enso"),
+        pdo=clf.get("pdo"),
+        mjo_amplitude=clf.get("mjo_amplitude"),
+        # Phase 4
+        morning_temp_f=morning_temp_f,
     )
 
 

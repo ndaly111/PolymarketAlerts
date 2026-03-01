@@ -423,6 +423,42 @@ def ensure_schema(db_path: Path) -> None:
             """
         )
 
+        # Upper-air snapshots: 500mb geopotential height, 850mb temp, dewpoint
+        # Fetched from Open-Meteo historical/forecast API (pressure level variables)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS upper_air_snapshots (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              city_key TEXT NOT NULL,
+              date_local TEXT NOT NULL,
+              snapshot_time_utc TEXT NOT NULL,
+              z500_m REAL,
+              t850_c REAL,
+              dewpoint_2m_c REAL,
+              source TEXT DEFAULT 'open_meteo',
+              UNIQUE(city_key, date_local, source)
+            );
+            """
+        )
+
+        # Climate teleconnection indices (monthly, forward-filled to daily)
+        # NAO, AO, PNA, MEI/ENSO, PDO from NOAA; MJO from CPC daily file
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS climate_indices (
+              date_local TEXT PRIMARY KEY,
+              nao REAL,
+              ao REAL,
+              pna REAL,
+              mei_enso REAL,
+              pdo REAL,
+              mjo_amplitude REAL,
+              mjo_phase INTEGER,
+              fetched_at_utc TEXT
+            );
+            """
+        )
+
 
 def upsert_settlement_alignment(
     db_path: Path,
@@ -1980,4 +2016,139 @@ def fetch_smoke_observation(
         "source": row[5],
         "lat": float(row[6]),
         "lon": float(row[7]),
+    }
+
+
+def upsert_upper_air_snapshot(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+    snapshot_time_utc: str,
+    z500_m: Optional[float],
+    t850_c: Optional[float],
+    dewpoint_2m_c: Optional[float],
+    source: str = "open_meteo",
+) -> None:
+    """Upsert upper-air observation (z500, t850, dewpoint) for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO upper_air_snapshots
+              (city_key, date_local, snapshot_time_utc, z500_m, t850_c, dewpoint_2m_c, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(city_key, date_local, source) DO UPDATE SET
+              snapshot_time_utc=excluded.snapshot_time_utc,
+              z500_m=excluded.z500_m,
+              t850_c=excluded.t850_c,
+              dewpoint_2m_c=excluded.dewpoint_2m_c;
+            """,
+            (city_key, date_local, snapshot_time_utc, z500_m, t850_c, dewpoint_2m_c, source),
+        )
+
+
+def fetch_upper_air_snapshot(
+    db_path: Path,
+    *,
+    city_key: str,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch latest upper-air snapshot for a city/date."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT city_key, date_local, snapshot_time_utc, z500_m, t850_c, dewpoint_2m_c, source
+            FROM upper_air_snapshots
+            WHERE city_key = ? AND date_local = ?
+            ORDER BY snapshot_time_utc DESC
+            LIMIT 1;
+            """,
+            (city_key, date_local),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "city_key": row[0],
+        "date_local": row[1],
+        "snapshot_time_utc": row[2],
+        "z500_m": row[3],
+        "t850_c": row[4],
+        "dewpoint_2m_c": row[5],
+        "source": row[6],
+    }
+
+
+def upsert_climate_indices(
+    db_path: Path,
+    *,
+    date_local: str,
+    nao: Optional[float] = None,
+    ao: Optional[float] = None,
+    pna: Optional[float] = None,
+    mei_enso: Optional[float] = None,
+    pdo: Optional[float] = None,
+    mjo_amplitude: Optional[float] = None,
+    mjo_phase: Optional[int] = None,
+    fetched_at_utc: Optional[str] = None,
+) -> None:
+    """Upsert climate teleconnection indices for a date."""
+    ensure_schema(db_path)
+    if fetched_at_utc is None:
+        from datetime import datetime as _dt
+        fetched_at_utc = _dt.utcnow().isoformat()
+    with connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO climate_indices
+              (date_local, nao, ao, pna, mei_enso, pdo, mjo_amplitude, mjo_phase, fetched_at_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date_local) DO UPDATE SET
+              nao=COALESCE(excluded.nao, nao),
+              ao=COALESCE(excluded.ao, ao),
+              pna=COALESCE(excluded.pna, pna),
+              mei_enso=COALESCE(excluded.mei_enso, mei_enso),
+              pdo=COALESCE(excluded.pdo, pdo),
+              mjo_amplitude=COALESCE(excluded.mjo_amplitude, mjo_amplitude),
+              mjo_phase=COALESCE(excluded.mjo_phase, mjo_phase),
+              fetched_at_utc=excluded.fetched_at_utc;
+            """,
+            (date_local, nao, ao, pna, mei_enso, pdo, mjo_amplitude, mjo_phase, fetched_at_utc),
+        )
+
+
+def fetch_climate_indices(
+    db_path: Path,
+    *,
+    date_local: str,
+) -> Optional[Dict[str, Any]]:
+    """Fetch climate indices for a given date (looks up the exact date)."""
+    ensure_schema(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT date_local, nao, ao, pna, mei_enso, pdo, mjo_amplitude, mjo_phase
+            FROM climate_indices
+            WHERE date_local <= ?
+            ORDER BY date_local DESC
+            LIMIT 1;
+            """,
+            (date_local,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "date_local": row[0],
+        "nao": row[1],
+        "ao": row[2],
+        "pna": row[3],
+        "mei_enso": row[4],
+        "pdo": row[5],
+        "mjo_amplitude": row[6],
+        "mjo_phase": row[7],
     }

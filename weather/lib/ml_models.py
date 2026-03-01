@@ -63,6 +63,9 @@ DEFAULT_QUANTILES = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 # Feature names in order
 # v2: Removed lead_hours (always constant 18), smoke_present (only 5 obs).
 #     Added forecast_anomaly (deviation from climatological monthly avg).
+# v3: Added 15 new features across 4 phases:
+#     Phase 1 (multi-model spread), Phase 2 (upper-air), Phase 3 (teleconnections),
+#     Phase 4 (morning temperature). Total: 32 features.
 FEATURE_NAMES = [
     # Core temporal features
     "month",
@@ -88,6 +91,25 @@ FEATURE_NAMES = [
     "precip_last_3d_mm",
     # Forecast anomaly: forecast_high minus climatological monthly avg
     "forecast_anomaly",
+    # Phase 1: Multi-model spread (from forecast_snapshots)
+    "model_spread_f",    # max - min across HRRR/ECMWF/GFS/NWS
+    "model_mean_f",      # mean forecast across all available models
+    "ecmwf_f",           # ECMWF forecast specifically (best global model)
+    "n_models",          # count of models with data (data quality signal)
+    # Phase 2: Upper-air features (from upper_air_snapshots via Open-Meteo)
+    "z500",              # 500mb geopotential height (m) — jetstream indicator
+    "t850",              # 850mb temperature (°C) — lower-troposphere predictor
+    "z500_anomaly",      # z500 minus monthly climatological mean
+    "dewpoint_f",        # surface dewpoint (°F) — limits afternoon high in humid cities
+    # Phase 3: Teleconnection indices (from climate_indices)
+    "nao",               # North Atlantic Oscillation (monthly)
+    "ao",                # Arctic Oscillation (monthly) — polar vortex
+    "pna",               # Pacific North American pattern (monthly)
+    "mei_enso",          # Multivariate ENSO Index (monthly)
+    "pdo",               # Pacific Decadal Oscillation (monthly)
+    "mjo_amplitude",     # Madden-Julian Oscillation amplitude
+    # Phase 4: Morning temperature (from intraday_observations)
+    "morning_temp_f",    # First intraday obs 6-8am local — strong predictor
 ]
 
 
@@ -459,6 +481,25 @@ def prepare_features(
     visibility_min_miles: Optional[float] = None,
     precip_last_3d_mm: float = 0.0,
     forecast_anomaly: Optional[float] = None,
+    # Phase 1: Multi-model spread
+    model_spread_f: Optional[float] = None,
+    model_mean_f: Optional[float] = None,
+    ecmwf_f: Optional[float] = None,
+    n_models: Optional[float] = None,
+    # Phase 2: Upper-air features
+    z500: Optional[float] = None,
+    t850: Optional[float] = None,
+    z500_anomaly: Optional[float] = None,
+    dewpoint_f: Optional[float] = None,
+    # Phase 3: Teleconnection indices
+    nao: Optional[float] = None,
+    ao: Optional[float] = None,
+    pna: Optional[float] = None,
+    mei_enso: Optional[float] = None,
+    pdo: Optional[float] = None,
+    mjo_amplitude: Optional[float] = None,
+    # Phase 4: Morning temperature
+    morning_temp_f: Optional[float] = None,
     # Deprecated params kept for backward compat — ignored
     lead_hours: int = 18,
     smoke_present: bool = False,
@@ -481,6 +522,21 @@ def prepare_features(
         visibility_min_miles: Minimum visibility in miles (None if not available)
         precip_last_3d_mm: Precipitation total over last 3 days (mm)
         forecast_anomaly: Forecast high minus climatological monthly avg
+        model_spread_f: Max minus min across all forecast models
+        model_mean_f: Mean forecast across all available models
+        ecmwf_f: ECMWF-specific forecast high (best global model)
+        n_models: Number of models with data for this date
+        z500: 500mb geopotential height in meters
+        t850: 850mb temperature in Celsius
+        z500_anomaly: z500 minus monthly climatological mean
+        dewpoint_f: Surface dewpoint in Fahrenheit
+        nao: North Atlantic Oscillation index (monthly)
+        ao: Arctic Oscillation index (monthly)
+        pna: Pacific North American pattern index (monthly)
+        mei_enso: Multivariate ENSO Index (monthly)
+        pdo: Pacific Decadal Oscillation index (monthly)
+        mjo_amplitude: Madden-Julian Oscillation amplitude
+        morning_temp_f: First intraday observation (6-8am local)
 
     Returns:
         Feature dictionary
@@ -513,6 +569,31 @@ def prepare_features(
         }
         forecast_anomaly = float(forecast_high) - monthly_clim.get(month, 65)
 
+    # Phase 1 defaults: use forecast_high as proxy when model data is unavailable
+    model_spread_val = float(model_spread_f) if model_spread_f is not None else 0.0
+    model_mean_val = float(model_mean_f) if model_mean_f is not None else float(forecast_high)
+    ecmwf_val = float(ecmwf_f) if ecmwf_f is not None else float(forecast_high)
+    n_models_val = float(n_models) if n_models is not None else 1.0
+
+    # Phase 2 defaults: use 0 for anomaly-type features, climatological guess for z500/t850
+    # z500 climatological ~5500m; t850 varies by season/location — use 0 as neutral
+    z500_val = float(z500) if z500 is not None else 5500.0
+    t850_val = float(t850) if t850 is not None else 0.0
+    z500_anomaly_val = float(z500_anomaly) if z500_anomaly is not None else 0.0
+    # Convert dewpoint from C to F if provided in C, or use 50°F as neutral default
+    dewpoint_val = float(dewpoint_f) if dewpoint_f is not None else 50.0
+
+    # Phase 3 defaults: use 0 for all teleconnection indices (neutral state)
+    nao_val = float(nao) if nao is not None else 0.0
+    ao_val = float(ao) if ao is not None else 0.0
+    pna_val = float(pna) if pna is not None else 0.0
+    mei_enso_val = float(mei_enso) if mei_enso is not None else 0.0
+    pdo_val = float(pdo) if pdo is not None else 0.0
+    mjo_amplitude_val = float(mjo_amplitude) if mjo_amplitude is not None else 0.0
+
+    # Phase 4: morning_temp_f — use forecast_high as fallback (no info)
+    morning_temp_val = float(morning_temp_f) if morning_temp_f is not None else float(forecast_high)
+
     return {
         "month": float(month),
         "day_of_year": float(day_of_year),
@@ -530,6 +611,21 @@ def prepare_features(
         "visibility_min_miles": visibility_value,
         "precip_last_3d_mm": float(precip_last_3d_mm),
         "forecast_anomaly": float(forecast_anomaly),
+        "model_spread_f": model_spread_val,
+        "model_mean_f": model_mean_val,
+        "ecmwf_f": ecmwf_val,
+        "n_models": n_models_val,
+        "z500": z500_val,
+        "t850": t850_val,
+        "z500_anomaly": z500_anomaly_val,
+        "dewpoint_f": dewpoint_val,
+        "nao": nao_val,
+        "ao": ao_val,
+        "pna": pna_val,
+        "mei_enso": mei_enso_val,
+        "pdo": pdo_val,
+        "mjo_amplitude": mjo_amplitude_val,
+        "morning_temp_f": morning_temp_val,
     }
 
 
