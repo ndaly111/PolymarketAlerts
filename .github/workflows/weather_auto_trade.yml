@@ -169,14 +169,22 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Commit DB changes
+      - name: Prune and commit DB changes
         if: success()
         run: |
           if [ -f "$WEATHER_TRADES_DB_PATH" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            # Prune old data to keep forecast DB under GitHub's 100MB limit
+            python -m weather.scripts.prune_db --db "$WEATHER_DB_PATH" --keep-years 5
             git add "$WEATHER_TRADES_DB_PATH" || true
-            git add "weather/data/weather_forecast_accuracy.db" || true
+            # Only add forecast DB if under 95MB
+            DB_SIZE=$(stat -c%s "$WEATHER_DB_PATH" 2>/dev/null || echo 0)
+            if [[ $DB_SIZE -lt $((95 * 1048576)) ]]; then
+              git add "$WEATHER_DB_PATH" || true
+            else
+              echo "WARNING: Forecast DB is $(( DB_SIZE / 1048576 )) MB — skipping from commit."
+            fi
             if git diff --staged --quiet; then
               echo "No DB changes to commit"
             else

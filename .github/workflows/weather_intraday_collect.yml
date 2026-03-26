@@ -41,18 +41,25 @@ jobs:
           python -m weather.scripts.collect_intraday_observations \
             --db "$WEATHER_DB_PATH"
 
-      - name: Commit DB (if changed)
+      - name: Prune and commit DB (if changed and under 95MB)
         run: |
           if [[ -n "$(git status --porcelain "$WEATHER_DB_PATH")" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add "$WEATHER_DB_PATH"
-            git commit -m "weather: collect intraday observations"
-            for i in 1 2 3; do
-              git pull --rebase && git push && break
-              echo "Push attempt $i failed, retrying..."
-              sleep 2
-            done
+            python -m weather.scripts.prune_db --db "$WEATHER_DB_PATH" --keep-years 5
+            DB_SIZE=$(stat -c%s "$WEATHER_DB_PATH")
+            MAX_SIZE=$((95 * 1048576))
+            if [[ $DB_SIZE -gt $MAX_SIZE ]]; then
+              echo "WARNING: DB is $(( DB_SIZE / 1048576 )) MB — over 95MB limit, skipping commit."
+            else
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add "$WEATHER_DB_PATH"
+              git commit -m "weather: collect intraday observations"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 2
+              done
+            fi
           else
             echo "No DB changes to commit."
           fi

@@ -84,18 +84,25 @@ jobs:
             sqlite3 "$WEATHER_DB_PATH" "SELECT city_key, target_date_local, forecast_high_f, source FROM forecast_snapshots WHERE source LIKE 'mos_gfs_%' ORDER BY target_date_local DESC, city_key LIMIT 24;"
           fi
 
-      - name: Commit database changes
+      - name: Prune and commit database changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python -m weather.scripts.prune_db --db "$WEATHER_DB_PATH" --keep-years 5
           git add "$WEATHER_DB_PATH" || true
           if git diff --staged --quiet; then
             echo "No database changes to commit"
           else
-            git commit -m "weather: collect $(date +%Y-%m-%d) MOS forecasts"
-            for i in 1 2 3; do
-              git pull --rebase && git push && break
-              echo "Push attempt $i failed, retrying..."
-              sleep 5
-            done
+            DB_SIZE=$(stat -c%s "$WEATHER_DB_PATH")
+            MAX_SIZE=$((95 * 1048576))
+            if [[ $DB_SIZE -gt $MAX_SIZE ]]; then
+              echo "WARNING: DB is $(( DB_SIZE / 1048576 )) MB — over 95MB limit, skipping commit."
+            else
+              git commit -m "weather: collect $(date +%Y-%m-%d) MOS forecasts"
+              for i in 1 2 3; do
+                git pull --rebase && git push && break
+                echo "Push attempt $i failed, retrying..."
+                sleep 5
+              done
+            fi
           fi
