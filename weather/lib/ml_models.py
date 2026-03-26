@@ -160,6 +160,16 @@ class QuantileForestModel:
         self.calibrators: Dict[float, Any] = {}  # quantile -> isotonic calibrator
         self.metadata: Optional[ModelMetadata] = None
         self.is_fitted = False
+        # Monthly additive bias correction — kept for backward compat, now empty.
+        self.monthly_bias: Dict[int, float] = {}
+        # CQR (Conformal Quantile Regression) per-quantile corrections.
+        # For quantile q: correction = np.quantile(y_val - pred_q_val, q).
+        # Shifts each quantile prediction so exactly q-fraction of calibration
+        # observations fall below. Computed from the validation split at training time.
+        self.cqr_corrections: Dict[float, float] = {}
+        # Minimum p10-p90 spread (°F). Prevents degenerate narrow distributions.
+        # Set during training from historical error variance; default 3.0°F.
+        self.min_spread: float = 3.0
 
     def _check_lightgbm(self):
         if not HAS_LIGHTGBM:
@@ -289,7 +299,7 @@ class QuantileForestModel:
     def predict_error_distribution(
         self,
         features: Dict[str, float],
-    ) -> Tuple[int, int, int, int, int]:
+    ) -> Tuple[float, float, float, float, float]:
         """
         Predict error distribution for a single forecast.
 
@@ -297,17 +307,29 @@ class QuantileForestModel:
             features: Feature dict with keys matching FEATURE_NAMES
 
         Returns:
-            (p10, p25, p50, p75, p90) error quantiles
+            (p10, p25, p50, p75, p90) error quantiles as floats
         """
         X = self._features_to_array(features)
         quantile_preds = self.predict_quantiles(X)
 
-        # Extract standard quantiles
-        p10 = int(round(quantile_preds.get(0.10, [0])[0]))
-        p25 = int(round(quantile_preds.get(0.25, [0])[0]))
-        p50 = int(round(quantile_preds.get(0.50, [0])[0]))
-        p75 = int(round(quantile_preds.get(0.75, [0])[0]))
-        p90 = int(round(quantile_preds.get(0.90, [0])[0]))
+        # Apply CQR per-quantile corrections (different correction per quantile level)
+        # Keep float precision — int(round()) was collapsing nearby quantiles into
+        # identical values, creating degenerate PMFs and phantom edges.
+        p10 = float(quantile_preds.get(0.10, [0])[0] + self.cqr_corrections.get(0.10, 0.0))
+        p25 = float(quantile_preds.get(0.25, [0])[0] + self.cqr_corrections.get(0.25, 0.0))
+        p50 = float(quantile_preds.get(0.50, [0])[0] + self.cqr_corrections.get(0.50, 0.0))
+        p75 = float(quantile_preds.get(0.75, [0])[0] + self.cqr_corrections.get(0.75, 0.0))
+        p90 = float(quantile_preds.get(0.90, [0])[0] + self.cqr_corrections.get(0.90, 0.0))
+
+        # Enforce minimum spread to prevent degenerate narrow distributions
+        spread = p90 - p10
+        if spread < self.min_spread:
+            center = p50
+            half = self.min_spread / 2.0
+            p10 = center - half
+            p25 = center - half * 0.5
+            p75 = center + half * 0.5
+            p90 = center + half
 
         return (p10, p25, p50, p75, p90)
 
@@ -315,7 +337,7 @@ class QuantileForestModel:
         self,
         forecast_high: int,
         features: Dict[str, float],
-    ) -> Tuple[int, int, int, int, int]:
+    ) -> Tuple[float, float, float, float, float]:
         """
         Predict distribution of observed high temperature.
 
@@ -326,7 +348,7 @@ class QuantileForestModel:
             features: Feature dict
 
         Returns:
-            (p10, p25, p50, p75, p90) observed temperature quantiles
+            (p10, p25, p50, p75, p90) observed temperature quantiles as floats
         """
         error_p10, error_p25, error_p50, error_p75, error_p90 = self.predict_error_distribution(features)
 
@@ -403,6 +425,8 @@ class QuantileForestModel:
             "calibrators": self.calibrators,
             "metadata": self.metadata,
             "is_fitted": self.is_fitted,
+            "monthly_bias": self.monthly_bias,
+            "cqr_corrections": self.cqr_corrections,
         }
 
         with open(path, "wb") as f:
@@ -426,6 +450,8 @@ class QuantileForestModel:
         instance.calibrators = data.get("calibrators", {})
         instance.metadata = data.get("metadata")
         instance.is_fitted = data.get("is_fitted", False)
+        instance.monthly_bias = data.get("monthly_bias", {})
+        instance.cqr_corrections = data.get("cqr_corrections", {})
 
         return instance
 
@@ -643,7 +669,7 @@ class SimpleFallbackModel:
     def predict_error_distribution(
         self,
         features: Dict[str, float],
-    ) -> Tuple[int, int, int, int, int]:
+    ) -> Tuple[float, float, float, float, float]:
         """Predict error distribution using climatological estimates."""
         month = int(features.get("month", 6))
         lead_hours = features.get("lead_hours", 18)
@@ -668,12 +694,12 @@ class SimpleFallbackModel:
         # For normal distribution, p90 - p10 ≈ 2.56σ
         std = spread / 2.56
 
-        # Compute quantiles (error centered around 0)
-        p10 = int(round(-1.28 * std))
-        p25 = int(round(-0.67 * std))
-        p50 = 0
-        p75 = int(round(0.67 * std))
-        p90 = int(round(1.28 * std))
+        # Compute quantiles (error centered around 0) — keep float precision
+        p10 = -1.28 * std
+        p25 = -0.67 * std
+        p50 = 0.0
+        p75 = 0.67 * std
+        p90 = 1.28 * std
 
         return (p10, p25, p50, p75, p90)
 
@@ -681,7 +707,7 @@ class SimpleFallbackModel:
         self,
         forecast_high: int,
         features: Dict[str, float],
-    ) -> Tuple[int, int, int, int, int]:
+    ) -> Tuple[float, float, float, float, float]:
         """Predict observed high distribution."""
         error_p10, error_p25, error_p50, error_p75, error_p90 = self.predict_error_distribution(features)
 
@@ -694,7 +720,7 @@ class SimpleFallbackModel:
         )
 
 
-def get_model(city_key: str, model_dir: Optional[Path] = None) -> Any:
+def get_model(city_key: str, model_dir: Optional[Path] = None, metric: str = "high") -> Any:
     """
     Get the best available model for a city.
 
@@ -703,12 +729,14 @@ def get_model(city_key: str, model_dir: Optional[Path] = None) -> Any:
     Args:
         city_key: City identifier
         model_dir: Directory containing saved models
+        metric: "high" (default) or "low" — selects which pkl to load
 
     Returns:
         Model instance (QuantileForestModel or SimpleFallbackModel)
     """
     if model_dir is not None:
-        model_path = model_dir / f"{city_key.lower()}_quantile.pkl"
+        suffix = "low_quantile" if metric == "low" else "quantile"
+        model_path = model_dir / f"{city_key.lower()}_{suffix}.pkl"
         if model_path.exists():
             try:
                 return QuantileForestModel.load(model_path)

@@ -45,6 +45,7 @@ def ensure_schema(db_path: Path) -> None:
               snapshot_hour_local INTEGER NOT NULL, -- e.g. 6
               snapshot_tz TEXT NOT NULL,            -- IANA tz
               forecast_high_f INTEGER NOT NULL,     -- integer F (our chosen definition)
+              forecast_low_f REAL,                  -- daily low forecast (F) — nullable for existing rows
               source TEXT NOT NULL,                 -- e.g. "nws_hourly_max"
               points_url TEXT NOT NULL,
               forecast_url TEXT NOT NULL,
@@ -67,6 +68,10 @@ def ensure_schema(db_path: Path) -> None:
             conn.execute(
                 "ALTER TABLE forecast_snapshots ADD COLUMN forecast_context_json TEXT;"
             )
+        if "forecast_low_f" not in forecast_cols:
+            conn.execute(
+                "ALTER TABLE forecast_snapshots ADD COLUMN forecast_low_f REAL;"
+            )
 
         # Observed highs from CLI (you already create this in collect_cli_observed.py)
         conn.execute(
@@ -76,6 +81,7 @@ def ensure_schema(db_path: Path) -> None:
               city_key TEXT NOT NULL,
               date_local TEXT NOT NULL,
               tmax_f INTEGER NOT NULL,
+              tmin_f REAL,                -- daily low observed (F) — nullable for existing rows
               fetched_at_utc TEXT NOT NULL,
               source_url TEXT NOT NULL,
               version_used INTEGER NOT NULL,
@@ -92,6 +98,9 @@ def ensure_schema(db_path: Path) -> None:
             ON observed_cli(city_key, date_local);
             """
         )
+        obs_cols = {row[1] for row in conn.execute("PRAGMA table_info(observed_cli);").fetchall()}
+        if "tmin_f" not in obs_cols:
+            conn.execute("ALTER TABLE observed_cli ADD COLUMN tmin_f REAL;")
 
         # Kalshi weather market snapshots captured at scan-time.
         # Append-only: we want historical quotes for audits/backtests.
@@ -599,6 +608,7 @@ def upsert_forecast_snapshot(
     qc_flags: Iterable[str],
     raw: Dict[str, Any],
     forecast_context: Optional[Dict[str, Any]] = None,
+    forecast_low_f: Optional[int] = None,
 ) -> None:
     ensure_schema(db_path)
     qc = ",".join(sorted(set(qc_flags))) if qc_flags else ""
@@ -613,12 +623,13 @@ def upsert_forecast_snapshot(
             """
             INSERT INTO forecast_snapshots
               (city_key, target_date_local, snapshot_time_utc, snapshot_hour_local, snapshot_tz,
-               forecast_high_f, source, points_url, forecast_url, qc_flags, raw_json, forecast_context_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               forecast_high_f, forecast_low_f, source, points_url, forecast_url, qc_flags, raw_json, forecast_context_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city_key, target_date_local, snapshot_hour_local, source) DO UPDATE SET
               snapshot_time_utc=excluded.snapshot_time_utc,
               snapshot_tz=excluded.snapshot_tz,
               forecast_high_f=excluded.forecast_high_f,
+              forecast_low_f=excluded.forecast_low_f,
               source=excluded.source,
               points_url=excluded.points_url,
               forecast_url=excluded.forecast_url,
@@ -633,6 +644,7 @@ def upsert_forecast_snapshot(
                 int(snapshot_hour_local),
                 snapshot_tz,
                 int(forecast_high_f),
+                int(forecast_low_f) if forecast_low_f is not None else None,
                 source,
                 points_url,
                 forecast_url,
@@ -656,6 +668,7 @@ def upsert_observed_cli(
     is_preliminary: bool,
     qc_flags: Iterable[str],
     raw_text: str,
+    tmin_f: Optional[int] = None,
 ) -> None:
     ensure_schema(db_path)
     qc = ",".join(sorted(set(qc_flags))) if qc_flags else ""
@@ -663,11 +676,12 @@ def upsert_observed_cli(
         conn.execute(
             """
             INSERT INTO observed_cli
-              (city_key, date_local, tmax_f, fetched_at_utc, source_url, version_used,
+              (city_key, date_local, tmax_f, tmin_f, fetched_at_utc, source_url, version_used,
                report_date_local, is_preliminary, qc_flags, raw_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city_key, date_local) DO UPDATE SET
               tmax_f=excluded.tmax_f,
+              tmin_f=excluded.tmin_f,
               fetched_at_utc=excluded.fetched_at_utc,
               source_url=excluded.source_url,
               version_used=excluded.version_used,
@@ -680,6 +694,7 @@ def upsert_observed_cli(
                 city_key,
                 date_local,
                 int(tmax_f),
+                int(tmin_f) if tmin_f is not None else None,
                 fetched_at_utc,
                 source_url,
                 int(version_used),
@@ -997,7 +1012,8 @@ def fetch_forecast_snapshot(
                   forecast_url,
                   qc_flags,
                   raw_json,
-                  forecast_context_json
+                  forecast_context_json,
+                  forecast_low_f
                 FROM forecast_snapshots
                 WHERE city_key = ?
                   AND target_date_local = ?
@@ -1022,7 +1038,8 @@ def fetch_forecast_snapshot(
                   forecast_url,
                   qc_flags,
                   raw_json,
-                  forecast_context_json
+                  forecast_context_json,
+                  forecast_low_f
                 FROM forecast_snapshots
                 WHERE city_key = ?
                   AND target_date_local = ?
@@ -1051,6 +1068,7 @@ def fetch_forecast_snapshot(
         "raw": json.loads(row[10]) if row[10] else {},
         "forecast_context_json": row[11],
         "forecast_context": json.loads(row[11]) if row[11] else None,
+        "forecast_low_f": int(row[12]) if row[12] is not None else None,
     }
 
 
@@ -1078,7 +1096,8 @@ def fetch_latest_forecast_snapshot(
               forecast_url,
               qc_flags,
               raw_json,
-              forecast_context_json
+              forecast_context_json,
+              forecast_low_f
             FROM forecast_snapshots
             WHERE city_key = ?
               AND target_date_local = ?
@@ -1105,6 +1124,7 @@ def fetch_latest_forecast_snapshot(
         "raw": json.loads(row[10]) if row[10] else {},
         "forecast_context_json": row[11],
         "forecast_context": json.loads(row[11]) if row[11] else None,
+        "forecast_low_f": int(row[12]) if row[12] is not None else None,
     }
 
 

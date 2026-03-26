@@ -235,11 +235,11 @@ class ProbabilityLadder:
 
 
 def from_percentiles(
-    p10: int,
-    p25: int,
-    p50: int,
-    p75: int,
-    p90: int,
+    p10: float,
+    p25: float,
+    p50: float,
+    p75: float,
+    p90: float,
     min_temp: int = 0,
     max_temp: int = 130,
     source: str = "percentiles",
@@ -248,10 +248,11 @@ def from_percentiles(
     Construct a probability ladder from percentile values.
 
     Uses linear interpolation between percentile points to build
-    the full exceedance curve.
+    the full exceedance curve. Accepts float percentiles for smooth
+    interpolation (avoids degenerate PMFs from integer rounding).
 
     Args:
-        p10-p90: Temperature percentiles
+        p10-p90: Temperature percentiles (float or int)
         min_temp: Minimum temperature for thresholds
         max_temp: Maximum temperature for thresholds
         source: Description of data source
@@ -262,11 +263,11 @@ def from_percentiles(
     # Known points: (temperature, exceedance_probability)
     # p10 means 10% of outcomes are below this temp, so 90% are >= p10
     points = [
-        (p10, 0.90),
-        (p25, 0.75),
-        (p50, 0.50),
-        (p75, 0.25),
-        (p90, 0.10),
+        (float(p10), 0.90),
+        (float(p25), 0.75),
+        (float(p50), 0.50),
+        (float(p75), 0.25),
+        (float(p90), 0.10),
     ]
 
     # Sort by temperature

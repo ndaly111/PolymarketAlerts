@@ -5,8 +5,12 @@ set -a; source .env; set +a
 export PYTHONPATH=/home/ubuntu/PolymarketAlerts
 PYTHON=/home/ubuntu/venv/bin/python
 
-# Pull latest code (restore bot-generated data files first to avoid merge conflicts)
+# Pull latest code (restore bot-generated / binary files first to avoid merge conflicts)
+# The DB and model .pkl files are updated locally by the pipeline but also committed
+# by GitHub Actions, so we must restore them before pull to avoid conflicts.
 git restore docs/data/summary.json docs/data/props.json docs/data/weather.json 2>/dev/null || true
+git restore weather/data/weather_forecast_accuracy.db 2>/dev/null || true
+git restore weather/models/*.pkl 2>/dev/null || true
 git pull origin main --quiet
 
 # Run pipeline
@@ -48,5 +52,21 @@ $PYTHON -m weather.scripts.compute_edges \
   --min-q "$WEATHER_MIN_Q" \
   --require-ask \
   --db weather/data/weather_forecast_accuracy.db
+
+# Low temperature fair prices and edges (paper trading only - no live orders)
+$PYTHON -m weather.scripts.compute_fair_prices \
+  --forecast-source "$FORECAST_SOURCE" \
+  --use-latest \
+  --metric low \
+  --db weather/data/weather_forecast_accuracy.db || true
+
+$PYTHON -m weather.scripts.compute_edges \
+  --forecast-source "$FORECAST_SOURCE" \
+  --date "$(date +%Y-%m-%d)" \
+  --fee-cents "$WEATHER_BUY_FEE_CENTS" \
+  --min-ev "$WEATHER_MIN_EV" \
+  --min-q "$WEATHER_MIN_Q" \
+  --metric low \
+  --db weather/data/weather_forecast_accuracy.db || true
 
 $PYTHON weather_auto_trade.py

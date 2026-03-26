@@ -43,9 +43,39 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
 DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 FAIR_BASE = ROOT / "weather" / "outputs" / "fair_prices"
+FAIR_BASE_LOW = ROOT / "weather" / "outputs" / "fair_prices_low"
 OUT_BASE = ROOT / "weather" / "outputs" / "edges"
+OUT_BASE_LOW = ROOT / "weather" / "outputs" / "edges_low"
+TRADES_DB_PATH = Path(os.getenv("WEATHER_TRADES_DB_PATH", str(ROOT / "weather_trades.db")))
 
 logger = logging.getLogger(__name__)
+
+
+def _get_calibration_bias(city_key: str, n: int = 50) -> Optional[float]:
+    """Compute rolling calibration bias from recent settled trades.
+
+    Returns avg(fair_q - won) for the last n settled trades for this city.
+    Positive bias = model overestimates YES probability → should shrink q.
+    Returns None if insufficient data.
+    """
+    import sqlite3
+    if not TRADES_DB_PATH.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(TRADES_DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT fair_q, won FROM weather_trades
+            WHERE settled = 1 AND city_key = ?
+            ORDER BY trade_date DESC LIMIT ?
+        """, (city_key, n)).fetchall()
+        conn.close()
+        if len(rows) < 10:
+            return None
+        bias = sum(r["fair_q"] - r["won"] for r in rows) / len(rows)
+        return float(bias)
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -227,43 +257,71 @@ _TYPE_PRIORITY = {"threshold": 0, "basket": 1, "bucket": 2}
 def compute_baskets(scored_markets: List[Dict[str, Any]], min_ev: float) -> List[Dict[str, Any]]:
     """Group positive-EV YES bucket markets and combine into basket opportunities.
 
+    YES trades on adjacent thresholds are correlated (if 75F hits, 72/73/74 all
+    hit too), so they must be treated as ONE combined position. The total cost of
+    all YES legs for a city/date is the real cost basis — not each leg separately.
+
+    Caps total basket cost at 85c (leaving room for fees on $1 max payout) and
+    drops any individual leg priced below 15c (historically 3% win rate on cheap
+    YES trades).
+
     Returns list of basket candidates (one basket = all qualifying legs for a city).
     """
+    # Max combined cost for all YES legs on one city/date
+    MAX_BASKET_COST_CENTS = 85
+    # Minimum price per YES leg — cheap longshots almost never hit
+    MIN_YES_LEG_CENTS = 15
+
     buckets = [
         m for m in scored_markets
         if m.get("market_type") == "bucket"
         and float((m.get("decision") or {}).get("ev") or 0.0) > 0
         and (m.get("decision") or {}).get("side_to_buy") == "YES"
+        and round(float((m.get("prices") or {}).get("yes_ask") or 0.0) * 100) >= MIN_YES_LEG_CENTS
     ]
     if len(buckets) < 2:
         return []
 
-    buckets.sort(key=lambda m: (m.get("event") or {}).get("a", 0))
+    # Sort by per-leg EV descending so we greedily pick the best legs first
+    buckets.sort(key=lambda m: float((m.get("decision") or {}).get("ev") or 0.0), reverse=True)
 
-    basket_ev = sum(float((m.get("decision") or {}).get("ev") or 0.0) for m in buckets)
+    # Greedily add legs until we hit the cost cap
+    selected = []
+    running_cost_cents = 0
+    for m in buckets:
+        leg_cost = round(float((m.get("prices") or {}).get("yes_ask") or 0.0) * 100)
+        if running_cost_cents + leg_cost > MAX_BASKET_COST_CENTS:
+            continue
+        selected.append(m)
+        running_cost_cents += leg_cost
+
+    if len(selected) < 2:
+        return []
+
+    # Re-sort selected legs by threshold for display
+    selected.sort(key=lambda m: (m.get("event") or {}).get("a", 0))
+
+    basket_ev = sum(float((m.get("decision") or {}).get("ev") or 0.0) for m in selected)
     if basket_ev <= min_ev:
         return []
 
-    combined_q = sum(float(m.get("model_q") or 0.0) for m in buckets)
-    total_cost_cents = sum(
-        round(float((m.get("prices") or {}).get("yes_ask") or 0.0) * 100)
-        for m in buckets
-    )
+    combined_q = sum(float(m.get("model_q") or 0.0) for m in selected)
+    total_cost_cents = running_cost_cents
 
-    first_event = buckets[0].get("event") or {}
-    last_event = buckets[-1].get("event") or {}
+    first_event = selected[0].get("event") or {}
+    last_event = selected[-1].get("event") or {}
     first_a = first_event.get("a")
     last_b = last_event.get("b")
 
     return [{
         "market_type": "basket",
-        "market_ticker": ",".join(m.get("market_ticker", "") for m in buckets),
+        "market_ticker": ",".join(m.get("market_ticker", "") for m in selected),
         "title": f"Basket: {first_event.get('desc', '')} to {last_event.get('desc', '')}",
         "event": {
             "kind": "basket",
             "a": first_a,
             "b": last_b,
-            "desc": f"{first_a}-{last_b}°F basket ({len(buckets)} legs)",
+            "desc": f"{first_a}-{last_b}°F basket ({len(selected)} legs, {total_cost_cents}c combined)",
         },
         "model_q": combined_q,
         "prices": {
@@ -282,9 +340,9 @@ def compute_baskets(scored_markets: List[Dict[str, Any]], min_ev: float) -> List
                 "q": float(m.get("model_q") or 0.0),
                 "ev": float((m.get("decision") or {}).get("ev") or 0.0),
             }
-            for m in buckets
+            for m in selected
         ],
-        "liquidity": buckets[0].get("liquidity", {}),
+        "liquidity": selected[0].get("liquidity", {}),
     }]
 
 
@@ -307,9 +365,11 @@ def _read_fair_artifact(
     forecast_source: str,
     target_date_local: str,
     city_key: str,
+    metric: str = "high",
 ) -> Optional[Dict[str, Any]]:
     src = str(forecast_source).replace("/", "_")
-    path = FAIR_BASE / src / target_date_local / f"{city_key}.json"
+    base = FAIR_BASE_LOW if metric == "low" else FAIR_BASE
+    path = base / src / target_date_local / f"{city_key}.json"
     if not path.exists():
         return None
     try:
@@ -370,9 +430,18 @@ def main() -> int:
     p.add_argument("--city", default="", help="Optional city_key filter (default: all)")
     p.add_argument("--date", default="", help="Optional YYYY-MM-DD (default: today in each city TZ)")
     p.add_argument("--forecast-source", default="nws_hourly_max")
+    p.add_argument(
+        "--metric",
+        choices=["high", "low"],
+        default="high",
+        help="Temperature metric: 'high' (TMAX, default) or 'low' (TMIN). "
+             "Routes to fair_prices_low/ and edges_low/ when 'low'.",
+    )
     p.add_argument("--fee-cents", default=os.getenv("WEATHER_BUY_FEE_CENTS", "2"))
     p.add_argument("--top-n", default=os.getenv("WEATHER_TOP_N", "25"))
     p.add_argument("--min-ev", default=os.getenv("WEATHER_MIN_EV", "0.02"))
+    p.add_argument("--yes-min-ev", default=os.getenv("WEATHER_YES_MIN_EV", ""))
+    p.add_argument("--no-min-ev", default=os.getenv("WEATHER_NO_MIN_EV", ""))
     p.add_argument(
         "--min-q",
         default=os.getenv("WEATHER_MIN_Q", "0.05"),
@@ -423,6 +492,12 @@ def main() -> int:
 
     top_n = int(str(args.top_n).strip())
     min_ev = float(str(args.min_ev).strip())
+    # Side-specific EV thresholds: higher bar for YES (historically miscalibrated),
+    # lower bar for NO at high confidence. Falls back to min_ev if not set.
+    yes_min_ev_raw = str(args.yes_min_ev).strip()
+    no_min_ev_raw = str(args.no_min_ev).strip()
+    yes_min_ev = float(yes_min_ev_raw) if yes_min_ev_raw else min_ev
+    no_min_ev = float(no_min_ev_raw) if no_min_ev_raw else min_ev
     min_q = _clamp(float(str(args.min_q).strip()), 0.0, 0.49)
     # support-tail-mass: prefer new flag, fall back to deprecated tail-mass, default disabled
     stm = _parse_optional_float(args.support_tail_mass)
@@ -451,6 +526,9 @@ def main() -> int:
     db_path = Path(args.db)
     cities = load_cities(Path(args.config))
     src = str(args.forecast_source).replace("/", "_")
+    metric = args.metric
+    out_base = OUT_BASE_LOW if metric == "low" else OUT_BASE
+    pmf_key = "pmf_low_f" if metric == "low" else "pmf_high_f"
 
     wrote = 0
     all_rows_for_md: List[Dict[str, Any]] = []
@@ -470,9 +548,9 @@ def main() -> int:
 
         now_local = _now_utc().astimezone(ZoneInfo(c.tz))
         target_date_local = args.date.strip() or now_local.date().isoformat()
-        out_dir = OUT_BASE / src / target_date_local
+        out_dir = out_base / src / target_date_local
 
-        fair = _read_fair_artifact(args.forecast_source, target_date_local, c.key)
+        fair = _read_fair_artifact(args.forecast_source, target_date_local, c.key, metric=metric)
         if not fair:
             if debug_enabled:
                 snap_time = db_lib.fetch_latest_kalshi_weather_snapshot_time(
@@ -578,7 +656,7 @@ def main() -> int:
             "max_spread_too_wide": 0,
         }
 
-        pmf_raw = fair.get("pmf_high_f") or {}
+        pmf_raw = fair.get(pmf_key) or {}
         pmf: Dict[int, float] = {}
         for k, v in pmf_raw.items():
             try:
@@ -587,17 +665,21 @@ def main() -> int:
                 continue
         if not pmf:
             drops["no_pmf"] += 1
+            forecast_f_key = "forecast_low_f" if metric == "low" else "forecast_high_f"
             out = {
                 "city_key": c.key,
                 "label": c.label,
                 "tz": c.tz,
                 "target_date_local": target_date_local,
                 "forecast_source": str(args.forecast_source),
-                "forecast_high_f": fair.get("forecast_high_f"),
+                "metric": metric,
+                forecast_f_key: fair.get(forecast_f_key),
                 "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
                 "kalshi_snapshot_time_utc": snap_time,
                 "filters": {
                     "min_ev": min_ev,
+                    "yes_min_ev": yes_min_ev,
+                    "no_min_ev": no_min_ev,
                     "min_q": min_q,
                     "q_interval": [min_q, 1.0 - min_q],
                     # Optional guardrail: support overlap filter
@@ -613,8 +695,6 @@ def main() -> int:
                 "drops": drops,
                 "candidates": [],
             }
-            src = str(args.forecast_source).replace("/", "_")
-            out_dir = OUT_BASE / src / target_date_local
             out_dir.mkdir(parents=True, exist_ok=True)
             (out_dir / f"{c.key}.json").write_text(
                 json.dumps(out, indent=2, sort_keys=True),
@@ -633,6 +713,11 @@ def main() -> int:
         tail_prob_min = max(0.0, min(0.49, float(support_tail_mass or 0.0) / 2.0))  # metadata only
         q_lo = float(min_q)
         q_hi = float(1.0 - min_q)
+
+        # Rolling calibration bias from settled trades
+        cal_bias = _get_calibration_bias(c.key)
+        if cal_bias is not None:
+            logger.info(f"{c.key}: calibration bias={cal_bias:+.3f} (applying 50% correction)")
 
         for row in markets:
             # liquidity filters (raw markets)
@@ -696,6 +781,10 @@ def main() -> int:
                 continue
 
             q = float(prob_event(pmf, spec))
+
+            # Apply rolling calibration correction if available
+            if cal_bias is not None:
+                q = max(0.01, min(0.99, q - cal_bias * 0.5))
 
             # Snapshot prices (asks) for YES/NO, in dollars.
             p_yes, p_no = best_buy_prices_from_snapshot_row(row)
@@ -863,7 +952,9 @@ def main() -> int:
                     )
                     continue
 
-            if best_ev < min_ev:
+            # Side-specific minimum EV threshold
+            side_min_ev = yes_min_ev if best_side == "YES" else no_min_ev
+            if best_ev < side_min_ev:
                 drops["no_positive_ev"] += 1
                 _audit_append(
                     {
@@ -928,26 +1019,39 @@ def main() -> int:
                 }
             )
 
-        scored.sort(key=lambda r: (
-            _TYPE_PRIORITY.get(r.get("market_type", "bucket"), 2),
-            -float(((r.get("decision") or {}).get("ev") or 0.0)),
-        ))
+        def _sort_score(r: Dict[str, Any]) -> Tuple[int, float]:
+            """Sort by type priority, then by ROI-weighted EV (not raw EV)."""
+            d = r.get("decision") or {}
+            ev = float(d.get("ev") or 0.0)
+            price = float(d.get("buy_price") or 0.01)
+            # ROI = ev / price, but floor price at 15¢ to avoid tiny-price noise
+            effective_price = max(price, 0.15)
+            roi = ev / effective_price
+            return (
+                _TYPE_PRIORITY.get(r.get("market_type", "bucket"), 2),
+                -roi,
+            )
+        scored.sort(key=_sort_score)
         scored = scored[: max(1, top_n)]
 
         baskets = compute_baskets(scored, min_ev)
 
+        forecast_f_key = "forecast_low_f" if metric == "low" else "forecast_high_f"
         out = {
             "city_key": c.key,
             "label": c.label,
             "tz": c.tz,
             "target_date_local": target_date_local,
             "forecast_source": str(args.forecast_source),
-            "forecast_high_f": fair.get("forecast_high_f"),
+            "metric": metric,
+            forecast_f_key: fair.get(forecast_f_key),
             "model_source": fair.get("model_source", "unknown"),
             "fee": {"open_fee_cents": fee_cents, "open_fee_dollars": fee_open},
             "kalshi_snapshot_time_utc": snap_time,
             "filters": {
                 "min_ev": min_ev,
+                "yes_min_ev": yes_min_ev,
+                "no_min_ev": no_min_ev,
                 "min_q": min_q,
                 "q_interval": [q_lo, q_hi],
                 # Optional guardrail: support overlap filter
@@ -959,6 +1063,7 @@ def main() -> int:
                 "min_volume": min_volume,
                 "min_open_interest": min_open_interest,
                 "max_spread_cents": max_spread_cents,
+                "calibration_bias": cal_bias,
             },
             "drops": drops,
             "candidates": scored,
@@ -990,7 +1095,7 @@ def main() -> int:
         all_rows_for_md.sort(key=lambda r: float(r.get("ev", 0.0)), reverse=True)
         # Keep SUMMARY.md alongside per-city artifacts (same date folder).
         target_date = args.date.strip() or (summary_date_local or _now_utc().date().isoformat())
-        out_dir = OUT_BASE / src / str(target_date)
+        out_dir = out_base / src / str(target_date)
         out_dir.mkdir(parents=True, exist_ok=True)
         md_lines = [
             f"# Weather edges — {target_date} ({src})",
@@ -1017,7 +1122,7 @@ def main() -> int:
             )
         (out_dir / "SUMMARY.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
-    print(f"[done] wrote {wrote} edge artifacts under {OUT_BASE}/")
+    print(f"[done] wrote {wrote} edge artifacts under {out_base}/")
     return 0
 
 

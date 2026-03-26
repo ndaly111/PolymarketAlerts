@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 
 _MONTHS: Dict[str, int] = {
@@ -39,6 +39,13 @@ def parse_tmax_f(text: str) -> int:
     match = re.search(r"^\s*MAXIMUM\s+(-?\d+)", text, re.MULTILINE)
     if not match:
         raise ValueError("Could not parse MAXIMUM temperature from CLI text")
+    return int(match.group(1))
+
+
+def parse_tmin_f(text: str) -> Optional[int]:
+    match = re.search(r"^\s*MINIMUM\s+(-?\d+)", text, re.MULTILINE)
+    if not match:
+        return None
     return int(match.group(1))
 
 

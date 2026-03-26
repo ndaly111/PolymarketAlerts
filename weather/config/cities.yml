@@ -16,6 +16,7 @@ cities:
   - key: MIAHIGH
     label: Miami
     kalshi_series: KXHIGHMIA
+    low_series_ticker: ""  # placeholder: will be KXLOWMIA when Kalshi lists low markets
     tz: America/New_York
     lat: 25.7617
     lon: -80.1918
@@ -31,6 +32,7 @@ cities:
   - key: LAXHIGH
     label: Los Angeles (LAX)
     kalshi_series: KXHIGHLAX
+    low_series_ticker: ""  # placeholder: KXLOWLAX
     tz: America/Los_Angeles
     lat: 34.0522
     lon: -118.2437
@@ -47,6 +49,7 @@ cities:
   - key: CHIHIGH
     label: Chicago
     kalshi_series: KXHIGHCHI
+    low_series_ticker: ""  # placeholder: KXLOWCHI
     tz: America/Chicago
     lat: 41.8781
     lon: -87.6298
@@ -60,6 +63,7 @@ cities:
   - key: NHIGH
     label: New York
     kalshi_series: KXHIGHNY
+    low_series_ticker: ""  # placeholder: KXLOWN
     tz: America/New_York
     lat: 40.7128
     lon: -74.0060
@@ -74,6 +78,7 @@ cities:
   - key: DENHIGH
     label: Denver
     kalshi_series: KXHIGHDEN
+    low_series_ticker: ""  # placeholder: KXLOWDEN
     tz: America/Denver
     lat: 39.8561
     lon: -104.6737
@@ -87,6 +92,7 @@ cities:
   - key: AUSHIGH
     label: Austin
     kalshi_series: KXHIGHAUS
+    low_series_ticker: ""  # placeholder: KXLOWAUS
     tz: America/Chicago
     lat: 30.1975
     lon: -97.6664
@@ -100,6 +106,7 @@ cities:
   - key: SFOHIGH
     label: San Francisco
     kalshi_series: KXHIGHTSFO
+    low_series_ticker: ""  # placeholder: KXLOWSFO
     tz: America/Los_Angeles
     lat: 37.6213
     lon: -122.3790
@@ -117,6 +124,7 @@ cities:
   - key: PHLHIGH
     label: Philadelphia
     kalshi_series: KXHIGHPHIL
+    low_series_ticker: ""  # placeholder: KXLOWPHIL
     tz: America/New_York
     lat: 39.8744
     lon: -75.2424
@@ -130,6 +138,7 @@ cities:
   - key: SEAHIGH
     label: Seattle
     kalshi_series: KXHIGHTSEA
+    low_series_ticker: ""  # placeholder: KXLOWSEA
     tz: America/Los_Angeles
     lat: 47.4502
     lon: -122.3088
@@ -146,6 +155,7 @@ cities:
   - key: DCHIGH
     label: Washington DC
     kalshi_series: KXHIGHTDC
+    low_series_ticker: ""  # placeholder: KXLOWDC
     tz: America/New_York
     lat: 38.8512
     lon: -77.0402
@@ -159,6 +169,7 @@ cities:
   - key: LVHIGH
     label: Las Vegas
     kalshi_series: KXHIGHTLV
+    low_series_ticker: ""  # placeholder: KXLOWLV
     tz: America/Los_Angeles
     lat: 36.0840
     lon: -115.1537
@@ -172,6 +183,7 @@ cities:
   - key: NOLHIGH
     label: New Orleans
     kalshi_series: KXHIGHTNOLA
+    low_series_ticker: ""  # placeholder: KXLOWNOLA
     tz: America/Chicago
     lat: 29.9934
     lon: -90.2580

@@ -93,19 +93,24 @@ def _get_multi_model_spread(
     db_path: Path,
     city_key: str,
     target_date_local: str,
+    metric: str = "high",
 ) -> Tuple[Optional[int], List[Dict[str, Any]]]:
     """Query all forecast sources for a city/date and compute model spread.
 
-    Returns (spread, model_details) where spread is max(highs) - min(highs)
+    Returns (spread, model_details) where spread is max(vals) - min(vals)
     or None if fewer than 2 sources found.
+
+    When metric="low", uses forecast_low_f instead of forecast_high_f.
     """
+    col = "forecast_low_f" if metric == "low" else "forecast_high_f"
     conn = db_lib.connect(db_path)
     try:
         rows = conn.execute(
-            """
-            SELECT source, forecast_high_f, snapshot_time_utc
+            f"""
+            SELECT source, {col}, snapshot_time_utc
             FROM forecast_snapshots
             WHERE city_key = ? AND target_date_local = ?
+              AND {col} IS NOT NULL
             ORDER BY snapshot_time_utc DESC
             """,
             (city_key, target_date_local),
@@ -117,12 +122,13 @@ def _get_multi_model_spread(
         return None, []
 
     # Deduplicate: keep the latest snapshot per source
+    val_key = "forecast_low_f" if metric == "low" else "forecast_high_f"
     seen_sources: Dict[str, Dict[str, Any]] = {}
-    for source, high_f, snap_time in rows:
+    for source, val_f, snap_time in rows:
         if source not in seen_sources:
             seen_sources[source] = {
                 "source": source,
-                "forecast_high_f": int(high_f),
+                val_key: int(val_f),
                 "snapshot_time_utc": snap_time,
             }
 
@@ -130,8 +136,8 @@ def _get_multi_model_spread(
     if len(details) < 2:
         return None, details
 
-    highs = [d["forecast_high_f"] for d in details]
-    spread = max(highs) - min(highs)
+    vals = [d[val_key] for d in details]
+    spread = max(vals) - min(vals)
     return spread, details
 
 
@@ -140,6 +146,7 @@ def _get_prev_day_error(
     city_key: str,
     target_date_local: str,
     forecast_source: str,
+    metric: str = "high",
 ) -> Optional[int]:
     """Get yesterday's forecast error (observed - forecast)."""
     try:
@@ -148,11 +155,13 @@ def _get_prev_day_error(
     except ValueError:
         return None
 
+    obs_col = "o.tmin_f" if metric == "low" else "o.tmax_f"
+    fcst_col = "f.forecast_low_f" if metric == "low" else "f.forecast_high_f"
     conn = db_lib.connect(db_path)
     try:
         row = conn.execute(
-            """
-            SELECT o.tmax_f - f.forecast_high_f
+            f"""
+            SELECT {obs_col} - {fcst_col}
             FROM observed_cli o
             JOIN forecast_snapshots f
               ON f.city_key = o.city_key
@@ -160,6 +169,8 @@ def _get_prev_day_error(
              AND f.source = ?
             WHERE o.city_key = ?
               AND o.date_local = ?
+              AND {obs_col} IS NOT NULL
+              AND {fcst_col} IS NOT NULL
             ORDER BY f.snapshot_time_utc DESC
             LIMIT 1
             """,
@@ -177,6 +188,7 @@ def _get_rolling_bias(
     target_date_local: str,
     forecast_source: str,
     window_days: int = 7,
+    metric: str = "high",
 ) -> Optional[float]:
     """Get rolling N-day forecast bias (mean of observed - forecast)."""
     try:
@@ -186,11 +198,13 @@ def _get_rolling_bias(
     except ValueError:
         return None
 
+    obs_col = "o.tmin_f" if metric == "low" else "o.tmax_f"
+    fcst_col = "f.forecast_low_f" if metric == "low" else "f.forecast_high_f"
     conn = db_lib.connect(db_path)
     try:
         rows = conn.execute(
-            """
-            SELECT o.tmax_f - f.forecast_high_f
+            f"""
+            SELECT {obs_col} - {fcst_col}
             FROM observed_cli o
             JOIN forecast_snapshots f
               ON f.city_key = o.city_key
@@ -198,6 +212,8 @@ def _get_rolling_bias(
              AND f.source = ?
             WHERE o.city_key = ?
               AND o.date_local BETWEEN ? AND ?
+              AND {obs_col} IS NOT NULL
+              AND {fcst_col} IS NOT NULL
             ORDER BY o.date_local DESC
             """,
             (forecast_source, city_key, start, end),
@@ -332,19 +348,22 @@ def _extract_ml_features(
     forecast_high: int,
     forecast_source: str,
     snap: Dict[str, Any],
+    metric: str = "high",
 ) -> Dict[str, float]:
     """Extract all ML features from the database for a city/date.
 
     Uses prepare_features() from ml_models.py with values gathered from DB.
+    The forecast_high argument receives forecast_low_f when metric="low".
     """
     dt = datetime.strptime(target_date_local, "%Y-%m-%d")
 
     # Multi-model spread as nbm_spread proxy
-    spread, _ = _get_multi_model_spread(db_path, city_key, target_date_local)
+    spread, _ = _get_multi_model_spread(db_path, city_key, target_date_local, metric=metric)
 
-    # NBM percentile spread if available
+    # NBM percentile spread if available (NBM has tmin metric too)
+    nbm_metric = "tmin" if metric == "low" else "tmax"
     nbm = db_lib.fetch_latest_nbm_forecast(
-        db_path, city_key=city_key, target_date_local=target_date_local
+        db_path, city_key=city_key, target_date_local=target_date_local, metric=nbm_metric
     )
     nbm_spread = None
     if nbm and nbm.get("p90") is not None and nbm.get("p10") is not None:
@@ -374,8 +393,8 @@ def _extract_ml_features(
     wind_speed = float(context.get("wind_speed", context.get("windspeed_10m", 10.0)) or 10.0)
 
     # Recent performance
-    prev_error = _get_prev_day_error(db_path, city_key, target_date_local, forecast_source)
-    rolling_bias = _get_rolling_bias(db_path, city_key, target_date_local, forecast_source)
+    prev_error = _get_prev_day_error(db_path, city_key, target_date_local, forecast_source, metric=metric)
+    rolling_bias = _get_rolling_bias(db_path, city_key, target_date_local, forecast_source, metric=metric)
 
     # Phase 1: multi-model spread features
     mmf = _get_multi_model_features(db_path, city_key, target_date_local, forecast_high)
@@ -426,6 +445,7 @@ DEFAULT_CONFIG = ROOT / "weather" / "config" / "cities.yml"
 DEFAULT_DB = Path(os.getenv("WEATHER_DB_PATH", str(ROOT / "weather" / "data" / "weather_forecast_accuracy.db")))
 DEFAULT_MODEL_DIR = ROOT / "weather" / "models"
 OUT_BASE = ROOT / "weather" / "outputs" / "fair_prices"
+OUT_BASE_LOW = ROOT / "weather" / "outputs" / "fair_prices_low"
 
 
 @dataclass(frozen=True)
@@ -471,8 +491,10 @@ def _build_ml_ladder(
         return None
 
     # Sanity check: quantiles must be monotonically non-decreasing
-    if p10 > p50 or p50 > p90 or p10 >= p90:
-        print(f"  [warn] ML model degenerate: p10={p10} p50={p50} p90={p90}")
+    # and have minimum spread (real forecast uncertainty is always >= 2°F)
+    MIN_SPREAD_F = 2.0
+    if p10 > p50 or p50 > p90 or (p90 - p10) < MIN_SPREAD_F:
+        print(f"  [warn] ML model degenerate: p10={p10:.1f} p50={p50:.1f} p90={p90:.1f} spread={p90-p10:.1f}")
         return None
 
     return from_percentiles(p10, p25, p50, p75, p90, source="ml_quantile")
@@ -532,6 +554,12 @@ def main() -> int:
         default=os.getenv("WEATHER_MODEL_DIR", str(DEFAULT_MODEL_DIR)),
         help="Directory containing trained ML model .pkl files.",
     )
+    p.add_argument(
+        "--metric",
+        choices=["high", "low"],
+        default="high",
+        help="Temperature metric: 'high' (TMAX, default) or 'low' (TMIN).",
+    )
     args = p.parse_args()
 
     snapshot_hour_local = int(os.getenv("WEATHER_SNAPSHOT_HOUR_LOCAL", "6"))
@@ -539,6 +567,8 @@ def main() -> int:
     use_latest = args.use_latest
     use_ml = args.use_ml_model and HAS_ML
     model_dir = Path(args.model_dir)
+    metric = args.metric
+    out_base = OUT_BASE_LOW if metric == "low" else OUT_BASE
 
     if args.use_ml_model and not HAS_ML:
         print("[warn] --use-ml-model requested but ML dependencies not available (numpy/lightgbm).")
@@ -560,11 +590,11 @@ def main() -> int:
     # Pre-load ML models for all cities if ML mode is enabled
     ml_models: Dict[str, Any] = {}
     if use_ml:
-        print(f"[info] ML mode enabled. Loading models from {model_dir}")
+        print(f"[info] ML mode enabled. Loading models from {model_dir} (metric={metric})")
         for c in cities:
             if args.city and c.key != args.city:
                 continue
-            ml_models[c.key] = get_model(c.key, model_dir)
+            ml_models[c.key] = get_model(c.key, model_dir, metric=metric)
             model_type = type(ml_models[c.key]).__name__
             print(f"  {c.key}: {model_type}")
 
@@ -611,7 +641,14 @@ def main() -> int:
                 print(f"[skip] {c.key}: no snapshot for date={target_date_local} hour={snapshot_hour_local} source={args.forecast_source}")
             continue
 
-        forecast_high = int(snap["forecast_high_f"])
+        if metric == "low":
+            raw_forecast = snap.get("forecast_low_f")
+            if raw_forecast is None:
+                print(f"[skip] {c.key}: no forecast_low_f in snapshot for {target_date_local}")
+                continue
+            forecast_high = int(raw_forecast)  # "forecast_high" variable reused for low model
+        else:
+            forecast_high = int(snap["forecast_high_f"])
 
         # --- Build probability distribution (tiered approach) ---
         model_source_type = "fallback_gaussian"
@@ -628,7 +665,7 @@ def main() -> int:
         if use_ml and c.key in ml_models and ml_models[c.key].is_fitted:
             features = _extract_ml_features(
                 db_path, c.key, target_date_local, forecast_high,
-                str(args.forecast_source), snap,
+                str(args.forecast_source), snap, metric=metric,
             )
             ml_ladder = _build_ml_ladder(ml_models[c.key], forecast_high, features)
 
@@ -649,8 +686,9 @@ def main() -> int:
 
                 # Optionally blend with multi-model spread ladder
                 spread, multi_details = _get_multi_model_spread(
-                    db_path, c.key, target_date_local,
+                    db_path, c.key, target_date_local, metric=metric,
                 )
+                val_key = "forecast_low_f" if metric == "low" else "forecast_high_f"
                 if spread is not None and len(multi_details) >= 2:
                     multi_model_info = {
                         "spread": spread,
@@ -658,8 +696,8 @@ def main() -> int:
                         "models": multi_details,
                     }
                     # Build a simple ensemble ladder from multi-model forecasts
-                    model_highs = [d["forecast_high_f"] for d in multi_details]
-                    ensemble_mean = sum(model_highs) / len(model_highs)
+                    model_vals = [d[val_key] for d in multi_details]
+                    ensemble_mean = sum(model_vals) / len(model_vals)
                     # Use model spread as std dev proxy (spread ≈ 2*std for uniform-ish)
                     ensemble_std = max(1.0, spread / 2.0)
                     ensemble_pmf = _build_fallback_gaussian_pmf(
@@ -679,12 +717,12 @@ def main() -> int:
 
         # Fetch bias data for non-ML paths (used to correct distribution center)
         rolling_bias = _get_rolling_bias(
-            db_path, c.key, target_date_local, str(args.forecast_source),
+            db_path, c.key, target_date_local, str(args.forecast_source), metric=metric,
         )
 
         # Fetch multi-model spread for data-driven Gaussian width
         spread_for_fallback, spread_details = _get_multi_model_spread(
-            db_path, c.key, target_date_local,
+            db_path, c.key, target_date_local, metric=metric,
         )
 
         # Tier 2: Static monthly error PMF (legacy)
@@ -771,6 +809,8 @@ def main() -> int:
 
         summary = summarize_pmf(pmf_high)
 
+        pmf_key = "pmf_low_f" if metric == "low" else "pmf_high_f"
+        forecast_key = "forecast_low_f" if metric == "low" else "forecast_high_f"
         out: Dict[str, Any] = {
             "city_key": c.key,
             "label": c.label,
@@ -780,7 +820,8 @@ def main() -> int:
             "forecast_source": str(args.forecast_source),
             "snapshot_kind": snapshot_kind,
             "fallback_source": fallback_source,
-            "forecast_high_f": forecast_high,
+            forecast_key: forecast_high,
+            "metric": metric,
             "model_source": model_source_type,
             "error_model_month": month,
             "error_model_n_samples": error_model_n_samples,
@@ -792,7 +833,7 @@ def main() -> int:
                 "rolling_7d_bias": round(rolling_bias, 2) if rolling_bias is not None else None,
                 "bias_applied": bias_applied,
             },
-            "pmf_high_f": {str(k): v for k, v in sorted(pmf_high.items())},
+            pmf_key: {str(k): v for k, v in sorted(pmf_high.items())},
             "summary": {
                 "mean": summary.mean,
                 "p10": summary.p10,
@@ -816,13 +857,13 @@ def main() -> int:
             out["multi_model_info"] = multi_model_info
 
         source_slug = str(args.forecast_source).replace("/", "_")
-        out_dir = OUT_BASE / source_slug / target_date_local
+        out_dir = out_base / source_slug / target_date_local
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{c.key}.json"
         out_path.write_text(json.dumps(out, indent=2, sort_keys=True), encoding="utf-8")
         wrote += 1
 
-    print(f"[done] wrote {wrote} fair-price artifacts under {OUT_BASE}/")
+    print(f"[done] wrote {wrote} fair-price artifacts under {out_base}/")
     return 0
 
 

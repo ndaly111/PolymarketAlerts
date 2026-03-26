@@ -57,6 +57,7 @@ AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
+EDGES_LOW_BASE = ROOT / "weather" / "outputs" / "edges_low"
 FAIR_BASE = ROOT / "weather" / "outputs" / "fair_prices"
 
 
@@ -106,6 +107,8 @@ def ensure_db_schema(db_path: Path) -> None:
         cur.execute("ALTER TABLE weather_trades ADD COLUMN payout_cents INTEGER;")
     if "settled_at_utc" not in columns:
         cur.execute("ALTER TABLE weather_trades ADD COLUMN settled_at_utc TEXT;")
+    if "metric" not in columns:
+        cur.execute("ALTER TABLE weather_trades ADD COLUMN metric TEXT DEFAULT 'high';")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS weather_daily_stats (
@@ -133,6 +136,42 @@ def ensure_db_schema(db_path: Path) -> None:
             result TEXT,
             settled_at TEXT,
             UNIQUE(scan_date, market_ticker, side)
+        )
+    """)
+
+    scanned_cols = {row[1] for row in cur.execute("PRAGMA table_info(weather_scanned_opportunities);").fetchall()}
+    if "metric" not in scanned_cols:
+        cur.execute("ALTER TABLE weather_scanned_opportunities ADD COLUMN metric TEXT DEFAULT 'high';")
+
+    # Early exit tracking — logs every reassessment for backtesting
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weather_exit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_utc TEXT NOT NULL,
+            trade_id INTEGER NOT NULL,
+            market_ticker TEXT NOT NULL,
+            city_key TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry_price_cents INTEGER NOT NULL,
+            entry_fair_q REAL NOT NULL,
+            current_fair_q REAL,
+            current_bid_cents INTEGER,
+            fair_value_cents INTEGER,
+            ev_shift REAL,
+            time_bucket TEXT,
+            exit_threshold REAL,
+            action TEXT NOT NULL,
+            sell_price_cents INTEGER,
+            FOREIGN KEY (trade_id) REFERENCES weather_trades(id)
+        )
+    """)
+
+    # Track consecutive negative scans per position
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weather_exit_streak (
+            trade_id INTEGER PRIMARY KEY,
+            consecutive_negative INTEGER DEFAULT 0,
+            last_checked_utc TEXT
         )
     """)
 
@@ -248,6 +287,343 @@ def mark_trade_settled(
     conn.close()
 
 
+def settle_open_trades(db_path: Path, client: KalshiAuthClient) -> int:
+    """Check all unsettled live trades against Kalshi and mark settled ones."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    open_trades = conn.execute("""
+        SELECT id, market_ticker, side, quantity, trade_date, city_key, fill_price_cents
+        FROM weather_trades
+        WHERE settled = 0
+        AND status NOT IN ('paper_low', 'dry_run', 'paper',
+                           'SKIPPED_HAS_POSITION', 'SKIPPED_MIN_EV', 'FAILED_PLACE_ORDER')
+    """).fetchall()
+    conn.close()
+
+    if not open_trades:
+        return 0
+
+    print(f"\n--- Settling open trades: {len(open_trades)} to check ---")
+    settled_rows: List[Dict[str, Any]] = []
+    now = datetime.now(ZoneInfo("UTC")).isoformat()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for t in open_trades:
+            ticker = t["market_ticker"]
+            try:
+                mkt = client.get_market(ticker)
+                mkt_status = mkt.get("status", "")
+                result = mkt.get("result", "")
+                if mkt_status in ("settled", "finalized") or result in ("yes", "no"):
+                    side = t["side"].upper()
+                    won = (side == "YES" and result == "yes") or (side == "NO" and result == "no")
+                    payout = 100 * (t["quantity"] or 1) if won else 0
+                    conn.execute("""
+                        UPDATE weather_trades
+                        SET settled=1, won=?, payout_cents=?, settled_at_utc=?, updated_at=?
+                        WHERE id=?
+                    """, (1 if won else 0, payout, now, now, t["id"]))
+                    print(f"  settled {ticker}: {'WIN' if won else 'LOSS'} ({payout}¢)")
+                    settled_rows.append({
+                        "ticker": ticker,
+                        "city": t["city_key"],
+                        "date": t["trade_date"],
+                        "side": side,
+                        "fill": t["fill_price_cents"],
+                        "won": won,
+                        "payout": payout,
+                    })
+            except Exception as e:
+                print(f"  [warn] Could not check {ticker}: {e}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    n = len(settled_rows)
+    print(f"  {n} trade(s) settled.")
+
+    if settled_rows:
+        wins = sum(1 for r in settled_rows if r["won"])
+        total_cost = sum((r["fill"] or 0) for r in settled_rows)
+        total_payout = sum(r["payout"] for r in settled_rows)
+        roi = (total_payout - total_cost) / total_cost * 100 if total_cost > 0 else 0
+
+        lines = [f"**Settlement Update — {n} trade(s) resolved**",
+                 f"Results: {wins}W / {n - wins}L | Cost: {total_cost}¢ | Payout: {total_payout}¢ | ROI: {roi:+.1f}%", ""]
+        for r in settled_rows:
+            icon = "✅" if r["won"] else "❌"
+            lines.append(f"{icon} {r['ticker']} {r['side']} @ {r['fill']}¢ → {r['payout']}¢")
+
+        msg = "\n".join(lines)
+        if len(msg) > 1990:
+            msg = "\n".join(lines[:3]) + f"\n... and {n} more trades settled ({wins}W/{n-wins}L)"
+        post_discord(msg)
+
+    return n
+
+
+def _get_time_bucket_and_threshold(now_et: datetime) -> tuple:
+    """Return (time_bucket_name, min_ev_shift_to_trigger_exit) based on time of day.
+
+    Early in the day forecasts are noisy — require large shifts.
+    Later in the day forecasts are locked in — smaller shifts trigger exit.
+    """
+    h = now_et.hour
+    if h < 10:
+        return "morning", 0.25    # Before 10 AM: require 25pp shift
+    elif h < 14:
+        return "midday", 0.15     # 10 AM - 2 PM: require 15pp shift
+    else:
+        return "afternoon", 0.10  # After 2 PM: require 10pp shift
+
+
+def reassess_positions(
+    db_path: Path,
+    client: Optional[Any],
+    forecast_source: str,
+    target_date: str,
+) -> List[Dict[str, Any]]:
+    """Re-evaluate open positions against fresh fair prices.
+
+    For each held position:
+      1. Load the latest fair-price PMF for that city
+      2. Recompute fair_q for the held market's event
+      3. Compare to entry fair_q — if shifted beyond threshold, consider exit
+      4. Check market bid — only sell if bid > current fair value
+      5. Require 2+ consecutive negative scans before acting
+
+    All checks are logged to weather_exit_log for later analysis.
+    Returns list of exit actions taken.
+    """
+    import re
+    sys.path.insert(0, str(ROOT))
+    from weather.lib.kalshi_weather import EventSpec, parse_event_spec_from_ticker, prob_event
+
+    now_utc = datetime.now(ZoneInfo("UTC"))
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    time_bucket, exit_threshold = _get_time_bucket_and_threshold(now_et)
+
+    print(f"\n--- Reassessing open positions (time={now_et.strftime('%H:%M')} ET, bucket={time_bucket}, threshold={exit_threshold:.0%}) ---")
+
+    # Load today's open (unsettled, non-paper) positions
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    open_trades = conn.execute("""
+        SELECT id, market_ticker, city_key, side, limit_price_cents, fair_q, ev,
+               trade_date, event_display, status, metric
+        FROM weather_trades
+        WHERE settled = 0
+        AND trade_date = ?
+        AND status IN ('PLACED', 'dry_run', 'DRY_RUN', 'filled', 'FILLED')
+    """, (target_date,)).fetchall()
+    conn.close()
+
+    if not open_trades:
+        print("  No open positions to reassess.")
+        return []
+
+    print(f"  {len(open_trades)} open positions to check")
+
+    # Load fresh fair price PMFs per city
+    pmf_cache: Dict[str, Dict[int, float]] = {}
+    src_slug = forecast_source.replace("/", "_")
+    fair_dir = FAIR_BASE / src_slug / target_date
+
+    if fair_dir.exists():
+        for json_file in fair_dir.glob("*.json"):
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                city_key = data.get("city_key", json_file.stem)
+                metric_key = "pmf_high_f"  # TODO: support low metric
+                pmf_raw = data.get(metric_key, {})
+                pmf = {int(k): float(v) for k, v in pmf_raw.items() if float(v) > 0}
+                if pmf:
+                    pmf_cache[city_key] = pmf
+            except Exception:
+                pass
+    print(f"  Loaded PMFs for {len(pmf_cache)} cities")
+
+    exit_actions = []
+    conn = sqlite3.connect(str(db_path))
+
+    for trade in open_trades:
+        trade_id = trade["id"]
+        ticker = trade["market_ticker"]
+        city_key = trade["city_key"]
+        side = trade["side"]
+        entry_price = trade["limit_price_cents"]
+        entry_fair_q = trade["fair_q"]
+
+        # Parse event spec from ticker
+        spec = parse_event_spec_from_ticker(ticker)
+        if spec is None:
+            continue
+
+        # Get fresh PMF for this city
+        pmf = pmf_cache.get(city_key)
+        if not pmf:
+            continue
+
+        # Compute current fair probability
+        current_fair_q = float(prob_event(pmf, spec))
+
+        # Compute fair value in cents for our side
+        if side == "YES":
+            entry_fair_cents = int(entry_fair_q * 100)
+            current_fair_cents = int(current_fair_q * 100)
+            ev_shift = entry_fair_q - current_fair_q  # positive = fair value dropped
+        else:
+            entry_fair_cents = int((1 - entry_fair_q) * 100)
+            current_fair_cents = int((1 - current_fair_q) * 100)
+            ev_shift = (1 - current_fair_q) - (1 - entry_fair_q)
+            ev_shift = -ev_shift  # positive = our NO position lost value
+
+        # For YES: ev_shift > 0 means fair_q dropped (bad for us)
+        # For NO:  ev_shift > 0 means fair_q rose (bad for us)
+        # Normalize: positive ev_shift = position losing value
+        if side == "NO":
+            ev_shift = current_fair_q - entry_fair_q
+
+        # Determine action
+        should_exit = ev_shift > exit_threshold
+        action = "HOLD"
+
+        # Check consecutive negative streak
+        streak_row = conn.execute(
+            "SELECT consecutive_negative FROM weather_exit_streak WHERE trade_id = ?",
+            (trade_id,)
+        ).fetchone()
+        prev_streak = streak_row[0] if streak_row else 0
+
+        if should_exit:
+            new_streak = prev_streak + 1
+        else:
+            new_streak = 0
+
+        # Update streak
+        conn.execute("""
+            INSERT INTO weather_exit_streak (trade_id, consecutive_negative, last_checked_utc)
+            VALUES (?, ?, ?)
+            ON CONFLICT(trade_id) DO UPDATE SET
+                consecutive_negative = ?,
+                last_checked_utc = ?
+        """, (trade_id, new_streak, now_utc.isoformat(), new_streak, now_utc.isoformat()))
+
+        # Fetch current market bid
+        current_bid = None
+        sell_price = None
+        if client is not None and should_exit and new_streak >= 2:
+            try:
+                fresh = fetch_fresh_kalshi_price(client, ticker)
+                if fresh:
+                    if side == "YES":
+                        current_bid = fresh["yes_bid"]
+                    else:
+                        current_bid = fresh["no_bid"]
+            except Exception:
+                pass
+
+        # Exit conditions:
+        # 1. EV shift exceeds time-based threshold
+        # 2. Consecutive negative scans >= 2
+        # 3. Market bid > current fair value (don't sell below fair)
+        # 4. Bid >= 8¢ (worth the effort)
+        if should_exit and new_streak >= 2:
+            if current_bid is not None and current_bid > current_fair_cents and current_bid >= 8:
+                action = "EXIT"
+                sell_price = current_bid
+            elif current_bid is not None and current_bid < 8:
+                action = "HOLD_LOW_BID"
+            elif current_bid is not None and current_bid <= current_fair_cents:
+                action = "HOLD_BID_BELOW_FAIR"
+            else:
+                action = "EXIT_CANDIDATE"  # Would exit but no bid data (dry run)
+
+        # For dry run positions, mark as EXIT_CANDIDATE for paper tracking
+        if action == "EXIT_CANDIDATE" and trade["status"] in ("dry_run", "DRY_RUN"):
+            action = "PAPER_EXIT"
+            sell_price = current_fair_cents  # estimate
+
+        status_sym = {"HOLD": ".", "EXIT": "!!", "PAPER_EXIT": "(P)", "EXIT_CANDIDATE": "?",
+                      "HOLD_LOW_BID": "~", "HOLD_BID_BELOW_FAIR": "~"}.get(action, "?")
+        print(f"  {status_sym} {ticker} {side} | entry_q={entry_fair_q:.1%} now_q={current_fair_q:.1%} "
+              f"shift={ev_shift:+.1%} streak={new_streak} bid={current_bid or '?'}¢ → {action}")
+
+        # Log to exit_log for analysis
+        conn.execute("""
+            INSERT INTO weather_exit_log
+                (ts_utc, trade_id, market_ticker, city_key, side, entry_price_cents,
+                 entry_fair_q, current_fair_q, current_bid_cents, fair_value_cents,
+                 ev_shift, time_bucket, exit_threshold, action, sell_price_cents)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            now_utc.isoformat(), trade_id, ticker, city_key, side, entry_price,
+            entry_fair_q, current_fair_q, current_bid, current_fair_cents,
+            ev_shift, time_bucket, exit_threshold, action, sell_price,
+        ))
+
+        if action == "EXIT" and client is not None:
+            # Place sell order
+            try:
+                kalshi_side = "yes" if side == "YES" else "no"
+                order = client.sell_position(
+                    ticker=ticker,
+                    side=kalshi_side,
+                    quantity=1,
+                    limit_price=sell_price,
+                )
+                order_id = order.get("order_id", order.get("id", ""))
+                print(f"    SOLD {ticker} at {sell_price}¢ (order: {order_id})")
+                # Mark as settled with early exit
+                conn.execute("""
+                    UPDATE weather_trades
+                    SET settled = 1, won = 0, payout_cents = ?, settled_at_utc = ?, updated_at = ?
+                    WHERE id = ?
+                """, (sell_price, now_utc.isoformat(), now_utc.isoformat(), trade_id))
+            except Exception as e:
+                print(f"    [error] Failed to sell {ticker}: {e}")
+                action = "EXIT_FAILED"
+
+        if action == "PAPER_EXIT":
+            # Mark paper position as early-exited for tracking
+            conn.execute("""
+                UPDATE weather_trades
+                SET settled = 1, won = 0, payout_cents = ?, settled_at_utc = ?, updated_at = ?
+                WHERE id = ?
+            """, (sell_price, now_utc.isoformat(), now_utc.isoformat(), trade_id))
+
+        if action in ("EXIT", "PAPER_EXIT"):
+            exit_actions.append({
+                "ticker": ticker,
+                "city": city_key,
+                "side": side,
+                "entry_price": entry_price,
+                "entry_fair_q": entry_fair_q,
+                "current_fair_q": current_fair_q,
+                "sell_price": sell_price,
+                "action": action,
+                "ev_shift": ev_shift,
+                "pnl": (sell_price or 0) - entry_price,
+            })
+
+    conn.commit()
+    conn.close()
+
+    if exit_actions:
+        total_pnl = sum(e["pnl"] for e in exit_actions)
+        lines = [f"**Early Exit Alert — {len(exit_actions)} position(s)**"]
+        for e in exit_actions:
+            tag = "[PAPER]" if e["action"] == "PAPER_EXIT" else "[LIVE]"
+            lines.append(
+                f"{tag} {e['ticker']} {e['side']} | entry {e['entry_price']}¢ → exit ~{e['sell_price']}¢ "
+                f"| P&L {e['pnl']:+d}¢ | q shifted {e['entry_fair_q']:.0%}→{e['current_fair_q']:.0%}"
+            )
+        lines.append(f"Total early exit P&L: {total_pnl:+d}¢")
+        post_discord("\n".join(lines)[:1990])
+
+    return exit_actions
+
+
 def format_ev_bucket_report(buckets: Dict[str, Dict[str, Any]]) -> str:
     """Format EV bucket results as a Discord-friendly string."""
     lines = ["**Weather Trades by EV Bucket**", ""]
@@ -332,6 +708,7 @@ def record_trade(
     placed_at_utc: Optional[str] = None,
     last_checked_at_utc: Optional[str] = None,
     filled_at_utc: Optional[str] = None,
+    metric: str = "high",
 ) -> None:
     """Record a trade in the database."""
     now = datetime.now(ZoneInfo("UTC")).isoformat()
@@ -347,13 +724,13 @@ def record_trade(
             trade_date, city_key, market_ticker, event_display, side,
             quantity, limit_price_cents, fair_q, ev, forecast_high_f,
             order_id, status, fill_price_cents, placed_at_utc,
-            last_checked_at_utc, filled_at_utc, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            last_checked_at_utc, filled_at_utc, created_at, updated_at, metric
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         today, city_key, market_ticker, event_display, side,
         quantity, limit_price_cents, fair_q, ev, forecast_high_f,
         order_id, status, fill_price_cents, placed_at_utc,
-        last_checked_at_utc, filled_at_utc, now, now
+        last_checked_at_utc, filled_at_utc, now, now, metric
     ))
 
     conn.commit()
@@ -520,6 +897,115 @@ def load_basket_opportunities(forecast_source: str, target_date: str) -> List[Di
 
     baskets.sort(key=lambda x: x.get("ev", 0), reverse=True)
     return baskets
+
+
+def load_low_edge_opportunities(forecast_source: str, target_date: str) -> List[Dict[str, Any]]:
+    """Load pre-computed low-temp edge opportunities from JSON artifacts (for paper trading)."""
+    opportunities = []
+    src_slug = forecast_source.replace("/", "_")
+    edges_dir = EDGES_LOW_BASE / src_slug / target_date
+
+    if not edges_dir.exists():
+        return []
+
+    for json_file in edges_dir.glob("*.json"):
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+            city_key = data.get("city_key", json_file.stem)
+            forecast_low_f = data.get("forecast_low_f")
+
+            for candidate in data.get("candidates", []):
+                decision = candidate.get("decision", {})
+                ev = decision.get("ev", 0)
+                side = decision.get("side_to_buy", "")
+                buy_price = decision.get("buy_price", 0)
+                q = candidate.get("model_q", 0)
+
+                if ev < MIN_EV:
+                    continue
+                if q < MIN_Q or q > (1 - MIN_Q):
+                    continue
+
+                ask_cents = int(buy_price * 100) if buy_price else 100
+                if ask_cents > MAX_KALSHI_ASK_CENTS:
+                    continue
+
+                event = candidate.get("event", {})
+                event_display = event.get("desc", "")
+                if not event_display:
+                    kind = event.get("kind", "")
+                    a = event.get("a", 0)
+                    b = event.get("b")
+                    if kind == "between" and b:
+                        event_display = f"{a}-{b}"
+                    elif kind in ("ge", "gte"):
+                        event_display = f">={a}"
+                    else:
+                        event_display = str(a)
+
+                opportunities.append({
+                    "city_key": city_key,
+                    "market_ticker": candidate.get("market_ticker", ""),
+                    "title": candidate.get("title", ""),
+                    "event_display": event_display,
+                    "side": side,
+                    "ask_cents": ask_cents,
+                    "fair_q": q,
+                    "ev": ev,
+                    "forecast_high_f": forecast_low_f,
+                    "metric": "low",
+                })
+        except Exception as e:
+            print(f"  [warn] Error loading low edge {json_file}: {e}")
+
+    opportunities.sort(key=lambda x: x.get("ev", 0), reverse=True)
+    return opportunities
+
+
+def execute_paper_trade(
+    db_path: Path,
+    opportunity: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Log a paper trade for a low-temp opportunity. Never places a real order."""
+    ticker = opportunity["market_ticker"]
+    city_key = opportunity["city_key"]
+    event_display = opportunity["event_display"]
+    side = opportunity["side"]
+    fair_q = opportunity["fair_q"]
+    ev = opportunity["ev"]
+    ask_cents = opportunity.get("ask_cents", 0)
+    forecast_low_f = opportunity.get("forecast_high_f")
+
+    if already_traded_today(db_path, ticker):
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": ask_cents,
+            "fair_q": fair_q,
+            "ev": ev,
+            "order_id": None,
+            "status": "SKIPPED_ALREADY_TRADED",
+        }
+
+    record_trade(
+        db_path, city_key, ticker, event_display, side,
+        CONTRACTS_PER_TRADE, ask_cents, fair_q, ev, forecast_low_f,
+        "PAPER", "paper_low",
+        metric="low",
+    )
+    return {
+        "ticker": ticker,
+        "city": city_key,
+        "event": event_display,
+        "side": side,
+        "limit": ask_cents,
+        "fair_q": fair_q,
+        "ev": ev,
+        "order_id": "PAPER",
+        "status": "PAPER_LOW",
+    }
 
 
 def execute_basket(
@@ -689,7 +1175,7 @@ def format_summary_message(
     header_lines = [
         f"**Weather Auto-Trade Summary — {target_date}**",
         f"Forecast source: {forecast_source}",
-        f"Min EV: {MIN_EV:.0%} | Max ask: {MAX_KALSHI_ASK_CENTS}¢ | Max trades/day: {MAX_TRADES_PER_DAY}",
+        f"Min EV: {MIN_EV:.0%} | Max ask: {MAX_KALSHI_ASK_CENTS}¢ | Live limit: {MAX_TRADES_PER_DAY}/day",
         f"Placed: {len(placed)} | Skipped: {len(skipped)} | Failed: {len(failed)}",
     ]
     if DRY_RUN:
@@ -845,9 +1331,35 @@ def execute_trade(
 
     print(f"  Fresh Kalshi ask: {kalshi_ask}¢")
 
+    # YES price floor — cheap YES longshots (<15c) have ~3% historical win rate
+    MIN_YES_PRICE_CENTS = 15
+    if side == "YES" and kalshi_ask < MIN_YES_PRICE_CENTS:
+        print(f"  [skip] YES ask {kalshi_ask}¢ < {MIN_YES_PRICE_CENTS}¢ floor (cheap longshots ~3% WR)")
+        record_trade(
+            db_path, city_key, ticker, event_display, side,
+            0, kalshi_ask, fair_q, pre_ev, forecast_high_f,
+            None, "SKIPPED_YES_FLOOR"
+        )
+        return {
+            "ticker": ticker,
+            "city": city_key,
+            "event": event_display,
+            "side": side,
+            "limit": kalshi_ask,
+            "fair_q": fair_q,
+            "ev": pre_ev,
+            "order_id": None,
+            "status": "SKIPPED_YES_FLOOR",
+        }
+
+    # Side-specific max ask: NO trades capped at 65c (expensive NOs lose money
+    # despite high WR), YES uses global MAX_KALSHI_ASK_CENTS
+    MAX_NO_ASK_CENTS = 65
+    effective_max_ask = MAX_NO_ASK_CENTS if side == "NO" else MAX_KALSHI_ASK_CENTS
+
     # Check price hasn't moved too much
-    if kalshi_ask > MAX_KALSHI_ASK_CENTS:
-        print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {MAX_KALSHI_ASK_CENTS}¢ limit")
+    if kalshi_ask > effective_max_ask:
+        print(f"  [skip] Kalshi ask {kalshi_ask}¢ > {effective_max_ask}¢ limit ({side})")
         record_trade(
             db_path, city_key, ticker, event_display, side,
             0, kalshi_ask, fair_q, pre_ev, forecast_high_f,
@@ -1079,6 +1591,43 @@ def run_data_pipeline(target_date: str, forecast_source: str) -> bool:
         return False
     print("  Edges computed OK")
 
+    # 6. Compute low fair prices (for paper trading)
+    print("Computing low fair prices...")
+    result = subprocess.run([
+        sys.executable, "-m", "weather.scripts.compute_fair_prices",
+        "--forecast-source", forecast_source,
+        "--use-latest",
+        "--metric", "low",
+        "--db", str(WEATHER_DB_PATH),
+    ], capture_output=True, text=True, cwd=str(ROOT), env={
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+    })
+    if result.returncode != 0:
+        print(f"  [warn] Low fair price computation: {result.stderr[:200]}")
+    else:
+        print("  Low fair prices computed OK")
+
+    # 7. Compute low edges (for paper trading)
+    print("Computing low edges...")
+    result = subprocess.run([
+        sys.executable, "-m", "weather.scripts.compute_edges",
+        "--forecast-source", forecast_source,
+        "--date", target_date,
+        "--metric", "low",
+        "--db", str(WEATHER_DB_PATH),
+    ], capture_output=True, text=True, cwd=str(ROOT), env={
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "WEATHER_MIN_EV": str(MIN_EV),
+        "WEATHER_MIN_Q": str(MIN_Q),
+        "WEATHER_BUY_FEE_CENTS": "2",
+    })
+    if result.returncode != 0:
+        print(f"  [warn] Low edge computation: {result.stderr[:200]}")
+    else:
+        print("  Low edges computed OK")
+
     return True
 
 
@@ -1088,8 +1637,8 @@ def main() -> int:
     print(f"Min EV threshold: {MIN_EV:.0%}")
     print(f"Min q: {MIN_Q:.1%}")
     print(f"Max Kalshi ask: {MAX_KALSHI_ASK_CENTS}¢")
-    print(f"Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Contracts per trade: {CONTRACTS_PER_TRADE}")
+    print(f"Max live trades/day: {MAX_TRADES_PER_DAY}")
     print(f"Dry run: {DRY_RUN}")
     print(f"Autotrade enabled: {AUTOTRADE_ENABLED}")
     print("=" * 60)
@@ -1097,19 +1646,10 @@ def main() -> int:
     # Initialize
     ensure_db_schema(TRADES_DB_PATH)
 
-    if AUTOTRADE_ENABLED and MAX_TRADES_PER_DAY <= 0:
-        print("ERROR: WEATHER_MAX_TRADES_PER_DAY must be > 0 when auto-trade is enabled.")
-        return 1
-
     # Check daily limit
     trades_today = get_trades_today(TRADES_DB_PATH)
-    print(f"\nTrades today: {trades_today}/{MAX_TRADES_PER_DAY}")
-
-    if trades_today >= MAX_TRADES_PER_DAY:
-        print("Daily trade limit reached. Exiting.")
-        return 0
-
-    remaining_trades = MAX_TRADES_PER_DAY - trades_today
+    print(f"\nLive trades today: {trades_today}/{MAX_TRADES_PER_DAY}")
+    remaining_trades = max(0, MAX_TRADES_PER_DAY - trades_today)
 
     # Get target date (today in ET)
     now_et = datetime.now(ZoneInfo("America/New_York"))
@@ -1133,10 +1673,24 @@ def main() -> int:
             print(f"Failed to initialize Kalshi client: {e}")
             return 1
 
+    # Settle any open trades from previous days
+    if client:
+        settle_open_trades(TRADES_DB_PATH, client)
+
     # Run data pipeline to get fresh prices and edges
     if not run_data_pipeline(target_date, forecast_source):
         print("\n[error] Data pipeline failed. Exiting.")
         return 1
+
+    # Reassess existing positions with fresh fair prices (early exit logic)
+    exit_actions = reassess_positions(
+        db_path=TRADES_DB_PATH,
+        client=client,
+        forecast_source=forecast_source,
+        target_date=target_date,
+    )
+    if exit_actions:
+        print(f"\n  Early exits: {len(exit_actions)}")
 
     # Load opportunities from edge artifacts
     print("\n--- Loading opportunities ---")
@@ -1165,26 +1719,22 @@ def main() -> int:
         except Exception as e:
             print(f"  [warn] Failed to log opportunity: {e}")
 
-    # Process opportunities
-    print(f"\n--- Processing top {min(len(opportunities), remaining_trades)} opportunities ---")
+    # Process opportunities — live up to limit, paper the rest
+    print(f"\n--- Processing {len(opportunities)} opportunities (live slots: {remaining_trades}) ---")
 
     trades_placed = 0
     results: List[Dict[str, Any]] = []
     for opp in opportunities:
-        if trades_placed >= remaining_trades:
-            print(f"\nReached trade limit ({MAX_TRADES_PER_DAY}/day)")
-            break
-
-        result = execute_trade(
-            client,
-            TRADES_DB_PATH,
-            opp,
-            trade_enabled=AUTOTRADE_ENABLED or DRY_RUN,
-        )
-        results.append(result)
-        if result["status"] in {"PLACED", "DRY_RUN"}:
-            trades_placed += 1
-            increment_trades_today(TRADES_DB_PATH)
+        live = (AUTOTRADE_ENABLED or DRY_RUN) and trades_placed < remaining_trades
+        if live:
+            result = execute_trade(client, TRADES_DB_PATH, opp, trade_enabled=AUTOTRADE_ENABLED or DRY_RUN)
+            results.append(result)
+            if result["status"] in {"PLACED", "DRY_RUN"}:
+                trades_placed += 1
+                increment_trades_today(TRADES_DB_PATH)
+        else:
+            result = execute_paper_trade(TRADES_DB_PATH, opp)
+            results.append(result)
 
     # Load and process basket opportunities
     basket_opportunities = load_basket_opportunities(forecast_source, target_date)
@@ -1192,21 +1742,37 @@ def main() -> int:
 
     for basket_opp in basket_opportunities:
         n_legs = len(basket_opp["basket"].get("legs", []))
-        if trades_placed + n_legs > remaining_trades:
-            print(f"  [skip basket] Need {n_legs} trades, only {remaining_trades - trades_placed} remaining")
-            continue
-
-        leg_results = execute_basket(
-            client,
-            TRADES_DB_PATH,
-            basket_opp,
-            trade_enabled=AUTOTRADE_ENABLED or DRY_RUN,
-        )
+        if trades_placed + n_legs <= remaining_trades and (AUTOTRADE_ENABLED or DRY_RUN):
+            leg_results = execute_basket(client, TRADES_DB_PATH, basket_opp, trade_enabled=AUTOTRADE_ENABLED or DRY_RUN)
+            placed_in_basket = sum(1 for r in leg_results if r["status"] in {"PLACED", "DRY_RUN"})
+            trades_placed += placed_in_basket
+            for _ in range(placed_in_basket):
+                increment_trades_today(TRADES_DB_PATH)
+        else:
+            leg_results = [execute_paper_trade(TRADES_DB_PATH, {"market_ticker": l["market_ticker"], "city_key": basket_opp["city_key"], "event_display": (basket_opp["basket"].get("event") or {}).get("desc", ""), "side": "YES", "ask_cents": l["ask_cents"], "fair_q": l.get("q", 0), "ev": l.get("ev", 0), "forecast_high_f": basket_opp.get("forecast_high_f")}) for l in basket_opp["basket"].get("legs", [])]
+            leg_results = [r for r in leg_results]  # keep all
         results.extend(leg_results)
-        placed_in_basket = sum(1 for r in leg_results if r["status"] in {"PLACED", "DRY_RUN"})
-        trades_placed += placed_in_basket
-        for _ in range(placed_in_basket):
-            increment_trades_today(TRADES_DB_PATH)
+
+    # --- Paper trade low temperature opportunities (no live orders, no trade limit) ---
+    low_opportunities = load_low_edge_opportunities(forecast_source, target_date)
+    print(f"\n--- Low temp paper trading: {len(low_opportunities)} opportunities ---")
+
+    paper_results: List[Dict[str, Any]] = []
+    for opp in low_opportunities:
+        result = execute_paper_trade(TRADES_DB_PATH, opp)
+        paper_results.append(result)
+
+    if paper_results:
+        fmt_ev = lambda v: f"{v:.1%}" if v is not None else "n/a"
+        low_lines = [
+            f"- {r['ticker']} {r['side']} | {r.get('limit', 'n/a')}¢ | EV {fmt_ev(r.get('ev'))}"
+            for r in paper_results if r["status"] == "PAPER_LOW"
+        ]
+        if low_lines:
+            low_msg = f"**[PAPER] Low Temp Opportunities — {target_date}**\n" + "\n".join(low_lines[:20])
+            if len(low_lines) > 20:
+                low_msg += f"\n... and {len(low_lines) - 20} more"
+            post_discord(low_msg)
 
     # Post only when an edge/opportunity was found.
     if opportunities or basket_opportunities:

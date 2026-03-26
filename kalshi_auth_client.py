@@ -225,8 +225,11 @@ class KalshiAuthClient:
             "side": side.lower(),
             "type": "limit",
             "count": quantity,
-            "yes_price" if side.lower() == "yes" else "no_price": limit_price,
         }
+        if side.lower() == "yes":
+            body["yes_price"] = limit_price
+        else:
+            body["no_price"] = limit_price
 
         if client_order_id:
             body["client_order_id"] = client_order_id
@@ -235,6 +238,37 @@ class KalshiAuthClient:
 
         if status not in (200, 201):
             raise RuntimeError(f"Failed to place order: {status} {data}")
+
+        return data.get("order", data)
+
+    def sell_position(
+        self,
+        ticker: str,
+        side: str,  # "yes" or "no" — the side you HOLD
+        quantity: int,
+        limit_price: int,  # Price in cents to sell at
+    ) -> Dict[str, Any]:
+        """
+        Sell (close) a held position.
+
+        On Kalshi, selling is done by placing an order with action="sell".
+        """
+        body = {
+            "ticker": ticker,
+            "action": "sell",
+            "side": side.lower(),
+            "type": "limit",
+            "count": quantity,
+        }
+        if side.lower() == "yes":
+            body["yes_price"] = limit_price
+        else:
+            body["no_price"] = limit_price
+
+        status, data = self._request("POST", "/portfolio/orders", json_body=body)
+
+        if status not in (200, 201):
+            raise RuntimeError(f"Failed to sell position: {status} {data}")
 
         return data.get("order", data)
 

@@ -25,7 +25,7 @@ import requests
 import yaml
 
 from weather.lib import db as db_lib
-from weather.lib.cli_parse import detect_preliminary, parse_report_date_local, parse_tmax_f
+from weather.lib.cli_parse import detect_preliminary, parse_report_date_local, parse_tmax_f, parse_tmin_f
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -162,6 +162,7 @@ def main() -> int:
             if report_date_local != target_date_local:
                 qc_flags.append("REPORT_DATE_MISMATCH")
             tmax_f = parse_tmax_f(text)
+            tmin_f = parse_tmin_f(text)
             is_prelim = detect_preliminary(text)
 
             db_lib.upsert_observed_cli(
@@ -169,6 +170,7 @@ def main() -> int:
                 city_key=city.key,
                 date_local=target_date_local,
                 tmax_f=tmax_f,
+                tmin_f=tmin_f,
                 fetched_at_utc=fetched_at_utc,
                 source_url=url,
                 version_used=int(version_used),
@@ -178,7 +180,8 @@ def main() -> int:
                 raw_text=text,
             )
             wrote += 1
-            print(f"[ok] {city.key} {city.label}: {target_date_local} tmax={tmax_f}F")
+            tmin_str = f" tmin={tmin_f}F" if tmin_f is not None else ""
+            print(f"[ok] {city.key} {city.label}: {target_date_local} tmax={tmax_f}F{tmin_str}")
         except Exception as exc:
             print(f"[err] {city.key} {city.label}: {exc}", file=sys.stderr)
 

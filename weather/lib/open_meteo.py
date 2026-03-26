@@ -36,6 +36,15 @@ class OpenMeteoForecast:
     raw: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class OpenMeteoLowForecast:
+    """Daily low temperature forecast from Open-Meteo."""
+    date_local: str
+    low_f: int
+    model: str
+    raw: Dict[str, Any]
+
+
 def make_session(timeout: float = 25.0) -> requests.Session:
     """Create a requests session for Open-Meteo API calls."""
     s = requests.Session()
@@ -128,6 +137,68 @@ def get_daily_high_forecast(
             return OpenMeteoForecast(
                 date_local=target_date,
                 high_f=high_f,
+                model=api_model or "best_match",
+                raw=data,
+            )
+
+    return None
+
+
+def get_daily_low_forecast(
+    session: requests.Session,
+    lat: float,
+    lon: float,
+    target_date: str,
+    timezone: str = "America/New_York",
+    model: str = "best_match",
+) -> Optional[OpenMeteoLowForecast]:
+    """
+    Fetch the daily low temperature forecast from Open-Meteo.
+
+    Mirrors get_daily_high_forecast() but requests temperature_2m_min.
+    """
+    model_map = {
+        "best_match": None,
+        "hrrr": "ncep_hrrr_conus",
+        "gfs": "ncep_gfs_graphcast025",
+        "ecmwf": "ecmwf_ifs025",
+    }
+
+    api_model = model_map.get(model.lower(), model)
+
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_min",
+        "temperature_unit": "fahrenheit",
+        "timezone": timezone,
+        "forecast_days": 7,
+    }
+
+    if api_model:
+        params["models"] = api_model
+
+    try:
+        r = session.get(BASE_URL, params=params)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print(f"  [warn] Open-Meteo API error (low): {e}")
+        return None
+
+    daily = data.get("daily", {})
+    dates = daily.get("time", [])
+    temps = daily.get("temperature_2m_min", [])
+
+    if not dates or not temps:
+        return None
+
+    for i, date in enumerate(dates):
+        if date == target_date:
+            low_f = round(temps[i])
+            return OpenMeteoLowForecast(
+                date_local=target_date,
+                low_f=low_f,
                 model=api_model or "best_match",
                 raw=data,
             )

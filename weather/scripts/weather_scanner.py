@@ -781,24 +781,48 @@ def main():
         # Sort by EV
         all_opportunities.sort(key=lambda x: x["ev"], reverse=True)
 
-        # IMPORTANT: Portfolio constraint for weather markets
-        # Multiple thresholds for same city/date are mutually exclusive
-        # Rule: total cost across all positions for same city/date must be < $1
-        # Example: YES@35¢ + YES@35¢ = 70¢ total → can profit 30¢ if either wins ✓
-        # Example: YES@55¢ + YES@55¢ = $1.10 total → guaranteed loss ✗
-        city_date_costs: dict = {}
+        # IMPORTANT: Portfolio constraints for weather markets
+        #
+        # YES trades: correlated — if 75F hits then 72/73/74 all hit too.
+        # Must treat all YES legs for same city/date as ONE combined position.
+        # Cap total YES cost at 85c per city/date.
+        #
+        # NO trades: independent — NO>=72 and NO>=74 can have different
+        # outcomes (temp 73 → first loses, second wins). 100% of historical
+        # multi-leg NO positions had mixed outcomes. Evaluate each individually
+        # but still cap per-trade cost.
+        MAX_YES_BLOCK_COST = 0.85  # Max combined YES cost per city/date
+        MAX_NO_TRADE_COST = 0.65   # Max cost per individual NO trade
+        MIN_YES_PRICE = 0.15       # Skip YES trades below 15c (3% historical WR)
+
+        yes_block_costs: dict = {}  # city_date -> cumulative YES cost
         for opp in all_opportunities:
             key = f"{opp['city_key']}_{opp['target_date']}"
-            current_cost = city_date_costs.get(key, 0)
-            new_cost = current_cost + opp["price"]
 
-            if new_cost < 0.93:  # Max payout after 7% fee is ~93¢, so total cost must be below this
-                city_date_costs[key] = new_cost
-                opp["skipped_portfolio"] = False
-                opp["portfolio_cost"] = new_cost
+            if opp["side"] == "YES":
+                # Skip cheap YES longshots
+                if opp["price"] < MIN_YES_PRICE:
+                    opp["skipped_portfolio"] = True
+                    opp["portfolio_cost"] = opp["price"]
+                    continue
+                # Track YES as a combined block per city/date
+                current_yes = yes_block_costs.get(key, 0)
+                new_yes = current_yes + opp["price"]
+                if new_yes <= MAX_YES_BLOCK_COST:
+                    yes_block_costs[key] = new_yes
+                    opp["skipped_portfolio"] = False
+                    opp["portfolio_cost"] = new_yes
+                else:
+                    opp["skipped_portfolio"] = True
+                    opp["portfolio_cost"] = new_yes
             else:
-                opp["skipped_portfolio"] = True
-                opp["portfolio_cost"] = new_cost
+                # NO trades are independent — evaluate each on its own
+                if opp["price"] <= MAX_NO_TRADE_COST:
+                    opp["skipped_portfolio"] = False
+                    opp["portfolio_cost"] = opp["price"]
+                else:
+                    opp["skipped_portfolio"] = True
+                    opp["portfolio_cost"] = opp["price"]
 
         filtered_opportunities = all_opportunities
 

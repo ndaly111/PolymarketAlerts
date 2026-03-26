@@ -171,18 +171,20 @@ def load_climatology(
     db_path: Path,
     city_key: str,
     forecast_source: str,
+    metric: str = "high",
 ) -> Dict[int, float]:
     """
-    Compute monthly climatological average forecast high for a city.
-    Returns {month: avg_forecast_high}.
+    Compute monthly climatological average forecast high (or low) for a city.
+    Returns {month: avg_forecast_value}.
     """
     conn = sqlite3.connect(db_path)
+    col = "forecast_low_f" if metric == "low" else "forecast_high_f"
     rows = conn.execute(
-        """
+        f"""
         SELECT CAST(strftime('%m', target_date_local) AS INTEGER) as month,
-               AVG(forecast_high_f)
+               AVG({col})
         FROM forecast_snapshots
-        WHERE city_key = ? AND source = ?
+        WHERE city_key = ? AND source = ? AND {col} IS NOT NULL
         GROUP BY month
         """,
         (city_key, forecast_source),
@@ -404,12 +406,17 @@ def load_training_data(
     start_date: str,
     end_date: str,
     forecast_source: str = "mos_gfs_18z_archive",
+    metric: str = "high",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Load training data: forecasts, observations, and features.
 
     Uses weather_observations_daily for precip/wind when forecast_context_json
     is NULL (which is 100% of MOS GFS archive rows).
+
+    Args:
+        metric: "high" (default) uses forecast_high_f/tmax_f;
+                "low" uses forecast_low_f/tmin_f.
 
     Returns:
         (X, y, dates) where:
@@ -419,24 +426,46 @@ def load_training_data(
     """
     conn = sqlite3.connect(db_path)
 
-    # Query joined forecast/observation data including weather context
-    query = """
-    SELECT
-        f.target_date_local,
-        f.forecast_high_f,
-        o.tmax_f,
-        f.snapshot_hour_local,
-        f.forecast_context_json
-    FROM forecast_snapshots f
-    JOIN observed_cli o
-        ON f.city_key = o.city_key
-        AND f.target_date_local = o.date_local
-    WHERE f.city_key = ?
-        AND f.source = ?
-        AND f.target_date_local >= ?
-        AND f.target_date_local <= ?
-    ORDER BY f.target_date_local
-    """
+    if metric == "low":
+        # Low model: join forecast_low_f and tmin_f; skip rows with NULL low data
+        query = """
+        SELECT
+            f.target_date_local,
+            f.forecast_low_f,
+            o.tmin_f,
+            f.snapshot_hour_local,
+            f.forecast_context_json
+        FROM forecast_snapshots f
+        JOIN observed_cli o
+            ON f.city_key = o.city_key
+            AND f.target_date_local = o.date_local
+        WHERE f.city_key = ?
+            AND f.source = ?
+            AND f.target_date_local >= ?
+            AND f.target_date_local <= ?
+            AND f.forecast_low_f IS NOT NULL
+            AND o.tmin_f IS NOT NULL
+        ORDER BY f.target_date_local
+        """
+    else:
+        # High model (default)
+        query = """
+        SELECT
+            f.target_date_local,
+            f.forecast_high_f,
+            o.tmax_f,
+            f.snapshot_hour_local,
+            f.forecast_context_json
+        FROM forecast_snapshots f
+        JOIN observed_cli o
+            ON f.city_key = o.city_key
+            AND f.target_date_local = o.date_local
+        WHERE f.city_key = ?
+            AND f.source = ?
+            AND f.target_date_local >= ?
+            AND f.target_date_local <= ?
+        ORDER BY f.target_date_local
+        """
 
     rows = conn.execute(query, (city_key, forecast_source, start_date, end_date)).fetchall()
     conn.close()
@@ -498,7 +527,7 @@ def load_training_data(
     precip_accum = compute_precip_accumulation(dates, precip_by_date, lookback_days=3)
 
     # Load climatology for forecast_anomaly
-    climatology = load_climatology(Path(db_lib.default_paths(ROOT).db_path), city_key, forecast_source)
+    climatology = load_climatology(Path(db_lib.default_paths(ROOT).db_path), city_key, forecast_source, metric=metric)
 
     # Build feature arrays
     X_list = []
@@ -506,9 +535,13 @@ def load_training_data(
     prev_error = 0
     rolling_errors: List[float] = []
 
-    for i, (date_str, forecast_high, observed_tmax, snapshot_hour, context_json) in enumerate(rows):
+    for i, (date_str, forecast_val, observed_val, snapshot_hour, context_json) in enumerate(rows):
+        # For the low model, forecast_val = forecast_low_f, observed_val = tmin_f.
+        # For the high model, forecast_val = forecast_high_f, observed_val = tmax_f.
+        # We rename to forecast_high internally so prepare_features() stays unchanged.
+        forecast_high = forecast_val
         # Compute error: observed - forecast
-        error = observed_tmax - forecast_high
+        error = observed_val - forecast_val
 
         # Parse date
         target_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -730,6 +763,7 @@ def train_city_model(
     forecast_source: str = "open_meteo",
     val_months: int = 6,
     config: Optional[QuantileModelConfig] = None,
+    metric: str = "high",
 ) -> Optional[QuantileForestModel]:
     """
     Train a quantile model for a single city.
@@ -737,7 +771,7 @@ def train_city_model(
     Returns trained model or None if insufficient data.
     """
     print(f"\n{'='*60}")
-    print(f"Training model for {city_key}")
+    print(f"Training model for {city_key} (metric={metric})")
     print(f"{'='*60}")
 
     # Load all available data
@@ -746,7 +780,7 @@ def train_city_model(
     start_date = (datetime.now() - timedelta(days=5*365)).strftime("%Y-%m-%d")
 
     X, y, dates = load_training_data(
-        db_path, city_key, start_date, end_date, forecast_source
+        db_path, city_key, start_date, end_date, forecast_source, metric=metric
     )
 
     if len(y) < 100:
@@ -790,6 +824,40 @@ def train_city_model(
         if len(y_val) >= 50:
             model.calibrate(X_val, y_val)
 
+        # Compute CQR (Conformal Quantile Regression) corrections from a held-out
+        # calibration split. We split the validation set in half: first half for
+        # early stopping (already used above), second half for CQR corrections.
+        # This prevents the near-zero corrections that result from in-sample CQR.
+        month_idx = FEATURE_NAMES.index("month")
+        cqr_corrections: Dict[float, float] = {}
+        monthly_bias: Dict[int, float] = {}  # reserved for future online updates
+
+        if len(y_val) >= 40:
+            # Use the second half of validation set for CQR (held out from early stopping)
+            cqr_split = len(y_val) // 2
+            X_cqr = X_val[cqr_split:]
+            y_cqr = y_val[cqr_split:]
+            print(f"\nCQR corrections (computed from {len(y_cqr)} held-out calibration samples):")
+            for q in model.config.quantiles:
+                pred_errors_cqr = model.models[q].predict(X_cqr)
+                conformity_scores = y_cqr - pred_errors_cqr  # actual - predicted
+                correction = float(np.quantile(conformity_scores, q))
+                cqr_corrections[q] = correction
+                print(f"  q={q:.2f}: correction={correction:+.2f}°F")
+            model.cqr_corrections = cqr_corrections
+        else:
+            model.cqr_corrections = {}
+
+        model.monthly_bias = monthly_bias
+
+        # Compute minimum spread from historical error variance.
+        # p10-p90 of actual errors gives the true uncertainty floor.
+        actual_p10 = float(np.percentile(y_val, 10))
+        actual_p90 = float(np.percentile(y_val, 90))
+        historical_spread = actual_p90 - actual_p10
+        model.min_spread = max(3.0, 0.5 * historical_spread)
+        print(f"\nMin spread: {model.min_spread:.1f}°F (historical p10-p90={historical_spread:.1f}°F)")
+
         # Feature importance
         importance = model.feature_importance()
         print(f"\nFeature importance:")
@@ -797,7 +865,8 @@ def train_city_model(
             print(f"  {name}: {imp:.4f}")
 
         # Save model
-        model_path = model_dir / f"{city_key.lower()}_quantile.pkl"
+        suffix = "low_quantile" if metric == "low" else "quantile"
+        model_path = model_dir / f"{city_key.lower()}_{suffix}.pkl"
         model.save(model_path)
 
         return model
@@ -857,6 +926,12 @@ def main() -> int:
         default=500,
         help="Number of trees per quantile model (default: 500)",
     )
+    parser.add_argument(
+        "--metric",
+        choices=["high", "low"],
+        default="high",
+        help="Temperature metric to train on: 'high' (TMAX, default) or 'low' (TMIN)",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -892,6 +967,7 @@ def main() -> int:
     print(f"  Model dir: {model_dir}")
     print(f"  Forecast source: {args.forecast_source}")
     print(f"  Validation months: {args.val_months}")
+    print(f"  Metric: {args.metric}")
 
     trained = 0
     for city in cities:
@@ -902,6 +978,7 @@ def main() -> int:
             forecast_source=args.forecast_source,
             val_months=args.val_months,
             config=model_config,
+            metric=args.metric,
         )
         if model is not None:
             trained += 1

@@ -135,6 +135,36 @@ def compute_hourly_max_for_local_date(
     return max(temps), qc
 
 
+def compute_hourly_min_for_local_date(
+    hourly_json: Dict[str, Any],
+    tz_name: str,
+    target_date_local: str,
+) -> Optional[int]:
+    """Extract the daily low temperature from NWS hourly forecast data."""
+    props = (hourly_json or {}).get("properties") or {}
+    periods = props.get("periods") or []
+    if not periods:
+        return None
+
+    tz = ZoneInfo(tz_name)
+    temps: List[int] = []
+    for p in periods:
+        st = p.get("startTime")
+        temp = p.get("temperature")
+        if st is None or temp is None:
+            continue
+        try:
+            dt = datetime.fromisoformat(st)
+            dt_local = dt.astimezone(tz)
+            if dt_local.date().isoformat() != target_date_local:
+                continue
+            temps.append(int(temp))
+        except Exception:
+            continue
+
+    return min(temps) if temps else None
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=str(DEFAULT_CONFIG))
@@ -238,6 +268,7 @@ def main() -> int:
 
             # Fetch forecast based on source
             forecast_context = None
+            fcst_low = None
             if forecast_source.startswith("open_meteo"):
                 # Use Open-Meteo API
                 forecast = om_lib.get_daily_high_forecast(
@@ -247,6 +278,16 @@ def main() -> int:
                     raise RuntimeError(f"Open-Meteo returned no forecast for {target_date_local}")
 
                 fcst_high = forecast.high_f
+                # Also fetch daily low forecast
+                try:
+                    low_forecast = om_lib.get_daily_low_forecast(
+                        s, c.lat, c.lon, target_date_local, c.tz, open_meteo_model
+                    )
+                    if low_forecast is not None:
+                        fcst_low = low_forecast.low_f
+                except Exception as low_err:
+                    print(f"  [warn] Failed to get low forecast: {low_err}", file=sys.stderr)
+
                 raw_trimmed = {
                     "target_date_local": target_date_local,
                     "city_key": c.key,
@@ -277,6 +318,9 @@ def main() -> int:
                 if fcst_high is None:
                     raise RuntimeError(f"Could not compute hourly max for {target_date_local}")
 
+                # Also extract daily low from same hourly data
+                fcst_low = compute_hourly_min_for_local_date(hourly, c.tz, target_date_local)
+
                 # Store only a trimmed payload to keep DB smaller
                 raw_trimmed = {
                     "target_date_local": target_date_local,
@@ -299,6 +343,7 @@ def main() -> int:
                 snapshot_hour_local=snapshot_hour_for_city,
                 snapshot_tz=c.tz,
                 forecast_high_f=int(fcst_high),
+                forecast_low_f=int(fcst_low) if fcst_low is not None else None,
                 source=forecast_source,
                 points_url=points_url,
                 forecast_url=forecast_url,
@@ -307,9 +352,10 @@ def main() -> int:
                 forecast_context=forecast_context,
             )
             wrote += 1
+            low_str = f" forecast_low={fcst_low}F" if fcst_low is not None else ""
             print(
                 f"[ok] {c.key} {c.label}: {target_date_local} "
-                f"forecast_high={fcst_high}F (hour={snapshot_hour_for_city}, source={forecast_source})"
+                f"forecast_high={fcst_high}F{low_str} (hour={snapshot_hour_for_city}, source={forecast_source})"
             )
             if forecast_source.startswith("nws"):
                 nws_lib.polite_sleep()

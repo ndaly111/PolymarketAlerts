@@ -52,12 +52,27 @@ def collect_open_meteo_forecast(
     target_date: str,
     timezone: str,
     model: str,
-) -> Optional[int]:
-    """Get daily high forecast from Open-Meteo for a specific model."""
-    forecast = om_lib.get_daily_high_forecast(
+) -> tuple:
+    """Get daily high and low forecast from Open-Meteo for a specific model.
+
+    Returns (high_f, low_f) — either may be None.
+    """
+    high_forecast = om_lib.get_daily_high_forecast(
         session, lat, lon, target_date, timezone, model
     )
-    return forecast.high_f if forecast else None
+    high_f = high_forecast.high_f if high_forecast else None
+
+    low_f = None
+    try:
+        low_forecast = om_lib.get_daily_low_forecast(
+            session, lat, lon, target_date, timezone, model
+        )
+        if low_forecast is not None:
+            low_f = low_forecast.low_f
+    except Exception:
+        pass
+
+    return high_f, low_f
 
 
 def collect_nws_hourly_max(
@@ -128,7 +143,7 @@ def main() -> int:
         for model in OPEN_METEO_MODELS:
             source = f"open_meteo_{model}"
             try:
-                high_f = collect_open_meteo_forecast(
+                high_f, low_f = collect_open_meteo_forecast(
                     om_session, lat, lon, target_date, tz, model
                 )
                 if high_f is not None:
@@ -140,13 +155,15 @@ def main() -> int:
                         snapshot_hour_local=snapshot_hour,
                         snapshot_tz=tz,
                         forecast_high_f=high_f,
+                        forecast_low_f=int(low_f) if low_f is not None else None,
                         source=source,
                         points_url=f"open_meteo:{lat},{lon}",
                         forecast_url=f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&models={model}",
                         qc_flags=[],
                         raw={"model": model},
                     )
-                    print(f"  {model.upper()}: {high_f}F")
+                    low_str = f"/{low_f}F" if low_f is not None else ""
+                    print(f"  {model.upper()}: {high_f}F{low_str}")
                     wrote += 1
                 else:
                     print(f"  {model.upper()}: no data")
