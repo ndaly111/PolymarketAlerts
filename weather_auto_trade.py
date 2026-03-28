@@ -52,8 +52,16 @@ ENV_AUTOTRADE_ENABLED = os.getenv("WEATHER_AUTOTRADE_ENABLED", "0") == "1"
 # Use environment variables to control trading mode
 # Set WEATHER_DRY_RUN=1 for paper trading (logs but no real orders)
 # Set WEATHER_AUTOTRADE_ENABLED=1 to enable live trading
-DRY_RUN = ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED  # Dry run if explicitly set OR if autotrade disabled
-AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED
+
+# SAFETY LOCK: Hardcoded paper-trading-only mode.
+# The Ubuntu server sources .env (not .env.weather) and may have AUTOTRADE_ENABLED=1
+# from when the bot was live in January. This override prevents any live orders
+# from being placed regardless of env vars until explicitly re-enabled here.
+# To re-enable live trading: set _PAPER_ONLY = False AND update .env / GitHub secrets.
+_PAPER_ONLY = True
+
+DRY_RUN = _PAPER_ONLY or ENV_DRY_RUN or not ENV_AUTOTRADE_ENABLED
+AUTOTRADE_ENABLED = ENV_AUTOTRADE_ENABLED and not _PAPER_ONLY
 
 # Paths for edge artifacts
 EDGES_BASE = ROOT / "weather" / "outputs" / "edges"
@@ -352,7 +360,7 @@ def settle_open_trades(db_path: Path, client: KalshiAuthClient) -> int:
                  f"Results: {wins}W / {n - wins}L | Cost: {total_cost}¢ | Payout: {total_payout}¢ | ROI: {roi:+.1f}%", ""]
         for r in settled_rows:
             icon = "✅" if r["won"] else "❌"
-            lines.append(f"{icon} {r['ticker']} {r['side']} @ {r['fill']}¢ → {r['payout']}¢")
+            lines.append(f"{icon} {r['ticker']} {r['side']} @ {r['fill']}¢ -> {r['payout']}¢")
 
         msg = "\n".join(lines)
         if len(msg) > 1990:
@@ -547,7 +555,7 @@ def reassess_positions(
         status_sym = {"HOLD": ".", "EXIT": "!!", "PAPER_EXIT": "(P)", "EXIT_CANDIDATE": "?",
                       "HOLD_LOW_BID": "~", "HOLD_BID_BELOW_FAIR": "~"}.get(action, "?")
         print(f"  {status_sym} {ticker} {side} | entry_q={entry_fair_q:.1%} now_q={current_fair_q:.1%} "
-              f"shift={ev_shift:+.1%} streak={new_streak} bid={current_bid or '?'}¢ → {action}")
+              f"shift={ev_shift:+.1%} streak={new_streak} bid={current_bid or '?'}¢ -> {action}")
 
         # Log to exit_log for analysis
         conn.execute("""
@@ -615,8 +623,8 @@ def reassess_positions(
         for e in exit_actions:
             tag = "[PAPER]" if e["action"] == "PAPER_EXIT" else "[LIVE]"
             lines.append(
-                f"{tag} {e['ticker']} {e['side']} | entry {e['entry_price']}¢ → exit ~{e['sell_price']}¢ "
-                f"| P&L {e['pnl']:+d}¢ | q shifted {e['entry_fair_q']:.0%}→{e['current_fair_q']:.0%}"
+                f"{tag} {e['ticker']} {e['side']} | entry {e['entry_price']}¢ -> exit ~{e['sell_price']}¢ "
+                f"| P&L {e['pnl']:+d}¢ | q shifted {e['entry_fair_q']:.0%}->{e['current_fair_q']:.0%}"
             )
         lines.append(f"Total early exit P&L: {total_pnl:+d}¢")
         post_discord("\n".join(lines)[:1990])
@@ -784,15 +792,31 @@ def already_traded_today(db_path: Path, market_ticker: str) -> bool:
     return row is not None
 
 
+def _kalshi_cents(market: dict, key: str, default: int) -> int:
+    """Read a bid/ask field from Kalshi, falling back to _dollars string variant."""
+    v = market.get(key)
+    if v is not None:
+        return int(v)
+    # Kalshi removed integer fields ~Mar 2026; fall back to dollar-string variants
+    dollars_key = f"{key}_dollars"
+    dv = market.get(dollars_key)
+    if dv is not None:
+        try:
+            return int(round(float(dv) * 100))
+        except (ValueError, TypeError):
+            pass
+    return default
+
+
 def fetch_fresh_kalshi_price(client: KalshiAuthClient, ticker: str) -> Optional[Dict[str, int]]:
     """Fetch fresh bid/ask from Kalshi for a specific ticker."""
     try:
         market = client.get_market(ticker)
         return {
-            "yes_bid": market.get("yes_bid", 0),
-            "yes_ask": market.get("yes_ask", 100),
-            "no_bid": market.get("no_bid", 0),
-            "no_ask": market.get("no_ask", 100),
+            "yes_bid": _kalshi_cents(market, "yes_bid", 0),
+            "yes_ask": _kalshi_cents(market, "yes_ask", 100),
+            "no_bid": _kalshi_cents(market, "no_bid", 0),
+            "no_ask": _kalshi_cents(market, "no_ask", 100),
         }
     except Exception as e:
         print(f"  [error] Failed to fetch Kalshi price for {ticker}: {e}")
