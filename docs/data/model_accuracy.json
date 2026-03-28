@@ -9,80 +9,80 @@
     },
     {
       "source": "nws_hourly_max",
-      "days": 9,
-      "total_forecasts": 91,
-      "bias": -0.6,
-      "mae": 2.34
+      "days": 10,
+      "total_forecasts": 103,
+      "bias": -0.84,
+      "mae": 2.63
     },
     {
       "source": "mos_gfs_12z",
-      "days": 4,
-      "total_forecasts": 47,
-      "bias": -0.21,
-      "mae": 2.64
+      "days": 5,
+      "total_forecasts": 59,
+      "bias": -0.97,
+      "mae": 3.2
     }
   ],
   "by_city": {
     "mos_gfs_12z": {
       "LVHIGH": {
-        "count": 4,
-        "bias": -0.5,
-        "mae": 0.5
+        "count": 5,
+        "bias": -0.2,
+        "mae": 0.6
       },
       "AUSHIGH": {
-        "count": 4,
-        "bias": -0.25,
-        "mae": 0.75
+        "count": 5,
+        "bias": 0.2,
+        "mae": 1.0
       },
       "MIAHIGH": {
-        "count": 4,
-        "bias": -0.5,
-        "mae": 1.5
-      },
-      "NOLHIGH": {
-        "count": 4,
-        "bias": -0.25,
-        "mae": 1.75
-      },
-      "SFOHIGH": {
-        "count": 4,
-        "bias": 1.5,
-        "mae": 2.0
+        "count": 5,
+        "bias": -0.6,
+        "mae": 1.4
       },
       "LAXHIGH": {
-        "count": 4,
-        "bias": -1.25,
-        "mae": 2.25
+        "count": 5,
+        "bias": -0.8,
+        "mae": 2.0
+      },
+      "NOLHIGH": {
+        "count": 5,
+        "bias": 0.8,
+        "mae": 2.4
       },
       "SEAHIGH": {
-        "count": 4,
-        "bias": -0.25,
-        "mae": 2.25
+        "count": 5,
+        "bias": -0.8,
+        "mae": 2.4
       },
-      "PHLHIGH": {
-        "count": 4,
-        "bias": -2.75,
-        "mae": 2.75
-      },
-      "DCHIGH": {
-        "count": 3,
-        "bias": -2.33,
-        "mae": 3.67
+      "SFOHIGH": {
+        "count": 5,
+        "bias": 0.4,
+        "mae": 2.4
       },
       "CHIHIGH": {
-        "count": 4,
-        "bias": -2.75,
-        "mae": 4.25
+        "count": 5,
+        "bias": -2.6,
+        "mae": 3.8
       },
-      "NHIGH": {
-        "count": 4,
-        "bias": 0.5,
-        "mae": 4.5
+      "PHLHIGH": {
+        "count": 5,
+        "bias": -5.2,
+        "mae": 5.2
       },
       "DENHIGH": {
+        "count": 5,
+        "bias": 3.4,
+        "mae": 5.8
+      },
+      "NHIGH": {
+        "count": 5,
+        "bias": -1.8,
+        "mae": 5.8
+      },
+      "DCHIGH": {
         "count": 4,
-        "bias": 5.75,
-        "mae": 5.75
+        "bias": -5.25,
+        "mae": 6.25
       }
     },
     "mos_gfs_18z_archive": {
@@ -149,130 +149,418 @@
     },
     "nws_hourly_max": {
       "LVHIGH": {
-        "count": 7,
-        "bias": 1.0,
-        "mae": 1.0
+        "count": 8,
+        "bias": 1.25,
+        "mae": 1.25
       },
       "NOLHIGH": {
-        "count": 7,
-        "bias": -0.71,
-        "mae": 1.29
+        "count": 8,
+        "bias": -0.5,
+        "mae": 1.25
       },
       "AUSHIGH": {
-        "count": 7,
-        "bias": -1.29,
-        "mae": 1.57
+        "count": 8,
+        "bias": -1.25,
+        "mae": 1.5
       },
       "SEAHIGH": {
-        "count": 7,
-        "bias": -0.86,
-        "mae": 1.71
-      },
-      "CHIHIGH": {
-        "count": 9,
-        "bias": -1.44,
-        "mae": 1.89
+        "count": 8,
+        "bias": -1.25,
+        "mae": 2.0
       },
       "MIAHIGH": {
-        "count": 9,
-        "bias": -1.67,
-        "mae": 1.89
+        "count": 10,
+        "bias": -2.0,
+        "mae": 2.2
+      },
+      "CHIHIGH": {
+        "count": 10,
+        "bias": -2.0,
+        "mae": 2.4
       },
       "DENHIGH": {
-        "count": 7,
-        "bias": 2.57,
-        "mae": 2.57
+        "count": 8,
+        "bias": 1.88,
+        "mae": 2.63
       },
       "SFOHIGH": {
-        "count": 7,
-        "bias": -1.71,
-        "mae": 2.86
+        "count": 8,
+        "bias": -1.88,
+        "mae": 2.88
       },
       "NHIGH": {
-        "count": 9,
-        "bias": -0.67,
-        "mae": 2.89
+        "count": 10,
+        "bias": -1.4,
+        "mae": 3.4
       },
       "DCHIGH": {
-        "count": 6,
-        "bias": -2.83,
-        "mae": 3.17
-      },
-      "LAXHIGH": {
-        "count": 9,
-        "bias": 3.11,
-        "mae": 3.56
+        "count": 7,
+        "bias": -3.43,
+        "mae": 3.71
       },
       "PHLHIGH": {
-        "count": 7,
-        "bias": -3.57,
-        "mae": 3.57
+        "count": 8,
+        "bias": -4.0,
+        "mae": 4.0
+      },
+      "LAXHIGH": {
+        "count": 10,
+        "bias": 3.7,
+        "mae": 4.1
       }
     },
     "open_meteo": {
-      "LVHIGH": {
-        "count": 1,
+      "DCHIGH": {
+        "count": 2,
         "bias": 1.0,
         "mae": 1.0
       },
       "NHIGH": {
-        "count": 1,
+        "count": 2,
         "bias": 1.0,
         "mae": 1.0
+      },
+      "SFOHIGH": {
+        "count": 2,
+        "bias": 1.0,
+        "mae": 1.0
+      },
+      "LVHIGH": {
+        "count": 2,
+        "bias": 1.5,
+        "mae": 1.5
       },
       "NOLHIGH": {
-        "count": 1,
-        "bias": 1.0,
-        "mae": 1.0
+        "count": 2,
+        "bias": 1.5,
+        "mae": 1.5
       },
       "PHLHIGH": {
-        "count": 1,
-        "bias": 1.0,
-        "mae": 1.0
+        "count": 2,
+        "bias": 1.5,
+        "mae": 1.5
       },
-      "CHIHIGH": {
-        "count": 1,
+      "AUSHIGH": {
+        "count": 2,
         "bias": -2.0,
-        "mae": 2.0
-      },
-      "DCHIGH": {
-        "count": 1,
-        "bias": 2.0,
         "mae": 2.0
       },
       "MIAHIGH": {
-        "count": 1,
-        "bias": -2.0,
-        "mae": 2.0
+        "count": 2,
+        "bias": -2.5,
+        "mae": 2.5
       },
-      "SFOHIGH": {
-        "count": 1,
-        "bias": 2.0,
-        "mae": 2.0
+      "CHIHIGH": {
+        "count": 2,
+        "bias": -4.5,
+        "mae": 4.5
       },
-      "AUSHIGH": {
-        "count": 1,
-        "bias": -3.0,
-        "mae": 3.0
+      "DENHIGH": {
+        "count": 2,
+        "bias": 3.0,
+        "mae": 5.0
       },
       "SEAHIGH": {
-        "count": 1,
+        "count": 2,
         "bias": -5.0,
         "mae": 5.0
       },
-      "DENHIGH": {
-        "count": 1,
-        "bias": 8.0,
-        "mae": 8.0
-      },
       "LAXHIGH": {
-        "count": 1,
-        "bias": 12.0,
-        "mae": 12.0
+        "count": 2,
+        "bias": 11.0,
+        "mae": 11.0
       }
     }
   },
   "recent_forecasts": [
+    {
+      "date": "2026-03-27",
+      "city_key": "AUSHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 90,
+      "observed": 88,
+      "error": 2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "AUSHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 87,
+      "observed": 88,
+      "error": -1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "AUSHIGH",
+      "source": "open_meteo",
+      "forecast": 87,
+      "observed": 88,
+      "error": -1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "CHIHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 42,
+      "observed": 44,
+      "error": -2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "CHIHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 37,
+      "observed": 44,
+      "error": -7
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "CHIHIGH",
+      "source": "open_meteo",
+      "forecast": 37,
+      "observed": 44,
+      "error": -7
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DCHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 60,
+      "observed": 74,
+      "error": -14
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DCHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 67,
+      "observed": 74,
+      "error": -7
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DCHIGH",
+      "source": "open_meteo",
+      "forecast": 74,
+      "observed": 74,
+      "error": 0
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DENHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 49,
+      "observed": 55,
+      "error": -6
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DENHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 52,
+      "observed": 55,
+      "error": -3
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "DENHIGH",
+      "source": "open_meteo",
+      "forecast": 53,
+      "observed": 55,
+      "error": -2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LAXHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 72,
+      "observed": 71,
+      "error": 1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LAXHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 80,
+      "observed": 71,
+      "error": 9
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LAXHIGH",
+      "source": "open_meteo",
+      "forecast": 81,
+      "observed": 71,
+      "error": 10
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LVHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 91,
+      "observed": 90,
+      "error": 1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LVHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 93,
+      "observed": 90,
+      "error": 3
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "LVHIGH",
+      "source": "open_meteo",
+      "forecast": 92,
+      "observed": 90,
+      "error": 2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "MIAHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 83,
+      "observed": 84,
+      "error": -1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "MIAHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 79,
+      "observed": 84,
+      "error": -5
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "MIAHIGH",
+      "source": "open_meteo",
+      "forecast": 81,
+      "observed": 84,
+      "error": -3
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 54,
+      "observed": 65,
+      "error": -11
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 57,
+      "observed": 65,
+      "error": -8
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NHIGH",
+      "source": "open_meteo",
+      "forecast": 66,
+      "observed": 65,
+      "error": 1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NOLHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 87,
+      "observed": 82,
+      "error": 5
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NOLHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 83,
+      "observed": 82,
+      "error": 1
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "NOLHIGH",
+      "source": "open_meteo",
+      "forecast": 84,
+      "observed": 82,
+      "error": 2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "PHLHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 55,
+      "observed": 70,
+      "error": -15
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "PHLHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 63,
+      "observed": 70,
+      "error": -7
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "PHLHIGH",
+      "source": "open_meteo",
+      "forecast": 72,
+      "observed": 70,
+      "error": 2
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SEAHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 55,
+      "observed": 58,
+      "error": -3
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SEAHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 54,
+      "observed": 58,
+      "error": -4
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SEAHIGH",
+      "source": "open_meteo",
+      "forecast": 53,
+      "observed": 58,
+      "error": -5
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SFOHIGH",
+      "source": "mos_gfs_12z",
+      "forecast": 76,
+      "observed": 80,
+      "error": -4
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SFOHIGH",
+      "source": "nws_hourly_max",
+      "forecast": 77,
+      "observed": 80,
+      "error": -3
+    },
+    {
+      "date": "2026-03-27",
+      "city_key": "SFOHIGH",
+      "source": "open_meteo",
+      "forecast": 80,
+      "observed": 80,
+      "error": 0
+    },
     {
       "date": "2026-03-26",
       "city_key": "AUSHIGH",
@@ -1584,294 +1872,6 @@
       "forecast": 60,
       "observed": 58,
       "error": 2
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "MIAHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 84,
-      "observed": 88,
-      "error": -4
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "NHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 28,
-      "observed": 27,
-      "error": 1
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "NOLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 42,
-      "observed": 41,
-      "error": 1
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "PHLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 28,
-      "observed": 28,
-      "error": 0
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "SEAHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 48,
-      "observed": 46,
-      "error": 2
-    },
-    {
-      "date": "2026-01-26",
-      "city_key": "SFOHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 59,
-      "observed": 59,
-      "error": 0
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "AUSHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 25,
-      "observed": 29,
-      "error": -4
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "CHIHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 18,
-      "observed": 19,
-      "error": -1
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "DCHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 28,
-      "observed": 29,
-      "error": -1
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "DENHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 21,
-      "observed": 27,
-      "error": -6
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "LAXHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 68,
-      "observed": 69,
-      "error": -1
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "LVHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 56,
-      "observed": 58,
-      "error": -2
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "MIAHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 80,
-      "observed": 82,
-      "error": -2
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "NHIGH",
-      "source": "nws_hourly_max",
-      "forecast": 28,
-      "observed": 22,
-      "error": 6
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "NOLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 60,
-      "observed": 73,
-      "error": -13
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "PHLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 28,
-      "observed": 24,
-      "error": 4
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "SEAHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 45,
-      "observed": 45,
-      "error": 0
-    },
-    {
-      "date": "2026-01-25",
-      "city_key": "SFOHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 59,
-      "observed": 53,
-      "error": 6
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "AUSHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 34,
-      "observed": 45,
-      "error": -11
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "CHIHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 9,
-      "observed": 9,
-      "error": 0
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "DCHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 24,
-      "observed": 22,
-      "error": 2
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "DENHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 17,
-      "observed": 17,
-      "error": 0
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "LAXHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 66,
-      "observed": 63,
-      "error": 3
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "LVHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 60,
-      "observed": 62,
-      "error": -2
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "MIAHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 81,
-      "observed": 83,
-      "error": -2
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "NHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 16,
-      "observed": 17,
-      "error": -1
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "NOLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 62,
-      "observed": 68,
-      "error": -6
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "PHLHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 23,
-      "observed": 20,
-      "error": 3
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "SEAHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 47,
-      "observed": 44,
-      "error": 3
-    },
-    {
-      "date": "2026-01-24",
-      "city_key": "SFOHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 62,
-      "observed": 64,
-      "error": -2
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "AUSHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 69,
-      "observed": 68,
-      "error": 1
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "CHIHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": -1,
-      "observed": 8,
-      "error": -9
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "DCHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 46,
-      "observed": 48,
-      "error": -2
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "DENHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 18,
-      "observed": 16,
-      "error": 2
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "LAXHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 65,
-      "observed": 64,
-      "error": 1
-    },
-    {
-      "date": "2026-01-23",
-      "city_key": "LVHIGH",
-      "source": "mos_gfs_18z_archive",
-      "forecast": 63,
-      "observed": 59,
-      "error": 4
     }
   ]
 }
