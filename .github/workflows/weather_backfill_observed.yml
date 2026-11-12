@@ -1,0 +1,78 @@
+name: Weather - Backfill Observed Highs (Open-Meteo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      city:
+        description: "Optional city_key filter (blank = all)"
+        required: false
+        default: ""
+      start_date:
+        description: "Start date (YYYY-MM-DD)"
+        required: true
+      end_date:
+        description: "End date (YYYY-MM-DD)"
+        required: true
+      commit_results:
+        description: "Commit updated weather.db to repo"
+        type: choice
+        required: false
+        default: "false"
+        options: ["false", "true"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weather-backfill-observed
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r weather/requirements.txt
+
+      - name: Backfill observed highs (Open-Meteo)
+        run: |
+          ARGS=()
+          if [[ -n "${{ github.event.inputs.city }}" ]]; then
+            ARGS+=(--city "${{ github.event.inputs.city }}")
+          fi
+          ARGS+=(--start-date "${{ github.event.inputs.start_date }}")
+          ARGS+=(--end-date "${{ github.event.inputs.end_date }}")
+          python -m weather.scripts.backfill_observed_open_meteo "${ARGS[@]}"
+
+      - name: Upload updated DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-db-after-observed-backfill
+          path: weather/data/weather.db
+
+      - name: Commit changes (optional)
+        if: github.event.inputs.commit_results == 'true'
+        run: |
+          set -e
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add weather/data/weather.db
+            git commit -m "weather: backfill observed highs (open-meteo)"
+            git push
+          else
+            echo "No changes to commit."
+          fi
